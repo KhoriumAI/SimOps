@@ -246,7 +246,7 @@ class PaintbrushStrategy(BaseMeshGenerator):
 
         if target_elements:
             # Estimate base size from target element count
-            # Rough formula: num_elements ≈ (diagonal / element_size)^3
+            # Rough formula: num_elements ~= (diagonal / element_size)^3
             estimated_size = diagonal / (target_elements ** (1/3))
             self.log_message(f"  Calculated from target elements ({target_elements:,})")
         else:

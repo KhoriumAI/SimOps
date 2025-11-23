@@ -690,7 +690,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
             # Check for degenerate elements (skewness = 1.0)
             if metrics.get('skewness') and metrics['skewness']['max'] >= 0.99:
-                self.log_message("[!] Degenerate elements detected (skewness ≈ 1.0)")
+                self.log_message("[!] Degenerate elements detected (skewness ~= 1.0)")
                 # Still return the metrics for comparison, but mark as problematic
                 return True, metrics  # Allow comparison even if poor
 

@@ -861,7 +861,7 @@ class BoundaryLayerGenerator:
             try:
                 # Calculate first layer height if not provided
                 if first_layer_height is None:
-                    # y+ ≈ 1 for wall-resolved layers
+                    # y+ ~= 1 for wall-resolved layers
                     # For demo, use gap_width / (2 * n_layers)
                     auto_first_layer = channel.gap_width / (2 * channel.recommended_layers)
                 else:

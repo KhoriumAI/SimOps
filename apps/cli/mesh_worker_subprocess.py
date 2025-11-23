@@ -59,10 +59,66 @@ def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
             # Convert relative path to absolute path
             absolute_output_file = str(Path(result.output_file).resolve().absolute())
 
+            # Extract per-element quality for visualization
+            per_element_quality = {}
+            quality_metrics = {}
+            
+            # Try to get quality metrics from best attempt
+            if 'gmsh_sicn' in metrics:
+                quality_metrics['sicn_min'] = metrics['gmsh_sicn'].get('min', 0)
+                quality_metrics['sicn_avg'] = metrics['gmsh_sicn'].get('avg', 0)
+                quality_metrics['sicn_max'] = metrics['gmsh_sicn'].get('max', 1)
+                quality_metrics['sicn_10_percentile'] = metrics.get('quality_10_percentile', 0.3)
+            
+            if 'gmsh_gamma' in metrics:
+                quality_metrics['gamma_min'] = metrics['gmsh_gamma'].get('min', 0)
+                quality_metrics['gamma_avg'] = metrics['gmsh_gamma'].get('avg', 0)
+                quality_metrics['gamma_max'] = metrics['gmsh_gamma'].get('max', 1)
+            
+            if 'skewness' in metrics:
+                quality_metrics['skewness_min'] = metrics['skewness'].get('min', 0)
+                quality_metrics['skewness_avg'] = metrics['skewness'].get('avg', 0)
+                quality_metrics['skewness_max'] = metrics['skewness'].get('max', 1)
+            
+            if 'aspect_ratio' in metrics:
+                quality_metrics['aspect_ratio_min'] = metrics['aspect_ratio'].get('min', 1)
+                quality_metrics['aspect_ratio_avg'] = metrics['aspect_ratio'].get('avg', 1)
+                quality_metrics['aspect_ratio_max'] = metrics['aspect_ratio'].get('max', 1)
+
+            # Try to extract per-element quality from the mesh file
+            try:
+                import gmsh
+                gmsh.initialize()
+                gmsh.open(absolute_output_file)
+                
+                # Get 2D elements (triangles) which are displayed
+                element_types, element_tags, node_tags = gmsh.model.mesh.getElements(2)
+                
+                # Get quality for each triangle
+                all_qualities = []
+                for elem_type, tags, nodes in zip(element_types, element_tags, node_tags):
+                    if elem_type == 2:  # Triangle
+                        qualities = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                        for tag, q in zip(tags, qualities):
+                            per_element_quality[int(tag)] = float(q)
+                            all_qualities.append(q)
+                
+                # Calculate 10th percentile as threshold
+                if all_qualities:
+                    all_qualities.sort()
+                    idx_10 = int(len(all_qualities) * 0.10)
+                    quality_metrics['sicn_10_percentile'] = all_qualities[idx_10]
+                
+                gmsh.finalize()
+            except Exception as e:
+                print(f"Could not extract per-element quality: {e}")
+
             return {
                 'success': True,
                 'output_file': absolute_output_file,  # ABSOLUTE path for GUI
                 'metrics': metrics,
+                'quality_metrics': quality_metrics,  # Flattened metrics for GUI
+                'per_element_quality': per_element_quality,  # Per-triangle quality
                 'strategy': best_attempt.get('strategy', 'unknown'),
                 'score': best_attempt.get('score', 0),
                 'message': result.message,

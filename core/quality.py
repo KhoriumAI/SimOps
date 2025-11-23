@@ -113,7 +113,7 @@ class MeshQualityAnalyzer:
 
             if quality_metrics['gmsh_gamma']:
                 # Gamma is quality (0-1, higher better), convert to aspect-ratio-like (lower better)
-                # Approximate: aspect_ratio ≈ 1/gamma
+                # Approximate: aspect_ratio ~= 1/gamma
                 # Clamp to avoid division by zero and unrealistic values
                 gamma_min_safe = max(quality_metrics['gmsh_gamma']['min'], 0.001)
                 gamma_max_safe = max(quality_metrics['gmsh_gamma']['max'], 0.001)
