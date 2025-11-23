@@ -361,8 +361,26 @@ class MeshWorker:
 
             # Prepare command with quality parameters
             cmd = [sys.executable, str(worker_script), cad_file]
+            
+            # Use a temporary file for configuration to avoid command line length limits
+            # This is critical for paintbrush feature which can have large data
+            self.temp_config_file = None
             if quality_params:
-                cmd.extend(["--quality-params", json.dumps(quality_params)])
+                try:
+                    # Create a named temp file that persists after close
+                    fd, config_path = tempfile.mkstemp(suffix='.json', prefix='mesh_config_')
+                    os.close(fd)
+                    
+                    with open(config_path, 'w') as f:
+                        json.dump(quality_params, f)
+                    
+                    cmd.extend(["--config-file", config_path])
+                    self.temp_config_file = config_path
+                    self.signals.log.emit(f"[DEBUG] Wrote config to: {config_path}")
+                except Exception as e:
+                    self.signals.log.emit(f"[ERROR] Failed to create config file: {e}")
+                    # Fallback to CLI args if file creation fails (though unlikely to work if too long)
+                    cmd.extend(["--quality-params", json.dumps(quality_params)])
 
             self.signals.log.emit(f"[DEBUG] Executing command: {' '.join(cmd)}")
             print(f"[DEBUG] Executing command: {' '.join(cmd)}")
@@ -396,6 +414,12 @@ class MeshWorker:
             self.signals.finished.emit(False, {"error": str(e)})
         finally:
             self.is_running = False
+            # Clean up temp config file
+            if hasattr(self, 'temp_config_file') and self.temp_config_file and os.path.exists(self.temp_config_file):
+                try:
+                    os.remove(self.temp_config_file)
+                except:
+                    pass
 
     def stop(self):
         """Stop the running mesh generation subprocess"""
@@ -1140,6 +1164,7 @@ class VTK3DViewer(QFrame):
     def update_quality_visualization(self, metric="SICN (Min)", opacity=1.0, min_val=0.0, max_val=1.0):
         """
         Update visualization based on selected quality metric and filters.
+        Rebuilds the displayed mesh to hide elements outside the range.
         """
         if not self.current_poly_data or not self.current_actor:
             return
@@ -1147,17 +1172,15 @@ class VTK3DViewer(QFrame):
         # Update opacity
         self.current_actor.GetProperty().SetOpacity(opacity)
         
-        # If no quality data, just return (opacity update is still valid)
+        # If no quality data, just return
         if not hasattr(self, 'current_quality_data') or not self.current_quality_data:
             self.vtk_widget.GetRenderWindow().Render()
             return
 
         # Determine which data to use
-        # Default to per_element_quality (usually SICN)
-        quality_map = self.current_quality_data.get('per_element_quality', {})
+        quality_map = {}
+        metric_key = 'per_element_quality' # Default (SICN)
         
-        # Try to find other metrics if requested
-        metric_key = 'per_element_quality' # Default
         if "Gamma" in metric:
             metric_key = 'per_element_gamma'
         elif "Skewness" in metric:
@@ -1168,12 +1191,18 @@ class VTK3DViewer(QFrame):
         if metric_key in self.current_quality_data:
             quality_map = self.current_quality_data[metric_key]
         elif metric != "SICN (Min)":
-            print(f"[WARN] Metric '{metric}' not found in quality data, defaulting to SICN")
+            print(f"[WARN] Metric '{metric}' ({metric_key}) not found, defaulting to SICN")
+            quality_map = self.current_quality_data.get('per_element_quality', {})
             
         if not quality_map:
             return
 
-        # Create colors based on quality values
+        # Create new PolyData for filtered mesh
+        filtered_poly_data = vtk.vtkPolyData()
+        filtered_poly_data.SetPoints(self.current_poly_data.GetPoints()) # Share points
+        
+        # New cell array and colors
+        new_cells = vtk.vtkCellArray()
         colors = vtk.vtkUnsignedCharArray()
         colors.SetNumberOfComponents(3)
         colors.SetName("Colors")
@@ -1196,34 +1225,90 @@ class VTK3DViewer(QFrame):
                 b = hue_to_rgb(p, q, h - 1/3)
             return int(r * 255), int(g * 255), int(b * 255)
 
-        # Iterate through surface elements
+        # Iterate through ORIGINAL elements to filter
         if not self.current_mesh_elements:
             return
             
         visible_count = 0
         filtered_count = 0
         
+        # Get global range for this metric for consistent coloring
+        all_vals = [float(v) for v in quality_map.values()]
+        if all_vals:
+            global_min, global_max = min(all_vals), max(all_vals)
+            val_range = global_max - global_min if global_max > global_min else 1.0
+        else:
+            global_min, global_max, val_range = 0.0, 1.0, 1.0
+
+        # Rebuild cells
+        # Note: self.current_mesh_elements contains ALL elements (tets + tris)
+        # We only want to display triangles (surface)
+        # But for "seeing inside", we might want to display tets? 
+        # No, usually we display the surface triangles. 
+        # If the user wants to see "internal tets", we would need to extract faces of internal tets.
+        # For now, let's stick to filtering the SURFACE mesh.
+        # If the surface triangle is hidden, we see through it.
+        
+        # We need to map from element ID to VTK cell index? 
+        # No, we just rebuild the vtkCellArray from scratch based on visible elements.
+        
         for element in self.current_mesh_elements:
             if element['type'] == 'triangle':
                 eid = str(element['id'])
+                # Try int key too
                 val = quality_map.get(eid)
+                if val is None:
+                    val = quality_map.get(int(eid))
                 
                 if val is not None:
                     if min_val <= val <= max_val:
-                        hue = val * 0.66
+                        # Visible! Add cell and color
+                        
+                        # Get node indices for this triangle
+                        node_ids = element['nodes']
+                        vtk_ids = [self.current_node_map[nid] for nid in node_ids]
+                        
+                        tri = vtk.vtkTriangle()
+                        for i, vid in enumerate(vtk_ids):
+                            tri.GetPointIds().SetId(i, vid)
+                        new_cells.InsertNextCell(tri)
+                        
+                        # Calculate color
+                        # Normalize to 0-1 based on global range
+                        norm = (val - global_min) / val_range
+                        norm = max(0.0, min(1.0, norm))
+                        
+                        # Color map: Red (0.0) -> Green (0.33)
+                        # For Skewness/Aspect Ratio, lower is better (Green), higher is worse (Red)
+                        # For SICN/Gamma, higher is better (Green), lower is worse (Red)
+                        
+                        if "Skewness" in metric or "Aspect" in metric:
+                            # 0 (Good/Green) -> 1 (Bad/Red)
+                            # Invert norm so 0->Green, 1->Red
+                            hue = (1.0 - norm) * 0.33
+                        else:
+                            # 0 (Bad/Red) -> 1 (Good/Green)
+                            hue = norm * 0.33
+                            
                         r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
                         colors.InsertNextTuple3(r, g, b)
                         visible_count += 1
                     else:
-                        colors.InsertNextTuple3(200, 200, 200)
                         filtered_count += 1
-                else:
-                    colors.InsertNextTuple3(255, 255, 255)
 
-        self.current_poly_data.GetCellData().SetScalars(colors)
-        self.current_poly_data.Modified()
+        filtered_poly_data.SetPolys(new_cells)
+        filtered_poly_data.GetCellData().SetScalars(colors)
+        
+        # Update mapper
+        mapper = self.current_actor.GetMapper()
+        mapper.SetInputData(filtered_poly_data)
+        mapper.ScalarVisibilityOn() # CRITICAL: Ensure colors are shown
+        mapper.SetScalarModeToUseCellData()
+        mapper.SetColorModeToDirectScalars() # Use RGB values directly
+        
         self.vtk_widget.GetRenderWindow().Render()
         print(f"[DEBUG] Updated visualization: {visible_count} visible, {filtered_count} filtered")
+        print(f"[DEBUG] Metric: {metric}, Range: {min_val}-{max_val}, Opacity: {opacity}")
 
     def create_brush_cursor(self, radius: float):
         """Create or update brush cursor sphere"""
@@ -2594,43 +2679,28 @@ class ModernMeshGenGUI(QMainWindow):
         metric_layout.addWidget(self.viz_metric_combo, 1)
         viz_layout.addLayout(metric_layout)
 
-        # Opacity Slider
-        opacity_layout = QVBoxLayout()
-        opacity_layout.setSpacing(3)
-        
-        opacity_label_layout = QHBoxLayout()
+        # Opacity Control (SpinBox)
+        opacity_layout = QHBoxLayout()
         opacity_label = QLabel("Opacity:")
         opacity_label.setStyleSheet("font-size: 11px; color: #495057;")
-        opacity_label_layout.addWidget(opacity_label)
+        opacity_layout.addWidget(opacity_label)
         
-        self.viz_opacity_value = QLabel("100%")
-        self.viz_opacity_value.setStyleSheet("font-size: 11px; color: #007bff; font-weight: 600;")
-        self.viz_opacity_value.setAlignment(Qt.AlignRight)
-        opacity_label_layout.addWidget(self.viz_opacity_value)
-        opacity_layout.addLayout(opacity_label_layout)
-
-        self.viz_opacity_slider = QSlider(Qt.Horizontal)
-        self.viz_opacity_slider.setRange(0, 100)
-        self.viz_opacity_slider.setValue(100)
-        self.viz_opacity_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #e9ecef;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #007bff;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #0056b3;
+        self.viz_opacity_spin = QDoubleSpinBox()
+        self.viz_opacity_spin.setRange(0.0, 1.0)
+        self.viz_opacity_spin.setSingleStep(0.1)
+        self.viz_opacity_spin.setValue(1.0)
+        self.viz_opacity_spin.setDecimals(1)
+        self.viz_opacity_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
             }
         """)
-        self.viz_opacity_slider.valueChanged.connect(self.on_viz_opacity_changed)
-        opacity_layout.addWidget(self.viz_opacity_slider)
+        self.viz_opacity_spin.valueChanged.connect(self.on_viz_opacity_changed)
+        opacity_layout.addWidget(self.viz_opacity_spin, 1)
         viz_layout.addLayout(opacity_layout)
 
         # Filter Range (Min/Max)
@@ -3055,33 +3125,37 @@ class ModernMeshGenGUI(QMainWindow):
             offset=value
         )
 
-    def on_viz_metric_changed(self, metric_name):
-        """Handle quality metric selection change"""
-        self.viewer.update_quality_visualization(
-            metric=metric_name,
-            opacity=self.viz_opacity_slider.value() / 100.0,
-            min_val=self.viz_min_spin.value(),
-            max_val=self.viz_max_spin.value()
-        )
+# --- MISSING VISUALIZATION HANDLERS ---
+    def on_viz_metric_changed(self, text):
+        """Handle metric selection change (SICN, Gamma, etc.)"""
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.update_quality_visualization(
+                metric=text,
+                opacity=self.viz_opacity_spin.value(),
+                min_val=self.viz_min_spin.value(),
+                max_val=self.viz_max_spin.value()
+            )
 
     def on_viz_opacity_changed(self, value):
-        """Handle opacity slider change"""
-        self.viz_opacity_value.setText(f"{value}%")
-        self.viewer.update_quality_visualization(
-            metric=self.viz_metric_combo.currentText(),
-            opacity=value / 100.0,
-            min_val=self.viz_min_spin.value(),
-            max_val=self.viz_max_spin.value()
-        )
+        """Handle opacity change"""
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.update_quality_visualization(
+                metric=self.viz_metric_combo.currentText(),
+                opacity=value,
+                min_val=self.viz_min_spin.value(),
+                max_val=self.viz_max_spin.value()
+            )
 
     def on_viz_range_changed(self, value):
-        """Handle min/max range spinbox change"""
-        self.viewer.update_quality_visualization(
-            metric=self.viz_metric_combo.currentText(),
-            opacity=self.viz_opacity_slider.value() / 100.0,
-            min_val=self.viz_min_spin.value(),
-            max_val=self.viz_max_spin.value()
-        )
+        """Handle min/max slider change"""
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.update_quality_visualization(
+                metric=self.viz_metric_combo.currentText(),
+                opacity=self.viz_opacity_spin.value(),
+                min_val=self.viz_min_spin.value(),
+                max_val=self.viz_max_spin.value()
+            )
+    # --------------------------------------
 
     def load_cad_file(self):
         # Kill any running mesh generation workers before loading new CAD

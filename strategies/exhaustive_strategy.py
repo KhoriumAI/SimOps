@@ -250,6 +250,70 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
     # Strategy implementations
 
+    def _apply_painted_refinement(self):
+        """
+        Apply mesh refinement based on painted regions using Gmsh fields.
+        Uses MathEval fields to avoid modifying geometry.
+        """
+        if not hasattr(self.config, 'painted_regions') or not self.config.painted_regions:
+            return
+
+        self.log_message(f"Applying paintbrush refinement to {len(self.config.painted_regions)} regions...")
+        
+        try:
+            diagonal = self.geometry_info.get('diagonal', 1.0)
+            base_size = diagonal / 20.0 # Approximate base size
+            
+            fields = []
+            
+            for i, region in enumerate(self.config.painted_regions):
+                center = region.get('center')
+                radius = region.get('radius')
+                
+                if not center or not radius:
+                    continue
+                    
+                xc, yc, zc = center
+                
+                # 1. Create distance field using MathEval
+                # F = Sqrt((x-xc)^2 + (y-yc)^2 + (z-zc)^2)
+                dist_field = gmsh.model.mesh.field.add("MathEval")
+                expr = f"Sqrt((x-{xc})*(x-{xc}) + (y-{yc})*(y-{yc}) + (z-{zc})*(z-{zc}))"
+                gmsh.model.mesh.field.setString(dist_field, "F", expr)
+                
+                # 2. Create Threshold field
+                thresh_field = gmsh.model.mesh.field.add("Threshold")
+                gmsh.model.mesh.field.setNumber(thresh_field, "IField", dist_field)
+                
+                # Refinement parameters
+                # SizeMin: Size inside the painted region (very fine)
+                # SizeMax: Size outside (default)
+                # DistMin: Radius where SizeMin applies
+                # DistMax: Radius where transition to SizeMax ends
+                
+                # Refine factor: how much finer than base size?
+                # Let's say 5x finer for now, or use a fixed small value
+                target_min = base_size / 5.0
+                
+                gmsh.model.mesh.field.setNumber(thresh_field, "SizeMin", target_min)
+                gmsh.model.mesh.field.setNumber(thresh_field, "SizeMax", base_size)
+                gmsh.model.mesh.field.setNumber(thresh_field, "DistMin", radius * 0.8)
+                gmsh.model.mesh.field.setNumber(thresh_field, "DistMax", radius * 1.5)
+                
+                fields.append(thresh_field)
+                
+            if fields:
+                # 3. Combine all fields using Min
+                min_field = gmsh.model.mesh.field.add("Min")
+                gmsh.model.mesh.field.setNumbers(min_field, "FieldsList", fields)
+                
+                # Set as background mesh
+                gmsh.model.mesh.field.setAsBackgroundMesh(min_field)
+                self.log_message(f"[OK] Applied refinement fields for {len(fields)} regions")
+                
+        except Exception as e:
+            self.log_message(f"[!] Failed to apply painted refinement: {e}")
+
     def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
         """Standard Delaunay with maximum optimization"""
         self.log_message("Tetrahedral Delaunay with aggressive optimization...")
@@ -257,6 +321,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay 2D
         gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay 3D
         gmsh.option.setNumber("Mesh.ElementOrder", 2)  # Quadratic
+
+        # Apply paintbrush refinement if available
+        self._apply_painted_refinement()
 
         # Aggressive optimization
         gmsh.option.setNumber("Mesh.Optimize", 1)
@@ -273,6 +340,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # Frontal-Delaunay 3D
         gmsh.option.setNumber("Mesh.ElementOrder", 2)
 
+        # Apply paintbrush refinement if available
+        self._apply_painted_refinement()
+
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.Smoothing", 15)
 
@@ -286,6 +356,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.Algorithm3D", 4)  # HXT
         gmsh.option.setNumber("Mesh.ElementOrder", 2)
 
+        # Apply paintbrush refinement if available
+        self._apply_painted_refinement()
+
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.Smoothing", 15)
 
@@ -298,6 +371,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 7)  # MMG3D
         gmsh.option.setNumber("Mesh.ElementOrder", 2)
+
+        # Apply paintbrush refinement if available
+        self._apply_painted_refinement()
 
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.Smoothing", 15)

@@ -7,6 +7,7 @@ Gmsh uses signals internally which only work in the main thread.
 """
 
 import sys
+import os
 import json
 from pathlib import Path
 from typing import Dict
@@ -20,13 +21,14 @@ from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
 from core.config import Config
 
 
-def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
+def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
     Generate mesh in subprocess
 
     Args:
         cad_file: Path to CAD file
         output_dir: Optional output directory
+        quality_params: Optional dictionary of quality parameters (including painted regions)
 
     Returns:
         Dict with success status and results
@@ -34,6 +36,23 @@ def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
     try:
         # Initialize generator
         config = Config()
+        
+        # Apply quality params to config
+        if quality_params:
+            # Inject painted regions directly into config object (monkey-patching)
+            # This allows the generator to access it without changing Config structure definition
+            if 'painted_regions' in quality_params:
+                config.painted_regions = quality_params['painted_regions']
+                print(f"[DEBUG] Injected {len(config.painted_regions)} painted regions into config")
+                
+            # Update other mesh parameters if present
+            if 'quality_preset' in quality_params:
+                print(f"[DEBUG] Using quality preset: {quality_params['quality_preset']}")
+                
+            # Update target elements if present (could be used by generator)
+            if 'target_elements' in quality_params:
+                config.target_elements = quality_params['target_elements']
+
         generator = ExhaustiveMeshGenerator(config)
 
         # Determine output folders (organized structure)
@@ -109,40 +128,60 @@ def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
                 entities_3d = gmsh_reload.model.getEntities(3)
                 print(f"[DEBUG] Entities: 0D={len(entities_0d)}, 1D={len(entities_1d)}, 2D={len(entities_2d)}, 3D={len(entities_3d)}")
                 
-                # Get 2D elements (triangles) - these are displayed in the GUI
+                # Initialize quality maps
+                per_element_quality = {} # Default (SICN)
+                per_element_gamma = {}
+                per_element_skewness = {}
+                per_element_aspect_ratio = {}
+                
+                # Get 2D elements (triangles)
                 tri_types, tri_tags, tri_nodes = gmsh_reload.model.mesh.getElements(2)
-                print(f"[DEBUG] Found {len(tri_types)} element type(s) in 2D")
-                for i, (etype, tags) in enumerate(zip(tri_types, tri_tags)):
-                    print(f"[DEBUG]   Type {i}: elem_type={etype}, count={len(tags)}")
                 triangle_count = 0
                 for elem_type, tags in zip(tri_types, tri_tags):
-                    # Type 2 = linear triangle (3 nodes)
-                    # Type 9 = quadratic triangle (6 nodes)
-                    if elem_type in [2, 9]:
+                    if elem_type in [2, 9]: # Linear & Quadratic Triangles
                         try:
-                            qualities = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                            for tag, q in zip(tags, qualities):
-                                per_element_quality[int(tag)] = float(q)
+                            # 1. SICN (Default)
+                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "sicn")
+                            
+                            # 2. Gamma
+                            gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                            
+                            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                tag_int = int(tag)
+                                per_element_quality[tag_int] = float(sicn)
+                                per_element_gamma[tag_int] = float(gamma)
+                                # Derived metrics matching ExhaustiveStrategy logic
+                                per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                
                             triangle_count += len(tags)
-                            print(f"[DEBUG] Extracted {len(tags)} triangle qualities (type {elem_type})")
+                            print(f"[DEBUG] Extracted qualities for {len(tags)} triangles (type {elem_type})")
                         except Exception as e:
                             print(f"[DEBUG] Error getting triangle qualities: {e}")
                 
-                # Get 3D elements (tets) - for volume quality
+                # Get 3D elements (tets)
                 tet_types, tet_tags, tet_nodes = gmsh_reload.model.mesh.getElements(3)
                 tet_count = 0
-                all_qualities = []
+                all_qualities = [] # For statistics (SICN)
+                
                 for elem_type, tags in zip(tet_types, tet_tags):
-                    # Type 4 = linear tetrahe dron (4 nodes)
-                    # Type 11 = quadratic tetrahedron (10 nodes)
-                    if elem_type in [4, 11]:
+                    if elem_type in [4, 11]: # Linear & Quadratic Tets
                         try:
-                            qualities = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                            for tag, q in zip(tags, qualities):
-                                per_element_quality[int(tag)] = float(q)
-                                all_qualities.append(q)
+                            # 1. SICN
+                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "sicn")
+                            # 2. Gamma
+                            gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                            
+                            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                tag_int = int(tag)
+                                per_element_quality[tag_int] = float(sicn)
+                                per_element_gamma[tag_int] = float(gamma)
+                                per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                all_qualities.append(sicn)
+                                
                             tet_count += len(tags)
-                            print(f"[DEBUG] Extracted {len(tags)} tet qualities (type {elem_type})")
+                            print(f"[DEBUG] Extracted qualities for {len(tags)} tets (type {elem_type})")
                         except Exception as e:
                             print(f"[DEBUG] Error getting tet qualities: {e}")
                 
@@ -168,7 +207,10 @@ def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
                 'output_file': absolute_output_file,  # ABSOLUTE path for GUI
                 'metrics': metrics,
                 'quality_metrics': quality_metrics,  # Flattened metrics for GUI
-                'per_element_quality': per_element_quality,  # Per-element quality
+                'per_element_quality': per_element_quality,  # SICN (Default)
+                'per_element_gamma': per_element_gamma,
+                'per_element_skewness': per_element_skewness,
+                'per_element_aspect_ratio': per_element_aspect_ratio,
                 'strategy': best_attempt.get('strategy', 'unknown'),
                 'score': best_attempt.get('score', 0),
                 'message': result.message,
@@ -191,16 +233,36 @@ def generate_mesh(cad_file: str, output_dir: str = None) -> Dict:
 
 
 if __name__ == "__main__":
-    # Read arguments from command line
-    if len(sys.argv) < 2:
-        print(json.dumps({'success': False, 'error': 'No CAD file specified'}))
-        sys.exit(1)
-
-    cad_file = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
-
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Mesh Generation Worker')
+    parser.add_argument('cad_file', help='Path to CAD file')
+    parser.add_argument('output_dir', nargs='?', help='Output directory')
+    parser.add_argument('--config-file', help='Path to configuration JSON file')
+    parser.add_argument('--quality-params', help='JSON string of quality parameters (legacy)')
+    
+    args = parser.parse_args()
+    
+    cad_file = args.cad_file
+    output_dir = args.output_dir
+    
+    # Load quality params
+    quality_params = {}
+    if args.config_file and os.path.exists(args.config_file):
+        try:
+            with open(args.config_file, 'r') as f:
+                quality_params = json.load(f)
+        except Exception as e:
+            print(json.dumps({'success': False, 'error': f'Failed to load config file: {e}'}))
+            sys.exit(1)
+    elif args.quality_params:
+        try:
+            quality_params = json.loads(args.quality_params)
+        except:
+            pass
+            
     # Generate mesh
-    result = generate_mesh(cad_file, output_dir)
+    result = generate_mesh(cad_file, output_dir, quality_params)
 
     # Output result as JSON
     print(json.dumps(result))
