@@ -43,7 +43,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QProgressBar, QGroupBox,
     QSplitter, QFileDialog, QFrame, QScrollArea, QGridLayout,
-    QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox
+    QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QPalette, QColor
@@ -485,10 +485,16 @@ class VTK3DViewer(QFrame):
 
         self.current_actor = None
         self.current_poly_data = None  # Store unclipped mesh data
+        self.current_mesh_nodes = None  # Store nodes dict {id: [x,y,z]}
+        self.current_mesh_elements = None  # Store all elements list
+        self.current_node_map = None  # Store node_id -> vtk_index mapping
+        self.current_tetrahedra = None  # Store tetrahedra separately for cross-section
+        self.current_volumetric_grid = None  # Store full volumetric grid for 3D clipping
         self.clipping_enabled = False
         self.clip_plane = None
         self.clip_axis = 'x'
         self.clip_offset = 0.0  # -50 to +50 percentage
+        self.cross_section_actor = None  # Actor for cross-section visualization
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -868,6 +874,165 @@ class VTK3DViewer(QFrame):
         else:
             self._remove_clipping()
     
+    def _signed_distance_to_plane(self, point, plane_origin, plane_normal):
+        """
+        Compute signed distance from a point to a plane.
+        Positive = point is on the side the normal points to.
+        Negative = point is on the opposite side.
+        """
+        import numpy as np
+        diff = np.array(point) - np.array(plane_origin)
+        return np.dot(diff, plane_normal)
+    
+    def _get_tets_intersecting_plane(self, plane_origin, plane_normal):
+        """
+        Find all tetrahedra that intersect with the given plane.
+        A tet intersects if its vertices are on opposite sides of the plane.
+        
+        Returns:
+            List of tet elements that intersect the plane
+        """
+        if not self.current_tetrahedra or not self.current_mesh_nodes:
+            return []
+        
+        intersecting_tets = []
+        
+        for tet in self.current_tetrahedra:
+            # Get the 4 vertices of this tet
+            node_ids = tet['nodes']
+            vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
+            
+            # Compute signed distance for each vertex
+            distances = [self._signed_distance_to_plane(v, plane_origin, plane_normal) 
+                        for v in vertices]
+            
+            # Check if vertices are on opposite sides
+            # (i.e., distances have different signs)
+            has_positive = any(d > 1e-10 for d in distances)
+            has_negative = any(d < -1e-10 for d in distances)
+            
+            if has_positive and has_negative:
+                # Tet crosses the plane
+                intersecting_tets.append(tet)
+        
+        return intersecting_tets
+    
+    def _intersect_tet_edge_with_plane(self, v1, v2, plane_origin, plane_normal):
+        """
+        Find the intersection point of a line segment (v1-v2) with a plane.
+        Returns None if no intersection, otherwise returns the intersection point.
+        """
+        import numpy as np
+        
+        # Compute signed distances
+        d1 = self._signed_distance_to_plane(v1, plane_origin, plane_normal)
+        d2 = self._signed_distance_to_plane(v2, plane_origin, plane_normal)
+        
+        # Check if edge crosses plane (different signs)
+        if d1 * d2 > 0:
+            return None  # Both on same side
+        
+        # Linear interpolation to find intersection point
+        # t is the parameter: intersection_point = v1 + t * (v2 - v1)
+        t = d1 / (d1 - d2)
+        
+        v1_arr = np.array(v1)
+        v2_arr = np.array(v2)
+        intersection = v1_arr + t * (v2_arr - v1_arr)
+        
+        return intersection.tolist()
+    
+    def _intersect_tet_with_plane(self, tet, plane_origin, plane_normal):
+        """
+        Compute the intersection polygon of a tetrahedron with a plane.
+        
+        Returns:
+            List of 3D points forming the intersection polygon (typically 3 or 4 points)
+        """
+        node_ids = tet['nodes']
+        vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
+        
+        # A tetrahedron has 6 edges: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+        edges = [
+            (0, 1), (0, 2), (0, 3),
+            (1, 2), (1, 3), (2, 3)
+        ]
+        
+        intersection_points = []
+        for i, j in edges:
+            point = self._intersect_tet_edge_with_plane(
+                vertices[i], vertices[j], plane_origin, plane_normal
+            )
+            if point is not None:
+                intersection_points.append(point)
+        
+        return intersection_points
+    
+    def _generate_cross_section_mesh(self, plane_origin, plane_normal):
+        """
+        Generate VTK PolyData for the cross-section by intersecting all tets with the plane.
+        
+        Returns:
+            vtk.vtkPolyData containing the cross-section geometry
+        """
+        import numpy as np
+        
+        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
+        
+        if not intersecting_tets:
+            # No intersection, return empty polydata
+            return vtk.vtkPolyData()
+        
+        # Collect all intersection polygons
+        all_points = []
+        all_triangles = []
+        point_offset = 0
+        
+        for tet in intersecting_tets:
+            polygon_points = self._intersect_tet_with_plane(tet, plane_origin, plane_normal)
+            
+            if len(polygon_points) < 3:
+                continue  # Not enough points to form a polygon
+            
+            # Add points to the global list
+            num_points = len(polygon_points)
+            all_points.extend(polygon_points)
+            
+            # Triangulate the polygon
+            # For 3 points: single triangle
+            # For 4 points: split into 2 triangles
+            if num_points == 3:
+                all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
+            elif num_points == 4:
+                # Order points in a consistent way for better visualization
+                # Create two triangles: (0,1,2) and (0,2,3)
+                all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
+                all_triangles.append([point_offset, point_offset + 2, point_offset + 3])
+            else:
+                # For more points (rare), use a simple fan triangulation
+                for i in range(1, num_points - 1):
+                    all_triangles.append([point_offset, point_offset + i, point_offset + i + 1])
+            
+            point_offset += num_points
+        
+        # Create VTK PolyData
+        points = vtk.vtkPoints()
+        for pt in all_points:
+            points.InsertNextPoint(pt)
+        
+        triangles = vtk.vtkCellArray()
+        for tri in all_triangles:
+            triangle = vtk.vtkTriangle()
+            for i, idx in enumerate(tri):
+                triangle.GetPointIds().SetId(i, idx)
+            triangles.InsertNextCell(triangle)
+        
+        poly_data = vtk.vtkPolyData()
+        poly_data.SetPoints(points)
+        poly_data.SetPolys(triangles)
+        
+        return poly_data
+    
     def _apply_clipping(self):
         """Apply capped cross-section cut to current mesh"""
         if not self.current_poly_data or not self.current_actor:
@@ -903,21 +1068,57 @@ class VTK3DViewer(QFrame):
         planes = vtk.vtkPlaneCollection()
         planes.AddItem(plane)
         
-        # Use vtkClipClosedSurface for capped cut
+        # --- NEW: Generate and display internal cross-section ---
+        # Generate cross-section geometry from tetrahedra
+        cross_section_poly = self._generate_cross_section_mesh(origin, normal)
+        has_cross_section = cross_section_poly.GetNumberOfCells() > 0
+        
+        # Use vtkClipClosedSurface for the outer shell
+        # We ALWAYS want the outer shell clipped
         clipper = vtk.vtkClipClosedSurface()
         clipper.SetInputData(self.current_poly_data)
         clipper.SetClippingPlanes(planes)
         clipper.SetActivePlaneId(0)
         clipper.SetScalarModeToColors()
-        clipper.SetClipColor(0.9, 0.4, 0.4)  # Reddish cap
-        clipper.SetBaseColor(0.7, 0.85, 0.95)  # Light blue mesh
+        clipper.SetClipColor(0.9, 0.4, 0.4)
+        clipper.SetBaseColor(0.7, 0.85, 0.95)
         clipper.SetActivePlaneColor(0.9, 0.4, 0.4)
-        clipper.GenerateFacesOn()
+        
+        # Only generate standard cap if we DON'T have a cross-section to show
+        # This prevents Z-fighting between the cap and our custom cross-section
+        clipper.SetGenerateFaces(not has_cross_section)
         clipper.Update()
         
         # Update actor with clipped mesh
         mapper = self.current_actor.GetMapper()
         mapper.SetInputData(clipper.GetOutput())
+        
+        if has_cross_section:
+            # Create mapper for cross-section
+            cs_mapper = vtk.vtkPolyDataMapper()
+            cs_mapper.SetInputData(cross_section_poly)
+            
+            # Create actor if it doesn't exist
+            if not self.cross_section_actor:
+                self.cross_section_actor = vtk.vtkActor()
+                self.renderer.AddActor(self.cross_section_actor)
+            
+            self.cross_section_actor.SetMapper(cs_mapper)
+            
+            # Style the cross-section
+            # Make it slightly distinct from the cap color
+            self.cross_section_actor.GetProperty().SetColor(0.8, 0.2, 0.2)  # Darker red
+            self.cross_section_actor.GetProperty().SetOpacity(1.0)  # Opaque
+            self.cross_section_actor.GetProperty().SetLighting(False)  # Flat color
+            self.cross_section_actor.GetProperty().EdgeVisibilityOn()
+            self.cross_section_actor.GetProperty().SetEdgeColor(0.2, 0.0, 0.0)  # Dark red edges
+            self.cross_section_actor.GetProperty().SetLineWidth(1.5)
+            self.cross_section_actor.VisibilityOn()
+            
+            print(f"[DEBUG] Displaying cross-section with {cross_section_poly.GetNumberOfCells()} triangles")
+        else:
+            if self.cross_section_actor:
+                self.cross_section_actor.VisibilityOff()
         
         self.vtk_widget.GetRenderWindow().Render()
     
@@ -930,7 +1131,99 @@ class VTK3DViewer(QFrame):
         mapper = self.current_actor.GetMapper()
         mapper.SetInputData(self.current_poly_data)
         
+        # Hide cross-section actor
+        if self.cross_section_actor:
+            self.cross_section_actor.VisibilityOff()
+        
         self.vtk_widget.GetRenderWindow().Render()
+
+    def update_quality_visualization(self, metric="SICN (Min)", opacity=1.0, min_val=0.0, max_val=1.0):
+        """
+        Update visualization based on selected quality metric and filters.
+        """
+        if not self.current_poly_data or not self.current_actor:
+            return
+            
+        # Update opacity
+        self.current_actor.GetProperty().SetOpacity(opacity)
+        
+        # If no quality data, just return (opacity update is still valid)
+        if not hasattr(self, 'current_quality_data') or not self.current_quality_data:
+            self.vtk_widget.GetRenderWindow().Render()
+            return
+
+        # Determine which data to use
+        # Default to per_element_quality (usually SICN)
+        quality_map = self.current_quality_data.get('per_element_quality', {})
+        
+        # Try to find other metrics if requested
+        metric_key = 'per_element_quality' # Default
+        if "Gamma" in metric:
+            metric_key = 'per_element_gamma'
+        elif "Skewness" in metric:
+            metric_key = 'per_element_skewness'
+        elif "Aspect" in metric:
+            metric_key = 'per_element_aspect_ratio'
+            
+        if metric_key in self.current_quality_data:
+            quality_map = self.current_quality_data[metric_key]
+        elif metric != "SICN (Min)":
+            print(f"[WARN] Metric '{metric}' not found in quality data, defaulting to SICN")
+            
+        if not quality_map:
+            return
+
+        # Create colors based on quality values
+        colors = vtk.vtkUnsignedCharArray()
+        colors.SetNumberOfComponents(3)
+        colors.SetName("Colors")
+        
+        # Helper for HSL to RGB
+        def hsl_to_rgb(h, s, l):
+            def hue_to_rgb(p, q, t):
+                if t < 0: t += 1
+                if t > 1: t -= 1
+                if t < 1/6: return p + (q - p) * 6 * t
+                if t < 1/2: return q
+                if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                return p
+            if s == 0: r = g = b = l
+            else:
+                q = l * (1 + s) if l < 0.5 else l + s - l * s
+                p = 2 * l - q
+                r = hue_to_rgb(p, q, h + 1/3)
+                g = hue_to_rgb(p, q, h)
+                b = hue_to_rgb(p, q, h - 1/3)
+            return int(r * 255), int(g * 255), int(b * 255)
+
+        # Iterate through surface elements
+        if not self.current_mesh_elements:
+            return
+            
+        visible_count = 0
+        filtered_count = 0
+        
+        for element in self.current_mesh_elements:
+            if element['type'] == 'triangle':
+                eid = str(element['id'])
+                val = quality_map.get(eid)
+                
+                if val is not None:
+                    if min_val <= val <= max_val:
+                        hue = val * 0.66
+                        r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                        colors.InsertNextTuple3(r, g, b)
+                        visible_count += 1
+                    else:
+                        colors.InsertNextTuple3(200, 200, 200)
+                        filtered_count += 1
+                else:
+                    colors.InsertNextTuple3(255, 255, 255)
+
+        self.current_poly_data.GetCellData().SetScalars(colors)
+        self.current_poly_data.Modified()
+        self.vtk_widget.GetRenderWindow().Render()
+        print(f"[DEBUG] Updated visualization: {visible_count} visible, {filtered_count} filtered")
 
     def create_brush_cursor(self, radius: float):
         """Create or update brush cursor sphere"""
@@ -1311,6 +1604,10 @@ except Exception as e:
                         if not result:
                             result = {}
                         result['per_element_quality'] = surface_quality.get('per_element_quality', {})
+                        
+                        # Store full quality data for visualization switching
+                        self.current_quality_data = surface_quality
+                        
                         result['quality_metrics'] = {
                             'sicn_10_percentile': surface_quality.get('quality_threshold_10', 0.3),
                             'sicn_min': surface_quality.get('statistics', {}).get('min_quality', 0.0),
@@ -1325,6 +1622,8 @@ except Exception as e:
                         traceback.print_exc()
             else:
                 print(f"[DEBUG] Quality data already in result dict")
+                # Ensure we store it for visualization
+                self.current_quality_data = result
 
             print(f"[DEBUG] Creating VTK data structures...")
             points = vtk.vtkPoints()
@@ -1365,8 +1664,29 @@ except Exception as e:
             self.current_mesh_nodes = nodes
             self.current_mesh_elements = elements
             self.current_node_map = node_map
-
+            
+            # Separate tetrahedra for cross-section computation
+            self.current_tetrahedra = [e for e in elements if e['type'] == 'tetrahedron']
+            
+            # Build volumetric grid for 3D clipping
+            if self.current_tetrahedra:
+                self.current_volumetric_grid = vtk.vtkUnstructuredGrid()
+                self.current_volumetric_grid.SetPoints(points)
+                
+                tet_cells = vtk.vtkCellArray()
+                for tet in self.current_tetrahedra:
+                    vtk_tet = vtk.vtkTetra()
+                    for i, nid in enumerate(tet['nodes']):
+                        vtk_tet.GetPointIds().SetId(i, node_map[nid])
+                    tet_cells.InsertNextCell(vtk_tet)
+                
+                self.current_volumetric_grid.SetCells(vtk.VTK_TETRA, tet_cells)
+                print(f"[DEBUG] Built volumetric grid with {self.current_volumetric_grid.GetNumberOfCells()} tetrahedra")
+            else:
+                self.current_volumetric_grid = None
+            
             print(f"[DEBUG] PolyData created with {poly_data.GetNumberOfCells()} cells")
+            print(f"[DEBUG] Stored {len(self.current_tetrahedra)} tetrahedra for cross-section visualization")
 
             # Add per-cell colors based on quality (if available)
             print(f"[DEBUG] About to check quality coloring conditions...")
@@ -1384,51 +1704,81 @@ except Exception as e:
                     print(f"[DEBUG] Quality threshold (10th percentile): {threshold:.3f}")
                     print(f"[DEBUG] Number of elements to iterate: {len(elements)}")
                     print(f"[DEBUG] Element types: {set(e['type'] for e in elements)}")
+                    
+                    # Show sample of quality keys vs element IDs
+                    quality_keys_sample = list(per_elem_quality.keys())[:10]
+                    element_ids_sample = [e['id'] for e in elements if e['type'] == 'triangle'][:10]
+                    print(f"[DEBUG] Sample quality keys: {quality_keys_sample}")
+                    print(f"[DEBUG] Sample triangle IDs: {element_ids_sample}")
+                    print(f"[DEBUG] Sample quality values: {[per_elem_quality.get(k, 'MISSING') for k in element_ids_sample[:5]]}")
 
+                    # Calculate global quality range for color mapping
+                    all_qualities = [q for q in per_elem_quality.values() if q is not None]
+                    if all_qualities:
+                        global_min = min(all_qualities)
+                        global_max = max(all_qualities)
+                        print(f"[DEBUG] Global quality range: {global_min:.3f} to {global_max:.3f}")
+                    else:
+                        global_min, global_max = 0.0, 1.0
+                    
                     # Create color array for cells
                     colors = vtk.vtkUnsignedCharArray()
                     colors.SetNumberOfComponents(3)
                     colors.SetName("Colors")
 
-                    # Color each triangle based on adjacent tet quality
-                    color_counts = {'red': 0, 'orange': 0, 'yellow': 0, 'yellow_green': 0, 'green': 0, 'default': 0}
+                    # Helper function for HSL to RGB conversion
+                    def hsl_to_rgb(h, s, l):
+                        """Convert HSL to RGB (0-255)"""
+                        def hue_to_rgb(p, q, t):
+                            if t < 0: t += 1
+                            if t > 1: t -= 1
+                            if t < 1/6: return p + (q - p) * 6 * t
+                            if t < 1/2: return q
+                            if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                            return p
+                        
+                        if s == 0:
+                            r = g = b = l
+                        else:
+                            q = l * (1 + s) if l < 0.5 else l + s - l * s
+                            p = 2 * l - q
+                            r = hue_to_rgb(p, q, h + 1/3)
+                            g = hue_to_rgb(p, q, h)
+                            b = hue_to_rgb(p, q, h - 1/3)
+                        
+                        return int(r * 255), int(g * 255), int(b * 255)
 
+                    # Color each triangle with smooth gradient
                     for element in elements:
                         if element['type'] == 'triangle':
                             elem_id = element['id']
-                            # Try both int and string keys (int for volumetric, string for JSON)
                             quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
 
                             if quality is None:
-                                # No quality data for this triangle - use default green
-                                colors.InsertNextTuple3(51, 179, 102)
-                                color_counts['default'] += 1
-                            # Map quality to color
-                            elif quality <= threshold:
-                                # Worst 10% = RED
-                                colors.InsertNextTuple3(255, 0, 0)
-                                color_counts['red'] += 1
-                            elif quality < 0.3:
-                                # Poor = ORANGE
-                                colors.InsertNextTuple3(255, 128, 0)
-                                color_counts['orange'] += 1
-                            elif quality < 0.5:
-                                # Fair = YELLOW
-                                colors.InsertNextTuple3(255, 255, 0)
-                                color_counts['yellow'] += 1
-                            elif quality < 0.7:
-                                # Good = YELLOW-GREEN
-                                colors.InsertNextTuple3(128, 255, 0)
-                                color_counts['yellow_green'] += 1
+                                # No quality data - use neutral gray
+                                colors.InsertNextTuple3(150, 150, 150)
                             else:
-                                # Excellent = GREEN
-                                colors.InsertNextTuple3(51, 179, 102)
-                                color_counts['green'] += 1
+                                # Normalize quality to 0-1 range based on actual min/max
+                                quality_range = global_max - global_min
+                                if quality_range > 0.0001:
+                                    normalized = (quality - global_min) / quality_range
+                                else:
+                                    normalized = 1.0  # All same quality
+                                
+                                normalized = max(0.0, min(1.0, normalized))  # Clamp to [0,1]
+                                
+                                # Map to hue: 0 (red) for low quality → 0.33 (green) for high quality
+                                # Invert so low quality = red, high quality = green
+                                hue = normalized * 0.33  # 0.33 = green in HSL
+                                
+                                # Convert HSL to RGB
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
 
                     poly_data.GetCellData().SetScalars(colors)
-                    print(f"[DEBUG] [OK][OK]Applied per-triangle quality colors (threshold={threshold:.3f})")
-                    print(f"[DEBUG] [OK][OK]Color distribution: {color_counts}")
-                    print(f"[DEBUG] [OK][OK]Total colored triangles: {sum(color_counts.values())}")
+                    print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
+                    print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
+                    print(f"[DEBUG] [OK][OK]Total colored triangles: {len(elements)}")
 
                     # Verify scalars were set
                     check_scalars = poly_data.GetCellData().GetScalars()
@@ -2198,6 +2548,141 @@ class ModernMeshGenGUI(QMainWindow):
         crosssection_group.setLayout(crosssection_layout)
         layout.addWidget(crosssection_group)
 
+        # Quality Visualization Controls
+        viz_group = QGroupBox("Quality Visualization")
+        viz_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: 600;
+                font-size: 12px;
+                color: #2c3e50;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                background-color: #f8f9fa;
+            }
+        """)
+        viz_layout = QVBoxLayout()
+        viz_layout.setSpacing(8)
+
+        # Metric Selector
+        metric_layout = QHBoxLayout()
+        metric_label = QLabel("Metric:")
+        metric_label.setStyleSheet("font-size: 11px; color: #495057;")
+        metric_layout.addWidget(metric_label)
+
+        self.viz_metric_combo = QComboBox()
+        self.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
+        self.viz_metric_combo.setCurrentIndex(0)
+        self.viz_metric_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+        """)
+        self.viz_metric_combo.currentTextChanged.connect(self.on_viz_metric_changed)
+        metric_layout.addWidget(self.viz_metric_combo, 1)
+        viz_layout.addLayout(metric_layout)
+
+        # Opacity Slider
+        opacity_layout = QVBoxLayout()
+        opacity_layout.setSpacing(3)
+        
+        opacity_label_layout = QHBoxLayout()
+        opacity_label = QLabel("Opacity:")
+        opacity_label.setStyleSheet("font-size: 11px; color: #495057;")
+        opacity_label_layout.addWidget(opacity_label)
+        
+        self.viz_opacity_value = QLabel("100%")
+        self.viz_opacity_value.setStyleSheet("font-size: 11px; color: #007bff; font-weight: 600;")
+        self.viz_opacity_value.setAlignment(Qt.AlignRight)
+        opacity_label_layout.addWidget(self.viz_opacity_value)
+        opacity_layout.addLayout(opacity_label_layout)
+
+        self.viz_opacity_slider = QSlider(Qt.Horizontal)
+        self.viz_opacity_slider.setRange(0, 100)
+        self.viz_opacity_slider.setValue(100)
+        self.viz_opacity_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #e9ecef;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #007bff;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #0056b3;
+            }
+        """)
+        self.viz_opacity_slider.valueChanged.connect(self.on_viz_opacity_changed)
+        opacity_layout.addWidget(self.viz_opacity_slider)
+        viz_layout.addLayout(opacity_layout)
+
+        # Filter Range (Min/Max)
+        filter_label = QLabel("Show Quality Range:")
+        filter_label.setStyleSheet("font-size: 11px; color: #495057; margin-top: 5px;")
+        viz_layout.addWidget(filter_label)
+
+        range_layout = QHBoxLayout()
+        
+        # Min SpinBox
+        self.viz_min_spin = QDoubleSpinBox()
+        self.viz_min_spin.setRange(0.0, 1.0)
+        self.viz_min_spin.setSingleStep(0.05)
+        self.viz_min_spin.setValue(0.0)
+        self.viz_min_spin.setDecimals(2)
+        self.viz_min_spin.setPrefix("Min: ")
+        self.viz_min_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.viz_min_spin.valueChanged.connect(self.on_viz_range_changed)
+        range_layout.addWidget(self.viz_min_spin)
+
+        # Max SpinBox
+        self.viz_max_spin = QDoubleSpinBox()
+        self.viz_max_spin.setRange(0.0, 100.0) # Allow > 1.0 for Aspect Ratio
+        self.viz_max_spin.setSingleStep(0.05)
+        self.viz_max_spin.setValue(1.0)
+        self.viz_max_spin.setDecimals(2)
+        self.viz_max_spin.setPrefix("Max: ")
+        self.viz_max_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.viz_max_spin.valueChanged.connect(self.on_viz_range_changed)
+        range_layout.addWidget(self.viz_max_spin)
+        
+        viz_layout.addLayout(range_layout)
+
+        viz_group.setLayout(viz_layout)
+        layout.addWidget(viz_group)
+
         # Paintbrush refinement widget
         print(f"[DEBUG] Paintbrush available: {PAINTBRUSH_AVAILABLE}")
         print(f"[DEBUG] Paintbrush selector: {self.paintbrush_selector}")
@@ -2540,6 +3025,63 @@ class ModernMeshGenGUI(QMainWindow):
             values = presets[preset]
             self.target_elements.setValue(values["target"])
             self.max_size.setValue(values["max"])
+
+    def on_crosssection_toggled(self, state):
+        """Handle cross-section checkbox toggle"""
+        enabled = bool(state)
+        self.clip_axis_combo.setEnabled(enabled)
+        self.clip_offset_slider.setEnabled(enabled)
+        
+        self.viewer.set_clipping(
+            enabled=enabled,
+            axis=self.clip_axis_combo.currentText(),
+            offset=self.clip_offset_slider.value()
+        )
+
+    def on_clip_axis_changed(self, text):
+        """Handle clip axis change"""
+        self.viewer.set_clipping(
+            enabled=self.crosssection_enabled.isChecked(),
+            axis=text,
+            offset=self.clip_offset_slider.value()
+        )
+
+    def on_clip_offset_changed(self, value):
+        """Handle clip offset slider change"""
+        self.clip_offset_value_label.setText(f"{value}%")
+        self.viewer.set_clipping(
+            enabled=self.crosssection_enabled.isChecked(),
+            axis=self.clip_axis_combo.currentText(),
+            offset=value
+        )
+
+    def on_viz_metric_changed(self, metric_name):
+        """Handle quality metric selection change"""
+        self.viewer.update_quality_visualization(
+            metric=metric_name,
+            opacity=self.viz_opacity_slider.value() / 100.0,
+            min_val=self.viz_min_spin.value(),
+            max_val=self.viz_max_spin.value()
+        )
+
+    def on_viz_opacity_changed(self, value):
+        """Handle opacity slider change"""
+        self.viz_opacity_value.setText(f"{value}%")
+        self.viewer.update_quality_visualization(
+            metric=self.viz_metric_combo.currentText(),
+            opacity=value / 100.0,
+            min_val=self.viz_min_spin.value(),
+            max_val=self.viz_max_spin.value()
+        )
+
+    def on_viz_range_changed(self, value):
+        """Handle min/max range spinbox change"""
+        self.viewer.update_quality_visualization(
+            metric=self.viz_metric_combo.currentText(),
+            opacity=self.viz_opacity_slider.value() / 100.0,
+            min_val=self.viz_min_spin.value(),
+            max_val=self.viz_max_spin.value()
+        )
 
     def load_cad_file(self):
         # Kill any running mesh generation workers before loading new CAD
@@ -2979,20 +3521,6 @@ class ModernMeshGenGUI(QMainWindow):
         if mesh_path and Path(mesh_path).exists():
             # Add to viewer's iteration list
             self.viewer.add_iteration_mesh(mesh_path, metrics)
-            logging.info(f"Added iteration mesh to viewer: {mesh_path}")
-        else:
-            logging.warning(f"Mesh file not found: {mesh_path}")
-
-    # Cross-section viewer methods
-    def on_crosssection_toggled(self, state):
-        """Enable/disable cross-section viewer"""
-        enabled = (state == Qt.Checked)
-
-        # Enable/disable controls
-        self.clip_axis_combo.setEnabled(enabled)
-        self.clip_offset_slider.setEnabled(enabled)
-
-        # Apply or remove clipping
         if hasattr(self, 'viewer') and self.viewer:
             axis = self.clip_axis_combo.currentText().lower()
             offset = self.clip_offset_slider.value()
