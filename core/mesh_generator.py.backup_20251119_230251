@@ -1,0 +1,1099 @@
+"""
+Base Mesh Generator Module
+==========================
+
+Provides base class and common functionality for all mesh generation strategies.
+Eliminates code duplication and provides consistent interface.
+"""
+
+import gmsh
+import os
+import math
+import time
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+from abc import ABC, abstractmethod
+
+from .quality import MeshQualityAnalyzer
+from .config import Config, get_default_config
+from .ai_integration import AIRecommendationEngine, MeshRecommendation
+
+# Try to import accelerated quality analyzer
+try:
+    from .quality_accelerated import AcceleratedQualityAnalyzer
+    ACCELERATED_AVAILABLE = True
+except ImportError:
+    ACCELERATED_AVAILABLE = False
+
+
+class MeshGenerationResult:
+    """Result of mesh generation operation"""
+
+    def __init__(self, success: bool, output_file: Optional[str] = None,
+                 quality_metrics: Optional[Dict] = None, message: str = ""):
+        self.success = success
+        self.output_file = output_file
+        self.quality_metrics = quality_metrics
+        self.message = message
+        self.iterations = 0
+        self.history = []
+
+    def __repr__(self) -> str:
+        status = "SUCCESS" if self.success else "FAILED"
+        return f"MeshGenerationResult({status}, iterations={self.iterations})"
+
+
+class BaseMeshGenerator(ABC):
+    """
+    Base class for all mesh generators
+
+    Provides common functionality:
+    - CAD file loading and validation
+    - Mesh parameter calculation
+    - Quality analysis
+    - Iteration tracking
+    - History persistence
+    - Logging
+    """
+
+    def __init__(self, config: Optional[Config] = None, use_gpu: bool = True):
+        """
+        Initialize mesh generator
+
+        Args:
+            config: Configuration object (uses default if None)
+            use_gpu: Enable GPU-accelerated quality analysis (10-100x faster)
+        """
+        self.config = config or get_default_config()
+
+        # Use accelerated quality analyzer if available
+        if ACCELERATED_AVAILABLE and use_gpu:
+            self.quality_analyzer = AcceleratedQualityAnalyzer(use_gpu=True)
+            self.log_message("✓ GPU-accelerated quality analysis enabled")
+        elif ACCELERATED_AVAILABLE:
+            self.quality_analyzer = AcceleratedQualityAnalyzer(use_gpu=False)
+            self.log_message("✓ Batch vectorized quality analysis enabled (5-10x faster)")
+        else:
+            self.quality_analyzer = MeshQualityAnalyzer()
+            self.log_message("⚠ Using standard quality analysis (install cupy for GPU acceleration)")
+
+        self.ai_engine = AIRecommendationEngine(self.config)
+
+        # State
+        self.current_iteration = 0
+        self.quality_history = []
+        self.current_mesh_params = {}
+        self.geometry_info = {}
+
+        # Gmsh state
+        self.gmsh_initialized = False
+        self.model_loaded = False
+
+    def log_message(self, message: str, level: str = "INFO"):
+        """Print message with timestamp"""
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] {message}")
+
+    def generate_mesh(self, input_file: str, output_file: Optional[str] = None) -> MeshGenerationResult:
+        """
+        Main entry point for mesh generation
+
+        Args:
+            input_file: Path to CAD file (STEP/IGES)
+            output_file: Optional output file path
+
+        Returns:
+            MeshGenerationResult object
+        """
+        self.log_message("=" * 60)
+        self.log_message(f"{self.__class__.__name__} Starting")
+        self.log_message("=" * 60)
+
+        result = MeshGenerationResult(success=False)
+
+        try:
+            # Validate input
+            if not self.validate_input_file(input_file):
+                result.message = "Invalid input file"
+                return result
+
+            # Determine output file
+            if output_file is None:
+                output_file = self._get_default_output_path(input_file)
+
+            # Initialize Gmsh
+            self.initialize_gmsh()
+
+            # Load CAD file
+            if not self.load_cad_file(input_file):
+                result.message = "Failed to load CAD file"
+                return result
+
+            # Run strategy-specific meshing
+            if self.run_meshing_strategy(input_file, output_file):
+                result.success = True
+                result.output_file = output_file
+                result.iterations = self.current_iteration
+                result.history = self.quality_history.copy()
+
+                # Final quality metrics
+                if self.quality_history:
+                    result.quality_metrics = self.quality_history[-1]['metrics']
+
+                result.message = "Mesh generation completed successfully"
+            else:
+                result.message = "Meshing strategy failed"
+
+            return result
+
+        except Exception as e:
+            self.log_message(f"ERROR: {e}", level="ERROR")
+            result.message = str(e)
+            return result
+
+        finally:
+            self.finalize_gmsh()
+
+    @abstractmethod
+    def run_meshing_strategy(self, input_file: str, output_file: str) -> bool:
+        """
+        Strategy-specific meshing implementation
+
+        Must be implemented by subclasses.
+
+        Args:
+            input_file: Path to input CAD file
+            output_file: Path for output mesh file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        pass
+
+    def validate_input_file(self, filename: str) -> bool:
+        """Validate input CAD file"""
+        if not os.path.exists(filename):
+            self.log_message(f"ERROR: File not found: {filename}", level="ERROR")
+            return False
+
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in ['.step', '.stp', '.iges', '.igs']:
+            self.log_message(f"ERROR: Unsupported file format: {ext}", level="ERROR")
+            return False
+
+        return True
+
+    def initialize_gmsh(self):
+        """Initialize Gmsh"""
+        if not self.gmsh_initialized:
+            gmsh.initialize()
+            gmsh.model.add(self.__class__.__name__)
+            self.gmsh_initialized = True
+            self.log_message("Gmsh initialized")
+
+    def finalize_gmsh(self):
+        """Finalize Gmsh"""
+        if self.gmsh_initialized:
+            try:
+                gmsh.finalize()
+                self.gmsh_initialized = False
+                self.model_loaded = False
+                self.log_message("Gmsh finalized")
+            except:
+                pass
+
+    def load_cad_file(self, filename: str) -> bool:
+        """Load CAD file into Gmsh"""
+        self.log_message(f"Loading CAD file: {os.path.basename(filename)}")
+
+        try:
+            # Import based on file type
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in ['.step', '.stp']:
+                gmsh.model.occ.importShapes(filename)
+            elif ext in ['.iges', '.igs']:
+                gmsh.model.occ.importShapes(filename)
+            else:
+                raise Exception(f"Unsupported format: {ext}")
+
+            gmsh.model.occ.synchronize()
+            self.log_message("✓ CAD file imported successfully")
+
+            # Heal geometry and remove duplicates
+            try:
+                gmsh.model.occ.removeAllDuplicates()
+                gmsh.model.occ.synchronize()
+                self.log_message("✓ Duplicate entities removed")
+
+                gmsh.model.occ.healShapes()
+                gmsh.model.occ.synchronize()
+                self.log_message("✓ Geometry healed successfully")
+            except Exception as e:
+                self.log_message(f"⚠ Geometry healing warning: {e}")
+
+            # Get geometry info and analyze features
+            self._extract_geometry_info()
+            self._analyze_geometry_features()
+
+            # Apply geometry-aware mesh settings
+            self._apply_geometry_aware_settings()
+
+            self.model_loaded = True
+
+            return True
+
+        except Exception as e:
+            self.log_message(f"ERROR: Failed to load CAD file: {e}", level="ERROR")
+            return False
+
+    def _extract_geometry_info(self):
+        """Extract and store geometry information"""
+        volumes = gmsh.model.getEntities(dim=3)
+        surfaces = gmsh.model.getEntities(dim=2)
+        curves = gmsh.model.getEntities(dim=1)
+
+        self.geometry_info = {
+            'volumes': len(volumes),
+            'surfaces': len(surfaces),
+            'curves': len(curves)
+        }
+
+        self.log_message(
+            f"Geometry: {len(volumes)} volumes, "
+            f"{len(surfaces)} surfaces, {len(curves)} curves"
+        )
+
+        if not volumes:
+            self.log_message("⚠ No volumes detected - attempting shell-to-solid repair...")
+            volumes = self._attempt_shell_to_solid_repair()
+
+            if not volumes:
+                raise Exception("No 3D volumes detected in the CAD file")
+
+        # Calculate bounding box
+        self.geometry_info['bounding_box'] = self._calculate_bounding_box(volumes)
+        self.geometry_info['diagonal'] = self._calculate_diagonal()
+
+    def _calculate_bounding_box(self, volumes) -> Dict[str, List[float]]:
+        """Calculate overall bounding box"""
+        b_min = [float('inf')] * 3
+        b_max = [float('-inf')] * 3
+
+        for v_dim, v_tag in volumes:
+            bb = gmsh.model.getBoundingBox(v_dim, v_tag)
+            for i in range(3):
+                b_min[i] = min(b_min[i], bb[i])
+                b_max[i] = max(b_max[i], bb[i+3])
+
+        return {'min': b_min, 'max': b_max}
+
+    def _calculate_diagonal(self) -> float:
+        """Calculate bounding box diagonal"""
+        bb = self.geometry_info.get('bounding_box')
+        if not bb:
+            return 1.0
+
+        b_min = bb['min']
+        b_max = bb['max']
+
+        dx = b_max[0] - b_min[0]
+        dy = b_max[1] - b_min[1]
+        dz = b_max[2] - b_min[2]
+
+        return math.sqrt(dx**2 + dy**2 + dz**2)
+
+    def _attempt_shell_to_solid_repair(self) -> List:
+        """
+        Attempt to repair shells (hollow surfaces) into solids
+
+        This handles CAD files where geometry healing detects shells but
+        "Could not make solid" - often due to tiny gaps or topology issues
+
+        Returns:
+            List of volume entities if successful, empty list otherwise
+        """
+        try:
+            # Get all shells (2D closed surfaces)
+            shells = gmsh.model.getEntities(dim=2)
+
+            if not shells:
+                self.log_message("  ✗ No shells found to repair")
+                return []
+
+            self.log_message(f"  Attempting to convert {len(shells)} surfaces to solid...")
+
+            # Strategy 1: Increase geometry tolerance and re-heal
+            self.log_message("  Strategy 1: Increasing geometry tolerance...")
+            original_tolerance = gmsh.option.getNumber("Geometry.Tolerance")
+
+            # Try progressively larger tolerances
+            tolerances_to_try = [1e-7, 1e-6, 1e-5, 1e-4]
+
+            for tol in tolerances_to_try:
+                try:
+                    self.log_message(f"    Trying tolerance: {tol}")
+                    gmsh.option.setNumber("Geometry.Tolerance", tol)
+                    gmsh.model.occ.synchronize()
+
+                    # Force re-healing with new tolerance
+                    gmsh.model.occ.healShapes()
+                    gmsh.model.occ.synchronize()
+
+                    # Check if we now have volumes
+                    volumes = gmsh.model.getEntities(dim=3)
+                    if volumes:
+                        self.log_message(f"  ✓ Success! Created {len(volumes)} volumes with tolerance={tol}")
+                        self.geometry_info['volumes'] = len(volumes)
+                        self.geometry_info['surfaces'] = len(gmsh.model.getEntities(dim=2))
+                        self.geometry_info['curves'] = len(gmsh.model.getEntities(dim=1))
+                        return volumes
+
+                except Exception as e:
+                    self.log_message(f"    Failed at tolerance {tol}: {e}")
+                    continue
+
+            # Restore original tolerance
+            gmsh.option.setNumber("Geometry.Tolerance", original_tolerance)
+
+            # Strategy 2: Try to manually sew and make volume from shell
+            self.log_message("  Strategy 2: Attempting manual shell sewing...")
+            try:
+                # Get all surface tags
+                surface_tags = [tag for dim, tag in shells]
+
+                # Try to create a surface loop and volume
+                # This works if the surfaces form a closed shell
+                surface_loop_tag = gmsh.model.occ.addSurfaceLoop(surface_tags)
+                volume_tag = gmsh.model.occ.addVolume([surface_loop_tag])
+                gmsh.model.occ.synchronize()
+
+                volumes = gmsh.model.getEntities(dim=3)
+                if volumes:
+                    self.log_message(f"  ✓ Success! Created volume from surface loop")
+
+                    # CRITICAL: Verify the volume is valid for meshing
+                    self.log_message(f"  Verifying volume is meshable...")
+                    try:
+                        # Try to get volume properties
+                        for dim, tag in volumes:
+                            mass = gmsh.model.occ.getMass(dim, tag)
+                            if mass <= 0:
+                                self.log_message(f"    ⚠ Warning: Volume {tag} has zero or negative mass ({mass})")
+                                self.log_message(f"    This usually means surfaces have wrong orientation")
+                            else:
+                                self.log_message(f"    ✓ Volume {tag} is valid (mass={mass:.2e})")
+                    except Exception as check_error:
+                        self.log_message(f"    ⚠ Could not verify volume properties: {check_error}")
+
+                    self.geometry_info['volumes'] = len(volumes)
+                    return volumes
+
+            except Exception as e:
+                self.log_message(f"    Surface loop creation failed: {e}")
+
+            # Strategy 3: Try remesh-then-heal approach
+            self.log_message("  Strategy 3: Surface remesh + re-heal...")
+            try:
+                # Generate 2D mesh on the shells
+                gmsh.model.mesh.generate(2)
+
+                # Classify the 2D mesh
+                gmsh.model.mesh.classifySurfaces(math.pi, True, True)
+                gmsh.model.mesh.createGeometry()
+                gmsh.model.occ.synchronize()
+
+                # Try healing again
+                gmsh.model.occ.healShapes()
+                gmsh.model.occ.synchronize()
+
+                volumes = gmsh.model.getEntities(dim=3)
+                if volumes:
+                    self.log_message(f"  ✓ Success! Created {len(volumes)} volumes via remeshing")
+                    # Clear the 2D mesh we created
+                    gmsh.model.mesh.clear()
+                    self.geometry_info['volumes'] = len(volumes)
+                    return volumes
+
+            except Exception as e:
+                self.log_message(f"    Remesh approach failed: {e}")
+                # Clear any partial mesh
+                try:
+                    gmsh.model.mesh.clear()
+                except:
+                    pass
+
+            self.log_message("  ✗ All shell-to-solid repair strategies failed")
+            self.log_message("  💡 Tip: The CAD file may have:")
+            self.log_message("     - Tiny gaps preventing closure")
+            self.log_message("     - Self-intersecting surfaces")
+            self.log_message("     - Non-manifold edges")
+            self.log_message("     - Duplicate/overlapping surfaces")
+            self.log_message("  💡 Try repairing the CAD file in your CAD software:")
+            self.log_message("     - Use 'Check Geometry' or 'Repair' tools")
+            self.log_message("     - Simplify or rebuild the model")
+            self.log_message("     - Export with stricter tolerance settings")
+
+            return []
+
+        except Exception as e:
+            self.log_message(f"  ✗ Shell repair error: {e}")
+            return []
+
+    def _analyze_geometry_features(self):
+        """Analyze geometry for sharp features, small curves, etc."""
+        try:
+            curves = gmsh.model.getEntities(dim=1)
+            surfaces = gmsh.model.getEntities(dim=2)
+
+            # Analyze curve lengths
+            curve_lengths = []
+            for dim, tag in curves:
+                try:
+                    bb = gmsh.model.getBoundingBox(dim, tag)
+                    length = math.sqrt(
+                        (bb[3]-bb[0])**2 + (bb[4]-bb[1])**2 + (bb[5]-bb[2])**2
+                    )
+                    curve_lengths.append(length)
+                except:
+                    pass
+
+            # Find small features
+            diagonal = self.geometry_info.get('diagonal', 1.0)
+            small_feature_threshold = diagonal / 100.0
+
+            small_curves = [l for l in curve_lengths if l < small_feature_threshold]
+
+            self.geometry_info['has_small_features'] = len(small_curves) > 0
+            self.geometry_info['min_curve_length'] = min(curve_lengths) if curve_lengths else diagonal / 20.0
+            self.geometry_info['num_curves'] = len(curves)
+            self.geometry_info['num_surfaces'] = len(surfaces)
+
+            if small_curves:
+                self.log_message(
+                    f"⚠ Detected {len(small_curves)} small curves "
+                    f"(< {small_feature_threshold:.4f})"
+                )
+
+                # CRITICAL: If we have many small features, geometry is extremely complex
+                if len(small_curves) > 500:
+                    self.geometry_info['extremely_complex'] = True
+                    self.log_message(
+                        f"⚠⚠⚠ EXTREMELY COMPLEX GEOMETRY ({len(small_curves)} small features)"
+                    )
+                    self.log_message(
+                        f"    Will use aggressive coarsening to enable meshing"
+                    )
+
+        except Exception as e:
+            self.log_message(f"⚠ Geometry feature analysis warning: {e}")
+            # Set safe defaults
+            self.geometry_info['has_small_features'] = False
+            self.geometry_info['min_curve_length'] = self.geometry_info.get('diagonal', 1.0) / 20.0
+
+    def _apply_geometry_aware_settings(self):
+        """Apply mesh settings based on geometry analysis"""
+        try:
+            # Apply user-specified mesh size parameters using MESH FIELD
+            # This is CRITICAL because STEP files attach entity-level mesh sizes
+            # that override global CharacteristicLengthMax settings!
+            user_sizes_set = False
+            if hasattr(self.config, 'default_params'):
+                cl_max = self.config.default_params.get('cl_max', 0.1)
+                cl_max_mm = cl_max * 1000
+
+                # Calculate mesh size needed to hit target element count
+                target_elements = self.config.default_params.get('target_elements', None)
+                volume = self.geometry_info.get('volume', None)
+
+                if target_elements and volume and volume > 0:
+                    # Calculate average element volume needed
+                    # For tets: num_elements ≈ volume / (element_size³)
+                    # So: element_size ≈ (volume / target_elements)^(1/3)
+                    avg_elem_size_m = (volume / target_elements) ** (1/3)
+                    avg_elem_size_mm = avg_elem_size_m * 1000
+
+                    # Use the MINIMUM of user's max_size and calculated size
+                    # This ensures we hit the target element count if needed
+                    effective_max_mm = min(cl_max_mm, avg_elem_size_mm)
+
+                    if effective_max_mm < cl_max_mm:
+                        self.log_message(f"🎯 Target element count: {target_elements:,}")
+                        self.log_message(f"🎯 Calculated required size: {avg_elem_size_mm:.2f}mm")
+                        self.log_message(f"🎯 Using: {effective_max_mm:.2f}mm (overrides user's {cl_max_mm:.2f}mm)")
+                    else:
+                        self.log_message(f"🔧 USER MAX MESH SIZE: {cl_max_mm:.2f}mm")
+                        self.log_message(f"🎯 Target {target_elements:,} elements achievable with this size")
+
+                    cl_max_mm = effective_max_mm
+                else:
+                    self.log_message(f"🔧 USER MAX MESH SIZE: {cl_max_mm:.2f}mm")
+
+                # Check if curvature-adaptive meshing is enabled
+                use_curv_adaptive = self.config.default_params.get('curvature_adaptive', False)
+
+                if use_curv_adaptive:
+                    # Use curvature-adaptive meshing (ANSYS-style feature!)
+                    self.log_message("🌊 CURVATURE-ADAPTIVE MESHING enabled (ANSYS-style)")
+
+                    try:
+                        from core.curvature_adaptive import CurvatureAdaptiveMesher
+
+                        # Calculate min size as a fraction of max size
+                        # Use smaller range for better transition
+                        cl_min_mm = max(1.0, cl_max_mm / 3.0)  # Min is 1/3 of max
+
+                        mesher = CurvatureAdaptiveMesher(min_size=cl_min_mm, max_size=cl_max_mm)
+                        analysis = mesher.analyze_geometry_curvature()
+
+                        self.log_message(f"   Curved surfaces: {len(analysis['curved_surfaces'])}")
+                        self.log_message(f"   Flat surfaces: {len(analysis['flat_surfaces'])}")
+
+                        if len(analysis['curved_surfaces']) > 0:
+                            self.log_message(f"   Refining curved surfaces to {cl_min_mm:.1f}mm")
+                            self.log_message(f"   Keeping flat surfaces at {cl_max_mm:.1f}mm")
+
+                            # Create curvature-adaptive field
+                            field_tag = mesher.create_curvature_adaptive_field(elements_per_curve=12)
+                            gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+                        else:
+                            # No curved surfaces, fall back to uniform
+                            self.log_message("   No curved surfaces detected, using uniform sizing")
+                            field_tag = gmsh.model.mesh.field.add("MathEval")
+                            gmsh.model.mesh.field.setString(field_tag, "F", str(cl_max_mm))
+                            gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+
+                    except Exception as e:
+                        self.log_message(f"⚠ Curvature-adaptive failed: {e}")
+                        self.log_message("   Falling back to uniform sizing")
+                        # Fallback to uniform
+                        field_tag = gmsh.model.mesh.field.add("MathEval")
+                        gmsh.model.mesh.field.setString(field_tag, "F", str(cl_max_mm))
+                        gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+
+                else:
+                    # Create uniform background mesh field (OVERRIDES entity prescriptions!)
+                    field_tag = gmsh.model.mesh.field.add("MathEval")
+                    gmsh.model.mesh.field.setString(field_tag, "F", str(cl_max_mm))
+                    gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+                    self.log_message("🔧 Uniform sizing (curvature-adaptive disabled)")
+
+                # Disable other mesh size sources to let field take control
+                gmsh.option.setNumber("Mesh.CharacteristicLengthFromPoints", 0)
+                gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 0)
+                gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0)
+
+                user_sizes_set = True
+
+            # If no user sizes, enable curvature-based auto-sizing
+            if not user_sizes_set:
+                gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 1)
+                gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 12)
+                gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 1)
+                self.log_message("🔧 Curvature-based auto-sizing enabled")
+
+            # Improve element quality
+            # NOTE: Netgen optimization can freeze on complex geometries with many illegal tets
+            # This is initially enabled but may be disabled after mesh generation if needed
+            gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+            gmsh.option.setNumber("Mesh.Smoothing", 10)  # More smoothing iterations
+
+            # Handle sharp angles better
+            gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.1)
+
+            # Avoid over-refinement
+            gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 1.0)
+
+            # CRITICAL: Special handling for extremely complex geometry
+            # BUT: Only apply if user hasn't set explicit sizes
+            if self.geometry_info.get('extremely_complex', False) and not user_sizes_set:
+                self.log_message("⚠ Applying COARSE mesh settings for extremely complex geometry...")
+
+                # Force much coarser mesh
+                diagonal = self.geometry_info.get('diagonal', 1.0)
+                gmsh.option.setNumber("Mesh.CharacteristicLengthMin", diagonal / 20.0)  # Very coarse
+                gmsh.option.setNumber("Mesh.CharacteristicLengthMax", diagonal / 5.0)   # Very coarse
+                gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 3.0)  # 3x coarser!
+
+                # Reduce mesh quality requirements to enable meshing
+                gmsh.option.setNumber("Mesh.MinimumCirclePoints", 6)  # Reduced from 12
+                gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)   # Minimum
+                gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 0)  # Disable
+
+                # Use simpler algorithms
+                gmsh.option.setNumber("Mesh.Algorithm", 1)  # MeshAdapt (simpler)
+                gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay (robust)
+
+                self.log_message("    ✓ Coarse mesh settings applied (quality will be reduced)")
+
+            # If small features detected (but not extreme), use finer minimum size
+            # BUT: Only apply if user hasn't set explicit sizes
+            elif self.geometry_info.get('has_small_features', False) and not user_sizes_set:
+                min_curve = self.geometry_info.get('min_curve_length', 1.0)
+                diagonal = self.geometry_info.get('diagonal', 1.0)
+
+                # Adjust parameters for small features (curvature settings only, not sizes)
+                gmsh.option.setNumber("Mesh.MinimumCirclePoints", 20)
+                gmsh.option.setNumber("Mesh.MinimumCurvePoints", 3)
+
+                self.log_message(
+                    f"✓ Applied settings for small features "
+                    f"(min curve: {min_curve:.4f})"
+                )
+            elif user_sizes_set:
+                self.log_message("✓ Using user-specified mesh sizes (geometry auto-adjust disabled)")
+
+            # Improve algorithm settings for complex geometries
+            gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay for 2D
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay for 3D (stable)
+
+            # Enable recombination to reduce poor quality elements
+            gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)  # Blossom
+            gmsh.option.setNumber("Mesh.RecombineOptimizeTopology", 5)
+
+            self.log_message("✓ Applied geometry-aware mesh settings")
+
+        except Exception as e:
+            self.log_message(f"⚠ Could not apply geometry-aware settings: {e}")
+
+    def calculate_initial_mesh_parameters(self) -> Dict[str, float]:
+        """Calculate initial mesh parameters based on geometry"""
+        diagonal = self.geometry_info.get('diagonal', 1.0)
+        min_curve = self.geometry_info.get('min_curve_length', diagonal / 20.0)
+        has_small_features = self.geometry_info.get('has_small_features', False)
+
+        # Default parameters
+        cl_max = diagonal / 20.0
+        cl_min = diagonal / 100.0
+
+        # Adjust for small features
+        if has_small_features:
+            # Make cl_min respect smallest feature (with some margin)
+            cl_min = min(cl_min, min_curve / 5.0)
+            # But not too small
+            cl_min = max(cl_min, diagonal / 500.0)
+            self.log_message(f"✓ Adjusted for small features (min_curve={min_curve:.4f})")
+
+        # Ensure reasonable bounds
+        cl_min = max(cl_min, diagonal / 1000.0)  # Not too fine
+        cl_max = min(cl_max, diagonal / 5.0)     # Not too coarse
+        cl_min = min(cl_min, cl_max / 3.0)       # Reasonable ratio
+
+        params = {
+            'cl_min': cl_min,
+            'cl_max': cl_max,
+            'diagonal': diagonal,
+            'min_curve_length': min_curve,
+            'refinement_factor': 1.0
+        }
+
+        self.log_message(
+            f"Initial parameters: CL_min={cl_min:.4f}, CL_max={cl_max:.4f}"
+        )
+
+        return params
+
+    def apply_mesh_parameters(self, params: Optional[Dict] = None):
+        """Apply mesh parameters to Gmsh"""
+        if params is None:
+            params = self.current_mesh_params
+
+        cl_min = params.get('cl_min', 1.0)
+        cl_max = params.get('cl_max', 10.0)
+
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", cl_min)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", cl_max)
+
+        self.log_message(f"Applied mesh parameters: CL_min={cl_min:.4f}, CL_max={cl_max:.4f}")
+
+    def set_mesh_algorithm(self, algorithm_2d: Optional[int] = None,
+                           algorithm_3d: Optional[int] = None):
+        """Set meshing algorithms"""
+        if algorithm_2d is None:
+            algorithm_2d = self.config.mesh_params.algorithm_2d
+        if algorithm_3d is None:
+            algorithm_3d = self.config.mesh_params.algorithm_3d
+
+        gmsh.option.setNumber("Mesh.Algorithm", algorithm_2d)
+        gmsh.option.setNumber("Mesh.Algorithm3D", algorithm_3d)
+
+        self.log_message(f"Mesh algorithms: 2D={algorithm_2d}, 3D={algorithm_3d}")
+
+    def set_element_order(self, order: Optional[int] = None):
+        """Set element order (1=linear, 2=quadratic)"""
+        if order is None:
+            order = self.config.mesh_params.element_order
+
+        try:
+            gmsh.option.setNumber("Mesh.ElementOrder", order)
+            if order == 2:
+                gmsh.option.setNumber("Mesh.HighOrderOptimize",
+                                      self.config.mesh_params.high_order_optimize)
+            self.log_message(f"Element order: {order}")
+        except Exception as e:
+            self.log_message(f"⚠ Could not set element order: {e}")
+
+    def generate_mesh_internal(self, dimension: int = 3) -> bool:
+        """Generate mesh (internal method with error handling)"""
+        try:
+            gmsh.model.mesh.clear()
+
+            # DEBUG: Check mesh size settings before generation
+            cl_min = gmsh.option.getNumber("Mesh.CharacteristicLengthMin")
+            cl_max = gmsh.option.getNumber("Mesh.CharacteristicLengthMax")
+            curv_based = gmsh.option.getNumber("Mesh.CharacteristicLengthFromCurvature")
+            self.log_message(f"🔍 PRE-MESH CHECK: cl_min={cl_min*1000:.2f}mm, cl_max={cl_max*1000:.2f}mm, curvature={int(curv_based)}")
+
+            # Generate mesh
+            gmsh.model.mesh.generate(dimension)
+
+            # DEBUG: Count nodes after each dimension
+            if dimension >= 1:
+                nodes_1d = gmsh.model.mesh.getNodes()
+                self.log_message(f"🔍 AFTER 1D: {len(nodes_1d[0])} nodes")
+            if dimension >= 2:
+                elem_types_2d, elem_tags_2d, _ = gmsh.model.mesh.getElements(dim=2)
+                num_2d_elements = sum(len(tags) for tags in elem_tags_2d)
+                self.log_message(f"🔍 AFTER 2D: {num_2d_elements} surface elements")
+
+            # CRITICAL: Validate that 3D elements were actually generated
+            if dimension == 3:
+                elem_types_3d, elem_tags_3d, _ = gmsh.model.mesh.getElements(dim=3)
+                num_3d_elements = sum(len(tags) for tags in elem_tags_3d)
+
+                if num_3d_elements == 0:
+                    self.log_message(f"✗ 3D meshing FAILED - No volume elements generated!")
+                    self.log_message(f"   Gmsh created surface mesh only (not a volume mesh)")
+
+                    # Check if we have 2D elements
+                    elem_types_2d, elem_tags_2d, _ = gmsh.model.mesh.getElements(dim=2)
+                    num_2d_elements = sum(len(tags) for tags in elem_tags_2d)
+                    if num_2d_elements > 0:
+                        self.log_message(f"   2D surface elements: {num_2d_elements} (but we need 3D volume!)")
+
+                    return False
+                else:
+                    self.log_message(f"✓ 3D mesh generated successfully: {num_3d_elements} volume elements")
+
+                    # Check for illegal/inverted elements that could cause Netgen to freeze
+                    try:
+                        # Get element qualities (SICN = signed inverse condition number)
+                        # Negative values indicate inverted elements
+                        qualities = gmsh.model.mesh.getElementQualities(elem_tags_3d[0], "sicn")
+                        if qualities:
+                            illegal_count = sum(1 for q in qualities if q <= 0)
+                            illegal_percentage = (illegal_count / len(qualities)) * 100
+
+                            if illegal_count > 0:
+                                self.log_message(f"⚠ Found {illegal_count} illegal/inverted tets ({illegal_percentage:.1f}%)")
+
+                                # If >5% are illegal, disable Netgen to avoid freeze
+                                if illegal_percentage > 5.0:
+                                    self.log_message("⚠ High percentage of illegal elements detected")
+                                    self.log_message("  → Disabling Netgen optimization to prevent freeze")
+                                    self.log_message("  → Using Gmsh native optimization only")
+                                    gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
+                    except Exception as e:
+                        # If quality check fails, proceed with default settings
+                        pass
+
+                    return True
+            else:
+                self.log_message(f"✓ {dimension}D mesh generated successfully")
+                return True
+
+        except Exception as e:
+            self.log_message(f"⚠ {dimension}D mesh failed: {e}")
+
+            # Try 2D first if 3D failed
+            if dimension == 3:
+                try:
+                    self.log_message("Trying 2D mesh first, then 3D...")
+                    gmsh.model.mesh.generate(2)
+                    self.log_message("✓ 2D mesh generated, retrying 3D...")
+                    gmsh.model.mesh.generate(3)
+
+                    # Validate 3D elements were created
+                    elem_types_3d, elem_tags_3d, _ = gmsh.model.mesh.getElements(dim=3)
+                    num_3d_elements = sum(len(tags) for tags in elem_tags_3d)
+
+                    if num_3d_elements == 0:
+                        self.log_message(f"✗ 3D meshing FAILED - No volume elements after retry!")
+                        return False
+
+                    self.log_message(f"✓ 3D mesh generated successfully: {num_3d_elements} volume elements")
+                    return True
+                except Exception as e2:
+                    self.log_message(f"ERROR: Mesh generation failed: {e2}", level="ERROR")
+                    return False
+
+            return False
+
+    def analyze_current_mesh(self) -> Optional[Dict]:
+        """Analyze current mesh quality using Gmsh's built-in metrics"""
+        self.log_message("Analyzing mesh quality...")
+
+        metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True)
+
+        if metrics:
+            # Log basic statistics
+            self.log_message(f"Total elements: {metrics['total_elements']:,}")
+            self.log_message(f"Total nodes: {metrics['total_nodes']:,}")
+
+            # PRIMARY: Gmsh's accurate quality metrics
+            if metrics.get('gmsh_sicn'):
+                s = metrics['gmsh_sicn']
+                if s['min'] < 0:
+                    quality_assessment = "CRITICAL - INVERTED ELEMENTS"
+                elif s['min'] > 0.5:
+                    quality_assessment = "EXCELLENT"
+                elif s['min'] > 0.3:
+                    quality_assessment = "GOOD"
+                else:
+                    quality_assessment = "POOR"
+
+                self.log_message(
+                    f"SICN (Gmsh): Min={s['min']:.4f}, Max={s['max']:.4f}, Avg={s['avg']:.4f} [{quality_assessment}]"
+                )
+
+                if s['min'] < 0:
+                    self.log_message(f"⚠⚠⚠ MESH HAS INVERTED ELEMENTS - geometry is seriously problematic")
+
+            if metrics.get('gmsh_gamma'):
+                g = metrics['gmsh_gamma']
+                quality_assessment = "EXCELLENT" if g['min'] > 0.4 else ("GOOD" if g['min'] > 0.2 else "POOR")
+                self.log_message(
+                    f"Gamma (Gmsh): Min={g['min']:.4f}, Max={g['max']:.4f}, Avg={g['avg']:.4f} [{quality_assessment}]"
+                )
+
+            # SECONDARY: Show legacy converted metrics
+            if metrics.get('skewness'):
+                s = metrics['skewness']
+                self.log_message(
+                    f"Skewness (converted): Min={s['min']:.4f}, Max={s['max']:.4f}, Avg={s['avg']:.4f}"
+                )
+
+            if metrics.get('aspect_ratio'):
+                a = metrics['aspect_ratio']
+                self.log_message(
+                    f"Aspect Ratio (converted): Min={a['min']:.4f}, Max={a['max']:.4f}, Avg={a['avg']:.4f}"
+                )
+
+            # COMPARISON: Show our custom calculations vs Gmsh
+            if metrics.get('custom_skewness') and metrics.get('gmsh_sicn'):
+                custom_s = metrics['custom_skewness']
+                self.log_message(
+                    f"[DEBUG] Custom skewness: Min={custom_s['min']:.4f}, Max={custom_s['max']:.4f} (compare to Gmsh SICN)"
+                )
+
+        return metrics
+
+    def check_quality_targets(self, metrics: Dict) -> bool:
+        """Check if quality targets are met"""
+        targets = self.config.quality_targets
+        targets_met = True
+
+        if metrics.get('skewness'):
+            max_skew = metrics['skewness']['max']
+            if max_skew > targets.skewness_max:
+                self.log_message(f"⚠ Skewness: {max_skew:.4f} > {targets.skewness_max}")
+                targets_met = False
+            else:
+                self.log_message(f"✓ Skewness: {max_skew:.4f} ≤ {targets.skewness_max}")
+
+        if metrics.get('aspect_ratio'):
+            max_aspect = metrics['aspect_ratio']['max']
+            if max_aspect > targets.aspect_ratio_max:
+                self.log_message(f"⚠ Aspect ratio: {max_aspect:.4f} > {targets.aspect_ratio_max}")
+                targets_met = False
+            else:
+                self.log_message(f"✓ Aspect ratio: {max_aspect:.4f} ≤ {targets.aspect_ratio_max}")
+
+        return targets_met
+
+    def save_mesh(self, output_file: str) -> bool:
+        """Save mesh to file"""
+        try:
+            gmsh.write(output_file)
+            self.log_message(f"✓ Mesh saved to: {output_file}")
+            return True
+        except Exception as e:
+            self.log_message(f"ERROR: Failed to save mesh: {e}", level="ERROR")
+            return False
+
+    def save_iteration_history(self, output_file: str):
+        """Save iteration history to JSON file"""
+        history_file = os.path.splitext(output_file)[0] + "_history.json"
+
+        try:
+            with open(history_file, 'w') as f:
+                json.dump({
+                    'generator': self.__class__.__name__,
+                    'total_iterations': self.current_iteration,
+                    'history': self.quality_history,
+                    'config': {
+                        'quality_targets': self.config.get_quality_targets_dict(),
+                        'mesh_params': self.config.get_mesh_params_dict()
+                    }
+                }, f, indent=2)
+
+            self.log_message(f"✓ History saved to: {history_file}")
+
+        except Exception as e:
+            self.log_message(f"⚠ Could not save history: {e}")
+
+    def _get_default_output_path(self, input_file: str) -> str:
+        """Generate default output file path"""
+        base_name = os.path.splitext(input_file)[0]
+        strategy_name = self.__class__.__name__.lower().replace('meshgenerator', '')
+        return f"{base_name}_{strategy_name}_optimized.msh"
+
+    def generate_final_report(self):
+        """Generate final report"""
+        self.log_message("\n" + "=" * 60)
+        self.log_message("FINAL MESH GENERATION REPORT")
+        self.log_message("=" * 60)
+
+        if not self.quality_history:
+            self.log_message("No quality data available")
+            return
+
+        # Final metrics
+        final = self.quality_history[-1]['metrics']
+        self.log_message(f"\nFinal Statistics:")
+        self.log_message(f"  Total Iterations: {self.current_iteration}")
+        self.log_message(f"  Total Elements: {final['total_elements']:,}")
+        self.log_message(f"  Total Nodes: {final['total_nodes']:,}")
+
+        if final.get('skewness'):
+            self.log_message(f"  Final Skewness: {final['skewness']['max']:.4f}")
+
+        if final.get('aspect_ratio'):
+            self.log_message(f"  Final Aspect Ratio: {final['aspect_ratio']['max']:.4f}")
+
+        # Quality assessment
+        self.log_message(f"\nQuality Assessment:")
+        targets = self.config.quality_targets
+
+        if final.get('skewness'):
+            max_skew = final['skewness']['max']
+            if max_skew <= targets.skewness_max:
+                self.log_message(f"  ✓ Skewness: EXCELLENT ({max_skew:.4f})")
+            elif max_skew <= targets.skewness_max * 1.2:
+                self.log_message(f"  ⚠ Skewness: ACCEPTABLE ({max_skew:.4f})")
+            else:
+                self.log_message(f"  ✗ Skewness: POOR ({max_skew:.4f})")
+
+        if final.get('aspect_ratio'):
+            max_aspect = final['aspect_ratio']['max']
+            if max_aspect <= targets.aspect_ratio_max:
+                self.log_message(f"  ✓ Aspect Ratio: EXCELLENT ({max_aspect:.4f})")
+            elif max_aspect <= targets.aspect_ratio_max * 1.5:
+                self.log_message(f"  ⚠ Aspect Ratio: ACCEPTABLE ({max_aspect:.4f})")
+            else:
+                self.log_message(f"  ✗ Aspect Ratio: POOR ({max_aspect:.4f})")
+
+        # AI statistics
+        if self.config.is_ai_enabled():
+            ai_stats = self.ai_engine.get_statistics()
+            self.log_message(f"\nAI Recommendations:")
+            self.log_message(f"  Success Rate: {ai_stats['ai_success_rate']:.1f}%")
+            self.log_message(f"  Fallback Used: {ai_stats['fallback_used']} times")
+
+        self.log_message("=" * 60)
+
+    def _calculate_quality_score(self, metrics: Dict) -> float:
+        """
+        Calculate overall quality score (lower is better)
+
+        NOW USES GMSH'S ACCURATE METRICS (SICN, Gamma)
+        Combines multiple metrics into single score for comparison.
+        Used by strategies to compare meshes and track best result.
+
+        Args:
+            metrics: Quality metrics dictionary
+
+        Returns:
+            Quality score (lower is better)
+        """
+        score = 0.0
+        targets = self.config.quality_targets
+
+        # PRIMARY: Use Gmsh's SICN (Signed Inverse Condition Number)
+        # SICN: 0-1, higher is better. We invert it for scoring (lower score = better)
+        if metrics.get('gmsh_sicn'):
+            sicn_min = metrics['gmsh_sicn']['min']
+            # Target SICN > 0.3 for acceptable, > 0.5 for good
+            # Score heavily penalizes low SICN
+            if sicn_min < 0.3:
+                sicn_penalty = (0.3 - sicn_min) / 0.3  # 0-1 penalty
+                score += 5.0 * sicn_penalty  # Heavy weight
+            else:
+                sicn_score = (1.0 - sicn_min)  # Small penalty for less-than-perfect
+                score += 1.0 * sicn_score
+
+        # SECONDARY: Use Gmsh's Gamma (inscribed/circumscribed radius ratio)
+        # Gamma: 0-1, higher is better
+        elif metrics.get('gmsh_gamma'):  # Fallback if SICN not available
+            gamma_min = metrics['gmsh_gamma']['min']
+            # Target Gamma > 0.2 for acceptable, > 0.4 for good
+            if gamma_min < 0.2:
+                gamma_penalty = (0.2 - gamma_min) / 0.2
+                score += 5.0 * gamma_penalty
+            else:
+                gamma_score = (1.0 - gamma_min)
+                score += 1.0 * gamma_score
+
+        # LEGACY FALLBACK: Use converted skewness/aspect ratio if Gmsh metrics unavailable
+        elif metrics.get('skewness'):
+            skew_ratio = metrics['skewness']['max'] / targets.skewness_max
+            score += 2.0 * skew_ratio
+
+        if metrics.get('aspect_ratio') and not metrics.get('gmsh_gamma'):
+            aspect_ratio = metrics['aspect_ratio']['max'] / targets.aspect_ratio_max
+            score += 1.0 * aspect_ratio
+
+        # Min angle contribution (weight: 0.5)
+        if metrics.get('min_angle'):
+            if metrics['min_angle']['min'] < targets.min_angle_min:
+                angle_penalty = targets.min_angle_min / max(metrics['min_angle']['min'], 0.1)
+                score += 0.5 * angle_penalty
+
+        # ENHANCED: Element count penalty with target_elements awareness
+        if metrics.get('total_elements'):
+            actual_elements = metrics['total_elements']
+            target_elements = self.config.default_params.get('target_elements', None)
+
+            if target_elements:
+                # Penalize heavily for exceeding target
+                if actual_elements > target_elements:
+                    # Exponential penalty for going over target
+                    # 2x target = +5 penalty, 3x target = +10 penalty, etc.
+                    overshoot_ratio = actual_elements / target_elements
+                    overshoot_penalty = 5.0 * (overshoot_ratio - 1.0) ** 1.5
+                    score += overshoot_penalty
+                    self.log_message(f"⚠️  Element overshoot penalty: +{overshoot_penalty:.2f} ({actual_elements:,} vs target {target_elements:,})")
+                elif actual_elements < target_elements * 0.5:
+                    # Slight penalty for way under target (might be too coarse)
+                    undershoot_ratio = target_elements / actual_elements
+                    undershoot_penalty = 1.0 * (undershoot_ratio - 2.0)
+                    if undershoot_penalty > 0:
+                        score += undershoot_penalty
+            else:
+                # No target specified, use gentle element count penalty
+                element_factor = actual_elements / 10000.0
+                score += 0.1 * element_factor
+
+        # Geometric deviation penalty (mesh shape vs CAD shape)
+        if metrics.get('surface_area_deviation'):
+            # Penalize meshes that deviate significantly from CAD geometry
+            # < 5% deviation = good, > 20% = bad (coarse mesh losing geometry detail)
+            deviation_pct = metrics['surface_area_deviation']
+            if deviation_pct > 5.0:
+                # Exponential penalty for large deviations
+                # 10% deviation = +2.5 penalty, 20% = +11.25 penalty, 30% = +25 penalty
+                geom_penalty = 0.05 * (deviation_pct ** 1.5)
+                score += geom_penalty
+                self.log_message(f"⚠️  Geometric deviation penalty: +{geom_penalty:.2f} ({deviation_pct:.1f}% surface deviation)")
+
+        return score

@@ -1,0 +1,1860 @@
+"""
+Exhaustive Mesh Generation Strategy
+====================================
+
+This strategy tries EVERYTHING possible before giving up:
+- Multiple algorithms (Delaunay, HXT, MMG3D, Frontal, etc.)
+- Different element types (tet, hex, prism, hybrid)
+- Boundary layer meshing
+- Curvature-based refinement
+- Anisotropic meshing
+- Multiple size field strategies
+- Recombination attempts
+- Various optimization levels
+
+Use this for difficult geometries where standard approaches fail.
+
+DEFAULT FOCUS: FEA (Finite Element Analysis / Structural Analysis)
+- Quadratic elements (order 2) for better accuracy
+- Quality metrics optimized for structural simulations
+- Boundary layers optional (more critical for CFD)
+
+For CFD applications, consider adjusting:
+- Boundary layer thickness and growth rates
+- Element sizing near walls
+"""
+
+import sys
+import os
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.mesh_generator import BaseMeshGenerator
+from core.config import Config
+from core.geometry_cleanup import GeometryCleanup
+from core.geometry_healer import AutomaticGeometryHealer
+from core.advanced_geometry import apply_advanced_meshing
+from strategies.intelligent_strategy_selector import (
+    IntelligentStrategySelector,
+    GeometryProfile
+)
+from strategies.hex_dominant_strategy import HexDominantStrategy
+import gmsh
+import json
+from datetime import datetime
+
+# Check for supplementary meshers
+try:
+    from strategies.tetgen_strategy import TetGenMeshGenerator, TETGEN_AVAILABLE
+except ImportError:
+    TETGEN_AVAILABLE = False
+
+try:
+    from strategies.pymesh_strategy import PyMeshMeshGenerator, PYMESH_AVAILABLE
+except ImportError:
+    PYMESH_AVAILABLE = False
+
+
+class ExhaustiveMeshGenerator(BaseMeshGenerator):
+    """
+    Exhaustive mesh generator that tries every possible approach
+
+    Implements ANSYS-like features:
+    - Boundary layers (inflation/growth layers)
+    - Curvature adaptation
+    - Anisotropic sizing
+    - Multiple element types (tet, hex, prism, hybrid)
+    - Aggressive optimization
+    - Body sizing
+    - Edge sizing for sharp features
+    """
+
+    def __init__(self, config: Optional[Config] = None, use_parallel: bool = True, only_strategy: str = None):
+        super().__init__(config)
+        self.strategies_attempted = []
+        self.all_attempts = []  # Store ALL attempts, even failed ones
+        self.geometry_cleanup = GeometryCleanup()
+        self.use_parallel = use_parallel  # Enable parallel execution by default
+        self.only_strategy = only_strategy # If set, run ONLY this strategy
+        self.advanced_meshing_results = None  # Store advanced feature results
+
+    def run_meshing_strategy(self, input_file: str, output_file: str) -> bool:
+        """
+        Run exhaustive meshing - try EVERYTHING
+        """
+        self.log_message("\n" + "=" * 60)
+        self.log_message("EXHAUSTIVE MESH GENERATION STRATEGY")
+        self.log_message("Will try every possible approach before giving up")
+        self.log_message("=" * 60)
+
+        # Analyze geometry for problematic features
+        self.log_message("\nAnalyzing geometry for defeaturing...")
+        geom_stats = self.geometry_cleanup.analyze_geometry()
+
+        # Apply automatic geometry healing for dirty CAD
+        self.log_message("\nApplying automatic geometry healing...")
+        target_mesh_size = self.config.default_params.get('cl_max', 0.01) * 1000  # Convert to mm
+        healer = AutomaticGeometryHealer(target_mesh_size, verbose=True)
+        healing_report = healer.heal_for_meshing()
+
+        # Check if user has set explicit mesh sizes
+        user_has_sizes = (hasattr(self.config, 'default_params') and
+                         self.config.default_params.get('cl_min') is not None and
+                         self.config.default_params.get('cl_max') is not None)
+
+        # Save original user-requested sizes (BEFORE any modifications)
+        original_cl_max = self.config.default_params.get('cl_max', 0.01) if hasattr(self.config, 'default_params') else 0.01
+        original_cl_max_mm = original_cl_max * 1000  # Convert to mm for intelligent sizing
+
+        # Detect complex geometry with many small features
+        num_small_curves = len(geom_stats.get('small_curves', []))
+        num_thin_surfaces = len(geom_stats.get('thin_surfaces', []))
+
+        has_small_features = num_small_curves > 50 or num_thin_surfaces > 10
+
+        # Detect severely broken geometry (extreme cases)
+        is_broken_geometry = (
+            num_small_curves > 500 or  # More than 500 small curves
+            num_thin_surfaces > 20 or  # More than 20 thin surfaces
+            len([s for s in geom_stats.get('thin_surfaces', []) if s.get('aspect_ratio', 0) > 1000000])  # Extreme aspect ratios
+        )
+
+        if is_broken_geometry:
+            self.log_message("\n" + "="*60)
+            self.log_message("⚠️  COMPLEX GEOMETRY WITH MANY SMALL FEATURES")
+            self.log_message("="*60)
+            self.log_message(f"Small curves: {num_small_curves}")
+            self.log_message(f"Thin surfaces: {num_thin_surfaces}")
+            self.log_message("\nSTRATEGY: Intelligent Adaptive Sizing")
+            self.log_message("- Using distance-based refinement around small features")
+            self.log_message("- Fine mesh near features, coarse mesh in bulk")
+            self.log_message("- Progressive refinement: DISABLED (use full size)")
+            self.log_message("="*60 + "\n")
+
+        if has_small_features:
+            self.log_message(self.geometry_cleanup.get_cleanup_report())
+
+            # Apply intelligent adaptive sizing (NEW!)
+            # DISABLED: Intelligent Adaptive Sizing
+            # This feature was causing badmax cycles and infinite freeze on complex geometries
+            # like Airfoil.step. MeshTest 2 (working version) doesn't have this feature.
+            # Disabling it restores the simpler, more robust behavior.
+            self.log_message("\n⚠ Intelligent Adaptive Sizing: DISABLED")
+            self.log_message("  (Using standard Gmsh sizing - more robust for complex geometries)")
+
+            # Apply geometry tolerance
+            self.log_message("\nApplying geometry tolerance...")
+            self.geometry_cleanup.apply_geometry_tolerance(tolerance=1e-7)
+
+        # DISABLED: Advanced meshing features (virtual topology, adaptive refinement, boundary layers)
+        # These features were added after MeshTest 2 and are causing badmax cycles.
+        # MeshTest 2 (working version) doesn't have these features.
+        # Disabling them restores the simpler, more robust behavior.
+        self.log_message("\n⚠ Advanced Meshing Features: DISABLED")
+        self.log_message("  (Using standard Gmsh meshing - more robust for complex geometries)")
+
+        # Apply sharp feature smoothing (critical for airfoil trailing edges)
+        # DISABLED: This corrupts simple geometries like cylinders!
+        # Only enable for complex shapes with actual sharp features
+        # self.log_message("\nApplying sharp feature smoothing...")
+        # filleted_count = self.geometry_cleanup.smooth_sharp_features()
+        # if filleted_count > 0:
+        #     self.log_message(f"✓ Smoothed {filleted_count} sharp features")
+        self.log_message("\n✓ Skipping sharp feature smoothing (can corrupt simple geometries)")
+
+        # ANSYS-STYLE PROGRESSIVE REFINEMENT (3-pass pyramid)
+        # SKIP for broken geometry - use conservative single-pass approach
+        # Pass 1: Coarse (0.5-1s) → Pass 2: Medium (2-3s) → Pass 3: Fine (full)
+        if self.use_parallel and not is_broken_geometry:
+            try:
+                self.log_message("\n🚀 ANSYS-STYLE PROGRESSIVE REFINEMENT")
+                self.log_message("3-Pass Pyramid: Coarse → Medium → Fine")
+                self.log_message("Early termination when quality is sufficient\n")
+
+                from strategies.parallel_strategy import (
+                    ParallelStrategyExecutor,
+                    PARALLEL_STRATEGIES
+                )
+
+                # Store original config
+                original_cl_max = self.config.default_params.get('cl_max')
+                original_target_elements = self.config.default_params.get('target_elements')
+
+                # === PASS 1: COARSE (5x coarser, fastest) ===
+                self.log_message("=" * 60)
+                self.log_message("PASS 1: COARSE MESH (5x coarser for rapid preview)")
+                self.log_message("=" * 60)
+
+                # Temporarily increase mesh size for coarse pass
+                if original_cl_max:
+                    self.config.default_params['cl_max'] = original_cl_max * 5.0
+                if original_target_elements:
+                    self.config.default_params['target_elements'] = max(100, original_target_elements // 50)
+
+                def progress_callback(strategy, status, message):
+                    self.log_message(message)
+
+                executor = ParallelStrategyExecutor(progress_callback=progress_callback)
+                coarse_result = executor.execute_strategies_parallel(
+                    input_file,
+                    [PARALLEL_STRATEGIES[0]],  # Only try one fast strategy
+                    self.config
+                )
+
+                if coarse_result and coarse_result.success:
+                    self.log_message(f"\n✓ Pass 1 Complete: score={coarse_result.score:.2f}")
+
+                    # Early termination if quality excellent
+                    if coarse_result.score < 1.0:
+                        self.log_message("★ EXCELLENT quality on coarse mesh - using this result!")
+                        with open(output_file, 'wb') as f:
+                            f.write(coarse_result.mesh_data)
+
+                        self.all_attempts.append({
+                            'strategy': f"{coarse_result.strategy_name}_coarse",
+                            'success': True,
+                            'metrics': coarse_result.metrics,
+                            'score': coarse_result.score
+                        })
+
+                        self._generate_exhaustive_report(output_file)
+                        self._save_detailed_report_to_file(output_file, success=True)
+                        return True
+                    else:
+                        self.log_message(f"⚠ Quality needs improvement (score={coarse_result.score:.2f} > 1.0)")
+                        self.log_message("Proceeding to PASS 2: MEDIUM\n")
+                else:
+                    self.log_message("⚠ Pass 1 failed, proceeding to medium mesh")
+
+                # === PASS 2: MEDIUM (2x coarser) ===
+                self.log_message("=" * 60)
+                self.log_message("PASS 2: MEDIUM MESH (2x coarser for quality)")
+                self.log_message("=" * 60)
+
+                # Medium mesh size
+                if original_cl_max:
+                    self.config.default_params['cl_max'] = original_cl_max * 2.0
+                if original_target_elements:
+                    self.config.default_params['target_elements'] = max(500, original_target_elements // 4)
+
+                medium_result = executor.execute_strategies_parallel(
+                    input_file,
+                    PARALLEL_STRATEGIES[:3],  # Try top 3 strategies
+                    self.config
+                )
+
+                if medium_result and medium_result.success:
+                    self.log_message(f"\n✓ Pass 2 Complete: score={medium_result.score:.2f}")
+
+                    # Early termination if quality good
+                    if medium_result.score < 0.8:
+                        self.log_message("★ GOOD quality on medium mesh - using this result!")
+                        with open(output_file, 'wb') as f:
+                            f.write(medium_result.mesh_data)
+
+                        self.all_attempts.append({
+                            'strategy': f"{medium_result.strategy_name}_medium",
+                            'success': True,
+                            'metrics': medium_result.metrics,
+                            'score': medium_result.score
+                        })
+
+                        self._generate_exhaustive_report(output_file)
+                        self._save_detailed_report_to_file(output_file, success=True)
+                        return True
+                    else:
+                        self.log_message(f"⚠ Quality needs improvement (score={medium_result.score:.2f} > 0.8)")
+                        self.log_message("Proceeding to PASS 3: FINE\n")
+                else:
+                    self.log_message("⚠ Pass 2 failed, proceeding to fine mesh")
+
+                # === PASS 3: FINE (user-requested size, full parallel) ===
+                self.log_message("=" * 60)
+                self.log_message("PASS 3: FINE MESH (user-requested quality)")
+                self.log_message("=" * 60)
+
+                # Restore original settings
+                if original_cl_max:
+                    self.config.default_params['cl_max'] = original_cl_max
+                if original_target_elements:
+                    self.config.default_params['target_elements'] = original_target_elements
+
+                fine_result = executor.execute_strategies_parallel(
+                    input_file,
+                    PARALLEL_STRATEGIES,  # All strategies
+                    self.config
+                )
+
+                if fine_result and fine_result.success:
+                    # Save the best mesh from parallel execution
+                    with open(output_file, 'wb') as f:
+                        f.write(fine_result.mesh_data)
+
+                    # Record the attempt
+                    self.all_attempts.append({
+                        'strategy': fine_result.strategy_name,
+                        'success': True,
+                        'metrics': fine_result.metrics,
+                        'score': fine_result.score
+                    })
+
+                    self.log_message(f"\n✓✓✓ PASS 3 COMPLETE ✓✓✓")
+                    self.log_message(f"Best strategy: {fine_result.strategy_name}")
+                    self.log_message(f"Quality score: {fine_result.score:.2f}")
+
+                    # Generate report and return
+                    self._generate_exhaustive_report(output_file)
+                    self._save_detailed_report_to_file(output_file, success=True)
+                    return True
+                else:
+                    self.log_message("⚠ All progressive passes found no acceptable mesh")
+                    self.log_message("Falling back to sequential exhaustive mode...")
+
+            except Exception as e:
+                self.log_message(f"⚠ Progressive refinement failed: {e}")
+                import traceback
+                self.log_message(traceback.format_exc())
+                self.log_message("Falling back to sequential exhaustive mode...")
+
+        # BROKEN GEOMETRY: Use conservative single-pass approach
+        elif self.use_parallel and is_broken_geometry:
+            self.log_message("\n🔧 CONSERVATIVE MODE (Broken Geometry)")
+            self.log_message("Using full target size (no progressive coarsening)")
+            self.log_message("Defeaturing active to handle small features\n")
+
+            try:
+                from strategies.parallel_strategy import (
+                    ParallelStrategyExecutor,
+                    PARALLEL_STRATEGIES
+                )
+
+                def progress_callback(strategy, status, message):
+                    self.log_message(message)
+
+                executor = ParallelStrategyExecutor(progress_callback=progress_callback)
+
+                # Single pass at full target size (no coarsening!)
+                result = executor.execute_strategies_parallel(
+                    input_file,
+                    PARALLEL_STRATEGIES[:4],  # Try top 4 strategies only
+                    self.config
+                )
+
+                if result and result.success:
+                    with open(output_file, 'wb') as f:
+                        f.write(result.mesh_data)
+
+                    self.all_attempts.append({
+                        'strategy': result.strategy_name,
+                        'success': True,
+                        'metrics': result.metrics,
+                        'score': result.score
+                    })
+
+                    self.log_message(f"\n✓✓✓ CONSERVATIVE MODE SUCCEEDED ✓✓✓")
+                    self.log_message(f"Best strategy: {result.strategy_name}")
+                    self.log_message(f"Quality score: {result.score:.2f}")
+                    self.log_message("\nNOTE: Quality may be limited by CAD geometry issues")
+                    self.log_message("      Fix CAD file for better mesh quality")
+
+                    self._generate_exhaustive_report(output_file)
+                    self._save_detailed_report_to_file(output_file, success=True)
+                    return True
+                else:
+                    self.log_message("⚠ Conservative mode failed")
+                    self.log_message("Falling back to sequential exhaustive mode...")
+
+            except Exception as e:
+                self.log_message(f"⚠ Conservative mode failed: {e}")
+                self.log_message("Falling back to sequential exhaustive mode...")
+
+        # SEQUENTIAL EXECUTION (fallback or if parallel disabled)
+        # Define all strategies to try (in order of likelihood to succeed)
+        strategies = [
+            # Phase 1: Standard tetrahedral with optimizations
+            ("tet_delaunay_optimized", self._try_tet_delaunay_optimized),
+            ("tet_frontal_optimized", self._try_tet_frontal_optimized),
+            ("tet_hxt_optimized", self._try_tet_hxt_optimized),
+            ("tet_mmg3d_optimized", self._try_tet_mmg3d_optimized),
+
+            # Phase 2: Tetrahedral with boundary layers
+            ("tet_with_boundary_layers", self._try_tet_with_boundary_layers),
+
+            # Phase 3: Anisotropic meshing
+            ("anisotropic_curvature", self._try_anisotropic_curvature),
+
+            # Phase 4: Hybrid meshes (tet + other)
+            ("hybrid_prism_tet", self._try_hybrid_prism_tet),
+            ("hybrid_hex_tet", self._try_hybrid_hex_tet),
+
+            # Phase 5: Pure structured attempts
+            ("recombined_to_hex", self._try_recombined_to_hex),
+            ("transfinite_structured", self._try_transfinite_structured),
+
+            # Phase 6: Coarse mesh variations
+            ("very_coarse_tet", self._try_very_coarse_tet),
+            ("adaptive_coarse_to_fine", self._try_adaptive_coarse_to_fine),
+
+            # Phase 7: Linear elements (last resort)
+            ("linear_tet_delaunay", self._try_linear_tet_delaunay),
+            ("linear_tet_frontal", self._try_linear_tet_frontal),
+
+            # Phase 8: Extreme measures
+            ("subdivide_and_mesh", self._try_subdivide_and_mesh),
+            ("automatic_gmsh_default", self._try_automatic_gmsh_default),
+        ]
+
+        # Phase 9: Supplementary meshers (if available)
+        if TETGEN_AVAILABLE:
+            strategies.append(("tetgen_fallback", self._try_tetgen))
+            self.log_message("✓ TetGen available as fallback mesher")
+
+        if PYMESH_AVAILABLE:
+            strategies.append(("pymesh_repair_fallback", self._try_pymesh))
+            self.log_message("✓ PyMesh available for mesh repair and generation")
+
+        # Initialize intelligent strategy selector
+        self.log_message("\n" + "="*60)
+        self.log_message("INTELLIGENT STRATEGY SELECTION ENABLED")
+        self.log_message("="*60)
+        geometry_profile = GeometryProfile(self.geometry_info)
+        selector = IntelligentStrategySelector(geometry_profile)
+
+        self.log_message(f"Geometry complexity: {geometry_profile.complexity:.0f}")
+        if geometry_profile.is_simple:
+            self.log_message("Classification: Simple geometry")
+        elif geometry_profile.is_very_complex:
+            self.log_message("Classification: Very complex geometry")
+        elif geometry_profile.is_complex:
+            self.log_message("Classification: Complex geometry")
+        else:
+            self.log_message("Classification: Moderate geometry")
+
+        # Get recommended order based on geometry
+        strategy_names = [name for name, _ in strategies]
+        recommended_order = selector.get_recommended_order(strategy_names)
+
+        # Reorder strategies
+        strategy_dict = dict(strategies)
+        strategies = [(name, strategy_dict[name]) for name in recommended_order]
+
+        self.log_message(f"\nReordered {len(strategies)} strategies based on geometry profile")
+        self.log_message("="*60 + "\n")
+
+        # Filter if only_strategy is set
+        if self.only_strategy:
+            self.log_message(f"🔒 FORCED STRATEGY: {self.only_strategy}")
+            strategies = [(name, func) for name, func in strategies if name == self.only_strategy]
+            if not strategies:
+                self.log_message(f"⚠ Warning: Forced strategy '{self.only_strategy}' not found in available strategies!")
+                return False
+            # Disable parallel for single strategy
+            self.use_parallel = False
+
+        best_mesh = None
+        best_score = float('inf')
+        best_strategy = None
+        strategies_skipped = 0
+
+        for strategy_name, strategy_func in strategies:
+            # Check if strategy should be skipped
+            should_skip, reason = selector.should_skip_strategy(strategy_name)
+            if should_skip:
+                self.log_message(f"\n{'='*60}")
+                self.log_message(f"⏭️  SKIPPED: {strategy_name}")
+                self.log_message(f"{'='*60}")
+                self.log_message(f"Reason: {reason}")
+                self.log_message(f"Skipped {strategies_skipped + 1} strategies so far")
+                strategies_skipped += 1
+                continue
+
+            self.log_message(f"\n{'='*60}")
+            self.log_message(f"ATTEMPT {len(self.strategies_attempted) + 1}/{len(strategies) - strategies_skipped}: {strategy_name}")
+            self.log_message(f"{'='*60}")
+
+            try:
+                # Clear previous mesh AND size fields to prevent accumulation
+                try:
+                    gmsh.model.mesh.field.removeAll()
+                except:
+                    pass  # Older Gmsh versions may not support this
+                gmsh.model.mesh.clear()
+
+                # CRITICAL: Reapply user mesh sizes before each strategy attempt
+                # Use MESH FIELD to override STEP entity prescriptions
+                if user_has_sizes and hasattr(self.config, 'default_params'):
+                    cl_max = self.config.default_params.get('cl_max', 0.1)
+
+                    # Smart units handling: auto-detect if model is in mm or meters
+                    # cl_max is typically specified in meters (e.g., 0.1 = 10cm)
+                    diagonal = self.geometry_info.get('diagonal', 1.0)
+
+                    # Heuristic: if diagonal > 10, model is likely in mm; if < 10, in meters
+                    model_in_mm = diagonal > 10.0
+
+                    if model_in_mm and cl_max < 1.0:
+                        # cl_max in meters, model in mm → convert to mm
+                        cl_max_model_units = cl_max * 1000.0
+                        self.log_message(f"📏 Converting: {cl_max}m → {cl_max_model_units:.2f}mm (model in mm)")
+                    else:
+                        # Either both in same units, or cl_max already in correct units
+                        cl_max_model_units = cl_max
+                        if model_in_mm:
+                            self.log_message(f"📏 Using: {cl_max_model_units:.2f}mm")
+                        else:
+                            self.log_message(f"📏 Using: {cl_max_model_units:.4f}m")
+
+                    # Check if target elements should override max size
+                    target_elements = self.config.default_params.get('target_elements', None)
+                    volume = self.geometry_info.get('volume', None)
+
+                    if target_elements and volume and volume > 0:
+                        avg_elem_size = (volume / target_elements) ** (1/3)
+                        effective_max = min(cl_max_model_units, avg_elem_size)
+
+                        self.log_message(f"🎯 Target elements: {target_elements:,}")
+                        self.log_message(f"📐 Calculated size for target: {avg_elem_size:.2f}")
+
+                        if effective_max < cl_max_model_units:
+                            self.log_message(f"⚠️  OVERRIDDEN: Using {effective_max:.2f} (target_elements)")
+                            cl_max_model_units = effective_max
+                        else:
+                            self.log_message(f"✓ Using requested {cl_max_model_units:.2f}")
+
+                    # Create uniform background mesh field
+                    field_tag = gmsh.model.mesh.field.add("MathEval")
+                    gmsh.model.mesh.field.setString(field_tag, "F", str(cl_max_model_units))
+                    gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+
+                    # Keep curvature sizing ENABLED to avoid size cliffs
+                    gmsh.option.setNumber("Mesh.CharacteristicLengthFromPoints", 1)
+                    gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 1)
+                    gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 1)
+
+                    self.log_message(f"🔧 Applied mesh size: {cl_max_model_units:.2f}")
+
+                # Try the strategy
+                success, metrics = strategy_func()
+
+                # Record attempt
+                attempt_data = {
+                    'strategy': strategy_name,
+                    'success': success,
+                    'metrics': metrics
+                }
+                self.strategies_attempted.append(strategy_name)
+                self.all_attempts.append(attempt_data)
+
+                if success and metrics:
+                    # Calculate quality score
+                    score = self._calculate_quality_score(metrics)
+                    attempt_data['score'] = score
+
+                    self.log_message(f"✓ Strategy succeeded! Quality Score: {score:.2f}")
+
+                    # Record successful attempt for intelligent selector
+                    selector.record_attempt(
+                        name=strategy_name,
+                        success=True,
+                        metrics=metrics,
+                        score=score,
+                        error_message=""
+                    )
+
+                    # Check if this is the best so far
+                    if score < best_score:
+                        # Save this mesh
+                        temp_file = f"temp_mesh_{strategy_name}.msh"
+                        gmsh.write(temp_file)
+                        best_mesh = temp_file
+                        best_score = score
+                        best_strategy = strategy_name
+
+                        self.log_message(f"★ NEW BEST MESH! (score: {score:.2f})")
+
+                        # Log quality details
+                        if metrics.get('skewness'):
+                            s = metrics['skewness']
+                            self.log_message(f"  Skewness: Max={s['max']:.4f}, Avg={s['avg']:.4f}")
+                        if metrics.get('aspect_ratio'):
+                            a = metrics['aspect_ratio']
+                            self.log_message(f"  Aspect Ratio: Max={a['max']:.2f}, Avg={a['avg']:.2f}")
+
+                        # If quality is acceptable, we can stop
+                        if self.check_quality_targets(metrics):
+                            self.log_message("\n✓✓✓ ACCEPTABLE QUALITY ACHIEVED! ✓✓✓")
+                            break
+                else:
+                    self.log_message(f"✗ Strategy failed or poor quality")
+                    attempt_data['score'] = float('inf')
+
+                    # Record failed attempt for intelligent selector
+                    selector.record_attempt(
+                        name=strategy_name,
+                        success=False,
+                        metrics=metrics,
+                        score=float('inf'),
+                        error_message="Strategy failed or poor quality"
+                    )
+
+            except Exception as e:
+                self.log_message(f"✗ Strategy crashed: {e}")
+                self.all_attempts.append({
+                    'strategy': strategy_name,
+                    'success': False,
+                    'error': str(e),
+                    'score': float('inf')
+                })
+
+                # Record crashed attempt for intelligent selector
+                selector.record_attempt(
+                    name=strategy_name,
+                    success=False,
+                    metrics=None,
+                    score=float('inf'),
+                    error_message=str(e)
+                )
+
+        # Print intelligent selector summary
+        self.log_message("\n" + selector.get_summary())
+
+        if strategies_skipped > 0:
+            self.log_message(f"\n⚡ PERFORMANCE IMPROVEMENT: Skipped {strategies_skipped} strategies")
+            self.log_message(f"   Estimated time saved: {strategies_skipped * 2}-{strategies_skipped * 5} minutes")
+
+        # Use the best mesh found
+        if best_mesh and os.path.exists(best_mesh):
+            self.log_message(f"\n{'='*60}")
+            self.log_message(f"BEST STRATEGY: {best_strategy} (score: {best_score:.2f})")
+            self.log_message(f"{'='*60}")
+
+            # Load and save as final output
+            os.rename(best_mesh, output_file)
+
+            # Clean up other temp files
+            for attempt in self.all_attempts:
+                temp_file = f"temp_mesh_{attempt.get('strategy', 'unknown')}.msh"
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+
+            # Generate comprehensive report
+            self._generate_exhaustive_report(output_file)
+
+            # Save detailed report to file
+            self._save_detailed_report_to_file(output_file, success=True)
+
+            return True
+        else:
+            self.log_message("\n✗✗✗ ALL STRATEGIES FAILED ✗✗✗")
+            self._generate_failure_report()
+
+            # Save failure report to file
+            self._save_detailed_report_to_file(output_file, success=False)
+
+            return False
+
+    # Strategy implementations
+
+    def _apply_global_quality_constraints(self):
+        """
+        Apply global mesh quality constraints to prevent poor quality elements
+
+        Sets Gmsh options for:
+        - Minimum SICN quality threshold
+        - Aspect ratio limits
+        - Size gradation controls
+        - Anisotropy constraints
+        """
+        # Get current element size
+        cl_max = self.config.default_params.get('cl_max', 0.01) if hasattr(self.config, 'default_params') else 0.01
+
+        # Size constraints
+        # Min size: 10% of max size (prevents tiny elements)
+        # Max size: 2x max size (prevents huge elements)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", cl_max * 0.1)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", cl_max * 2.0)
+
+        # Size gradation: limits how quickly element size can change
+        # Factor of 1.3 = size can increase max 30% between neighbors
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 1.3)
+
+        # NOTE: Mesh.Gradation option does not exist in Gmsh
+        # Element size transitions are controlled by Mesh.CharacteristicLengthFactor above
+
+        # NOTE: Mesh.Lloyd option removed - not universally supported
+
+        # Better curvature sampling to avoid under-sampling curves
+        gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 18)
+
+        # Quality optimization settings
+        # OptimizeThreshold: only optimize elements with quality below this
+        # (0.3 for SICN is standard "poor quality" threshold)
+        gmsh.option.setNumber("Mesh.OptimizeThreshold", 0.3)
+
+        # Anisotropy control: max aspect ratio
+        # 1e6 allows some anisotropy but not extreme
+        # (1.0 would force isotropic elements everywhere)
+        gmsh.option.setNumber("Mesh.AnisoMax", 1e6)
+
+        # Angle tolerance for facet overlap (prevents degenerate elements)
+        gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.1)
+
+        # Quality type: use SICN (Signed Inscribed Circle Normalized)
+        # 0 = SICN, 1 = Gamma (inscribed/circumscribed radius ratio)
+        # 2 = Rho (min/max edge length ratio)
+        gmsh.option.setNumber("Mesh.QualityType", 0)  # SICN
+
+        # Quality inf/sup: sets bounds for color visualization
+        # Not critical for generation, but useful for analysis
+        gmsh.option.setNumber("Mesh.QualityInf", 0.0)   # Min quality (SICN can be negative)
+        gmsh.option.setNumber("Mesh.QualitySup", 1.0)   # Max quality (SICN max is 1.0)
+
+        self.log_message("  ✓ Global quality constraints applied:")
+        self.log_message(f"    Min element size: {cl_max * 0.1 * 1000:.2f} mm")
+        self.log_message(f"    Max element size: {cl_max * 2.0 * 1000:.2f} mm")
+        self.log_message(f"    Size gradation factor: 1.3")
+        self.log_message(f"    Optimization threshold: SICN > 0.3")
+        self.log_message(f"    Max anisotropy: 1e6")
+
+    def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
+        """Standard Delaunay with maximum optimization"""
+        self.log_message("Tetrahedral Delaunay with aggressive optimization...")
+
+        # Apply global quality constraints
+        self._apply_global_quality_constraints()
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay 2D
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay 3D
+        # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+        # Aggressive optimization
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 20)  # Lots of smoothing
+
+        return self._generate_and_analyze()
+
+    def _try_tet_frontal_optimized(self) -> Tuple[bool, Optional[Dict]]:
+        """Frontal algorithm with optimization"""
+        self.log_message("Tetrahedral Frontal-Delaunay 3D...")
+
+        # Apply global quality constraints
+        self._apply_global_quality_constraints()
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 4)  # ✅ FIXED: 4 = Frontal-Delaunay 3D
+        # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 15)
+
+        return self._generate_and_analyze()
+
+    def _try_tet_hxt_optimized(self) -> Tuple[bool, Optional[Dict]]:
+        """HXT algorithm (good for quality)"""
+        self.log_message("Tetrahedral HXT (quality-focused)...")
+
+        # Apply global quality constraints
+        self._apply_global_quality_constraints()
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # ✅ FIXED: 10 = HXT
+        # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 15)
+
+        return self._generate_and_analyze()
+
+    def _try_tet_mmg3d_optimized(self) -> Tuple[bool, Optional[Dict]]:
+        """MMG3D algorithm (good for aspect ratio)"""
+        self.log_message("Tetrahedral with MMG3D remeshing...")
+
+        # Apply global quality constraints
+        self._apply_global_quality_constraints()
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 4)  # ✅ FIXED: Use Frontal-Delaunay, then MMG3D externally
+        # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 15)
+
+        # TODO: After _generate_and_analyze(), call external MMG3D remesher
+        # For now, this generates with Frontal-Delaunay (better than bogus algorithm 7)
+        return self._generate_and_analyze()
+
+    def _try_tet_with_boundary_layers(self) -> Tuple[bool, Optional[Dict]]:
+        """Tetrahedral with boundary layer meshing (inflation layers)"""
+        self.log_message("Tetrahedral with boundary layers (ANSYS-style inflation)...")
+
+        try:
+            # Auto-apply boundary layers to all surfaces
+            # User requirement: never ask for manual surface selection
+            surfaces = gmsh.model.getEntities(dim=2)
+            surf_tags = [tag for dim, tag in surfaces]
+
+            if not surf_tags:
+                self.log_message("  No surfaces found for boundary layers")
+                return False, None
+
+            self.log_message(f"  Applying boundary layers to {len(surf_tags)} surfaces automatically")
+
+            # Create boundary layer field with conservative settings to minimize skew
+            field_tag = gmsh.model.mesh.field.add("BoundaryLayer")
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
+            gmsh.model.mesh.field.setNumber(field_tag, "Size",
+                                            self.geometry_info.get('diagonal', 1.0) / 200.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.3)  # Growth rate
+            gmsh.model.mesh.field.setNumber(field_tag, "Thickness",
+                                            self.geometry_info.get('diagonal', 1.0) / 50.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "NumLayers", 3)  # 3 layers
+
+            gmsh.model.mesh.field.setAsBoundaryLayer(field_tag)
+
+            self.log_message("✓ Boundary layers configured (3 layers, 1.3 growth rate)")
+
+            # Standard tet mesh for core
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+            gmsh.option.setNumber("Mesh.Smoothing", 15)
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Boundary layer setup failed: {e}")
+            return False, None
+
+    def _try_anisotropic_curvature(self) -> Tuple[bool, Optional[Dict]]:
+        """Anisotropic meshing based on curvature (ANSYS-like curvature adaptation)"""
+        self.log_message("Anisotropic meshing with curvature adaptation...")
+
+        try:
+            # Create curvature-based size field
+            field_tag = gmsh.model.mesh.field.add("Curvature")
+            diagonal = self.geometry_info.get('diagonal', 1.0)
+
+            gmsh.model.mesh.field.setNumber(field_tag, "NNodesByEdge", 100)  # High resolution
+            gmsh.model.mesh.field.setNumber(field_tag, "SizeMin", diagonal / 500.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "SizeMax", diagonal / 20.0)
+
+            gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
+
+            self.log_message("✓ Curvature-based size field active")
+
+            # Enable anisotropic meshing
+            gmsh.option.setNumber("Mesh.AnisoMax", 100)  # Allow high anisotropy
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Anisotropic meshing failed: {e}")
+            return False, None
+
+    def _try_hybrid_prism_tet(self) -> Tuple[bool, Optional[Dict]]:
+        """Hybrid mesh: Prisms at boundaries, tets in core"""
+        self.log_message("Hybrid mesh: Prisms + Tetrahedra...")
+
+        try:
+            # Auto-apply boundary layers to all surfaces
+            surfaces = gmsh.model.getEntities(dim=2)
+            surf_tags = [tag for dim, tag in surfaces]
+
+            if not surf_tags:
+                self.log_message("  No surfaces found for prism layers")
+                return False, None
+
+            self.log_message(f"  Applying prism layers to {len(surf_tags)} surfaces automatically")
+
+            field_tag = gmsh.model.mesh.field.add("BoundaryLayer")
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
+            gmsh.model.mesh.field.setNumber(field_tag, "Size",
+                                            self.geometry_info.get('diagonal', 1.0) / 150.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.2)
+            gmsh.model.mesh.field.setNumber(field_tag, "Thickness",
+                                            self.geometry_info.get('diagonal', 1.0) / 40.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "NumLayers", 2)
+            gmsh.model.mesh.field.setNumber(field_tag, "CreatePrisms", 1)  # Prisms!
+
+            gmsh.model.mesh.field.setAsBoundaryLayer(field_tag)
+
+            self.log_message("✓ Prism boundary layers configured")
+
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Hybrid prism mesh failed: {e}")
+            return False, None
+
+    def _try_hybrid_hex_tet(self) -> Tuple[bool, Optional[Dict]]:
+        """Hybrid: Recombine to hexahedra where possible, tets elsewhere"""
+        self.log_message("Hybrid hex-tet mesh (recombination)...")
+
+        try:
+            gmsh.option.setNumber("Mesh.Algorithm", 8)  # Delaunay for quads
+            gmsh.option.setNumber("Mesh.RecombineAll", 1)  # Try to recombine
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            gmsh.option.setNumber("Mesh.Recombine3DAll", 1)  # 3D recombination
+            gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 0)  # Simple (0) - O(N²) faster than Blossom (2)
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+            self.log_message("✓ Recombination to hex enabled")
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Hex-tet hybrid failed: {e}")
+            return False, None
+
+    def _try_recombined_to_hex(self) -> Tuple[bool, Optional[Dict]]:
+        """
+        Hex-Dominant Meshing (Robust Multi-Stage)
+        
+        Uses the new HexDominantStrategy which attempts:
+        1. Transfinite (Structured)
+        2. Recombination (Unstructured)
+        3. Subdivision (Refinement)
+        """
+        self.log_message("Attempting robust hex-dominant meshing...")
+
+        try:
+            # Use the dedicated strategy class
+            hex_strategy = HexDominantStrategy(self.config)
+            
+            # We need to pass the current file paths
+            # Since this is called within a larger process, we might need to save the current state
+            # But BaseMeshGenerator usually works on the current gmsh model if we don't reload
+            
+            # However, HexDominantStrategy.run_meshing_strategy expects input/output files
+            # and might clear the model.
+            
+            # Let's try to run it "in-place" if possible, or use temp files
+            # The safest way given the API is to use temp files
+            
+            import tempfile
+            import os
+            
+            # Save current state to temp input
+            temp_input = "temp_hex_input.step" # Assuming STEP, but we should check
+            # Actually, we can just use the strategy's methods directly if we refactored it,
+            # but let's stick to the public API
+            
+            # Better approach: The strategy methods _attempt_transfinite etc operate on the CURRENT model
+            # So we can just instantiate it and call the internal methods? 
+            # No, that's bad practice.
+            
+            # Let's look at how other strategies are called.
+            # They usually just set options and call _generate_and_analyze().
+            
+            # BUT, our new strategy has a complex pipeline.
+            # We should probably just replicate the pipeline logic here OR delegate to the class.
+            
+            # Let's delegate.
+            # We'll save the current model to a temp file to pass to the strategy
+            # This ensures isolation and proper retry logic
+            
+            temp_input = f"temp_hex_input_{os.getpid()}.brep" # BREP preserves topology best
+            gmsh.write(temp_input)
+            
+            temp_output = f"temp_hex_output_{os.getpid()}.msh"
+            
+            if hex_strategy.run_meshing_strategy(temp_input, temp_output):
+                # Success! Load the result back
+                gmsh.model.mesh.clear()
+                gmsh.open(temp_output)
+                
+                # Clean up
+                if os.path.exists(temp_input): os.remove(temp_input)
+                if os.path.exists(temp_output): os.remove(temp_output)
+                
+                # Analyze
+                return True, self.analyze_current_mesh()
+            else:
+                # Failed
+                if os.path.exists(temp_input): os.remove(temp_input)
+                if os.path.exists(temp_output): os.remove(temp_output)
+                return False, None
+
+        except Exception as e:
+            self.log_message(f"[WARN] Hex strategy failed: {e}")
+            return False, None
+
+    def _try_transfinite_structured(self) -> Tuple[bool, Optional[Dict]]:
+        """Structured transfinite mesh (if geometry is simple enough)"""
+        self.log_message("Attempting structured transfinite mesh...")
+
+        try:
+            # Try to apply transfinite to all curves and surfaces
+            curves = gmsh.model.getEntities(dim=1)
+            surfaces = gmsh.model.getEntities(dim=2)
+            volumes = gmsh.model.getEntities(dim=3)
+
+            # Set transfinite on curves
+            failed_curves = 0
+            for dim, tag in curves:
+                try:
+                    gmsh.model.mesh.setTransfiniteCurve(tag, 10)
+                except Exception as e:
+                    failed_curves += 1
+
+            # Set transfinite on surfaces (with hole detection)
+            failed_surfaces = 0
+            surfaces_with_holes = 0
+            for dim, tag in surfaces:
+                try:
+                    gmsh.model.mesh.setTransfiniteSurface(tag)
+                    gmsh.model.mesh.setRecombine(dim, tag)
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "hole" in error_msg:
+                        surfaces_with_holes += 1
+                        self.log_message(f"  ⚠ Surface {tag} has holes, skipping transfinite")
+                    else:
+                        failed_surfaces += 1
+
+            # Set transfinite on volumes
+            failed_volumes = 0
+            for dim, tag in volumes:
+                try:
+                    gmsh.model.mesh.setTransfiniteVolume(tag)
+                except Exception as e:
+                    failed_volumes += 1
+
+            # If too many failures, this approach won't work
+            if surfaces_with_holes > 0:
+                self.log_message(f"⚠ Transfinite failed: {surfaces_with_holes} surface(s) have holes")
+                self.log_message("  Note: Transfinite meshing requires simple surfaces without holes")
+                self.log_message("  Skipping this strategy for this geometry")
+                return False, None
+
+            if failed_surfaces > len(surfaces) / 2:
+                self.log_message(f"⚠ Too many surfaces failed transfinite ({failed_surfaces}/{len(surfaces)})")
+                return False, None
+
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+            self.log_message("✓ Transfinite constraints applied")
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            error_msg = str(e)
+            if "hole" in error_msg.lower():
+                self.log_message(f"⚠ Transfinite mesh failed: Geometry has surfaces with holes")
+                self.log_message("  Transfinite meshing requires simple, hole-free surfaces")
+            else:
+                self.log_message(f"⚠ Transfinite mesh failed: {e}")
+            return False, None
+
+    def _try_very_coarse_tet(self) -> Tuple[bool, Optional[Dict]]:
+        """Very coarse tetrahedral mesh"""
+        self.log_message("Very coarse tetrahedral mesh (low element count)...")
+
+        diagonal = self.geometry_info.get('diagonal', 1.0)
+
+        # Very coarse
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", diagonal / 10.0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", diagonal / 3.0)
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)  # Linear for coarse
+        gmsh.option.setNumber("Mesh.Smoothing", 10)
+
+        return self._generate_and_analyze()
+
+    def _try_adaptive_coarse_to_fine(self) -> Tuple[bool, Optional[Dict]]:
+        """Adaptive refinement from coarse base"""
+        self.log_message("Adaptive coarse-to-fine refinement...")
+
+        try:
+            diagonal = self.geometry_info.get('diagonal', 1.0)
+
+            # Create size field: fine near geometry, coarse inside
+            field_tag = gmsh.model.mesh.field.add("Distance")
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList",
+                                             [tag for dim, tag in gmsh.model.getEntities(dim=2)])
+
+            threshold_field = gmsh.model.mesh.field.add("Threshold")
+            gmsh.model.mesh.field.setNumber(threshold_field, "IField", field_tag)
+            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMin", diagonal / 100.0)
+            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMax", diagonal / 10.0)
+            gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", diagonal / 50.0)
+            gmsh.model.mesh.field.setNumber(threshold_field, "DistMax", diagonal / 10.0)
+
+            gmsh.model.mesh.field.setAsBackgroundMesh(threshold_field)
+
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            # ✅ REMOVED: ElementOrder now handled in _generate_and_analyze()
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Adaptive refinement failed: {e}")
+            return False, None
+
+    def _try_linear_tet_delaunay(self) -> Tuple[bool, Optional[Dict]]:
+        """Linear tetrahedral (simpler, more robust)"""
+        self.log_message("Linear tetrahedral mesh (fallback)...")
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)  # Linear
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 20)
+
+        return self._generate_and_analyze()
+
+    def _try_linear_tet_frontal(self) -> Tuple[bool, Optional[Dict]]:
+        """Linear frontal (different algorithm)"""
+        self.log_message("Linear frontal mesh...")
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)
+        gmsh.option.setNumber("Mesh.Smoothing", 15)
+
+        return self._generate_and_analyze()
+
+    def _try_subdivide_and_mesh(self) -> Tuple[bool, Optional[Dict]]:
+        """Subdivide geometry and mesh pieces"""
+        self.log_message("Attempting geometry subdivision...")
+
+        try:
+            # This is a simplified version - real implementation would be more sophisticated
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 2.0)  # Coarser
+
+            return self._generate_and_analyze()
+
+        except Exception as e:
+            self.log_message(f"⚠ Subdivision failed: {e}")
+            return False, None
+
+    def _try_automatic_gmsh_default(self) -> Tuple[bool, Optional[Dict]]:
+        """Let Gmsh use all defaults (last resort)"""
+        self.log_message("Trying Gmsh automatic defaults (last resort)...")
+
+        # Reset to absolute defaults
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)
+
+        return self._generate_and_analyze()
+
+    def _try_tetgen(self) -> Tuple[bool, Optional[Dict]]:
+        """Try TetGen as supplementary mesher (requires tetgen package)"""
+        self.log_message("Trying TetGen supplementary mesher...")
+
+        if not TETGEN_AVAILABLE:
+            self.log_message("⚠ TetGen not available")
+            return False, None
+
+        try:
+            # ✅ FIXED: TetGen needs actual 2D surface file
+            # Generate 2D surface mesh
+            gmsh.model.mesh.clear()
+            gmsh.model.mesh.generate(2)
+
+            # Export surface mesh for TetGen
+            temp_surface = "temp_tetgen_surface.stl"
+            gmsh.write(temp_surface)
+            self.log_message(f"  ✓ Exported 2D surface mesh to {temp_surface}")
+
+            # Use TetGen strategy with actual surface file
+            tetgen_gen = TetGenMeshGenerator(self.config)
+            temp_output = "temp_tetgen_mesh.msh"
+
+            # TetGen will mesh the volume with quality constraints
+            # Typical TetGen flags: -q1.4/20 murders 1.0-skew outliers
+            if tetgen_gen.run_meshing_strategy(temp_surface, temp_output):
+                # Load TetGen result back into Gmsh
+                gmsh.model.mesh.clear()
+                gmsh.open(temp_output)
+
+                # Analyze the TetGen mesh
+                metrics = self.analyze_current_mesh()
+                if metrics:
+                    return True, metrics
+
+            return False, None
+
+        except Exception as e:
+            self.log_message(f"⚠ TetGen failed: {e}")
+            return False, None
+
+    def _try_pymesh(self) -> Tuple[bool, Optional[Dict]]:
+        """Try PyMesh for mesh repair and generation (requires pymesh2/pymeshfix package)"""
+        self.log_message("Trying PyMesh supplementary mesher...")
+
+        if not PYMESH_AVAILABLE:
+            self.log_message("⚠ PyMesh not available")
+            return False, None
+
+        try:
+            # PyMesh operates on surface mesh, so generate 2D first
+            gmsh.model.mesh.clear()
+            gmsh.model.mesh.generate(2)
+
+            # Use PyMesh strategy
+            pymesh_gen = PyMeshMeshGenerator(self.config)
+
+            # PyMesh will repair surface and mesh volume
+            temp_output = "temp_pymesh_mesh.msh"
+
+            if pymesh_gen.run_meshing_strategy("", temp_output):
+                # Analyze the PyMesh mesh
+                metrics = self.analyze_current_mesh()
+                if metrics:
+                    return True, metrics
+
+            return False, None
+
+        except Exception as e:
+            self.log_message(f"⚠ PyMesh failed: {e}")
+            return False, None
+
+    def _upgrade_to_quadratic_safely(self):
+        """
+        ✅ ADDED: Safely upgrade linear mesh to quadratic (order-2)
+
+        Upgrades to curved elements AFTER optimization to avoid introducing slivers.
+        This is the recommended workflow:
+        1. Generate at order-1 (linear)
+        2. Optimize linear mesh
+        3. Upgrade to order-2 (quadratic/curved)
+        4. HighOrderOptimize to re-project nodes without slivers
+        """
+        self.log_message("  Upgrading to quadratic elements safely...")
+
+        # Set element order to 2 (quadratic)
+        gmsh.option.setNumber("Mesh.ElementOrder", 2)
+
+        # HighOrderOptimize: re-projects mid-side nodes onto CAD surfaces
+        # Level 2 = stronger optimization, prevents curved element distortion
+        gmsh.option.setNumber("Mesh.HighOrderOptimize", 2)
+
+        # Optional: extra Netgen pass on curved elements
+        try:
+            gmsh.model.mesh.optimize("Netgen")
+            self.log_message("  ✓ Upgraded to quadratic with high-order optimization")
+        except:
+            self.log_message("  ✓ Upgraded to quadratic (Netgen pass skipped)")
+
+    def _generate_and_analyze(self) -> Tuple[bool, Optional[Dict]]:
+        """Generate mesh and analyze quality with iterative refinement"""
+        try:
+            # ✅ IMPORTANT: Generate at order-1 first (linear elements)
+            # Curved elements make skewness worse if you curve before optimizing
+            original_order = gmsh.option.getNumber("Mesh.ElementOrder")
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)  # Force linear first
+
+            # Generate initial linear mesh
+            if not self.generate_mesh_internal(dimension=3):
+                return False, None
+
+            # ✅ ADDED: Optimize linear mesh BEFORE curving
+            self.log_message("  Optimizing linear mesh before upgrading to quadratic...")
+            gmsh.model.mesh.optimize("Netgen")
+            gmsh.model.mesh.optimize()  # Standard optimizer
+
+            # Optional: extra smoothing (harmless)
+            try:
+                gmsh.model.mesh.smooth("", 10)
+            except:
+                pass
+
+            # ✅ ADDED: Now safely upgrade to quadratic if needed
+            desired_order = getattr(self.config.mesh_params, "element_order", 2) if hasattr(self.config, 'mesh_params') else 2
+            if desired_order == 2:
+                self._upgrade_to_quadratic_safely()
+
+            # ====================================================================
+            # ✅ CRITICAL: TRUE ANISOTROPIC MESHING WORKFLOW
+            # ====================================================================
+            # Check if curvature data was stored during geometry setup
+            # If so, apply the TRUE metric tensor + MMG3D workflow
+            # ====================================================================
+            if hasattr(gmsh.model, '_anisotropic_generator') and hasattr(gmsh.model, '_anisotropic_curvature_data'):
+                aniso_gen = gmsh.model._anisotropic_generator
+                curvature_data = gmsh.model._anisotropic_curvature_data
+
+                if len(curvature_data) > 0:
+                    self.log_message("\n" + "="*70)
+                    self.log_message("TRUE ANISOTROPIC MESHING - METRIC TENSOR WORKFLOW")
+                    self.log_message("="*70)
+                    self.log_message(f"✓ Found {len(curvature_data)} curvature samples")
+                    self.log_message("  Applying metric tensor + MMG3D workflow...")
+
+                    try:
+                        # Step 1: Compute metric tensors from curvature data
+                        self.log_message("\n[1/3] Computing metric tensor field...")
+                        node_metrics = aniso_gen.compute_metric_field()
+                        self.log_message(f"  ✓ Created {len(node_metrics)} metric tensors")
+
+                        # Step 2: Export to .sol file
+                        self.log_message("\n[2/3] Exporting metric field to .sol file...")
+                        sol_file = "temp_anisotropic_metric.sol"
+                        if aniso_gen.export_sol_file(sol_file):
+                            self.log_message(f"  ✓ Exported to {sol_file}")
+
+                            # Step 3: Run MMG3D remeshing
+                            self.log_message("\n[3/3] Running MMG3D for anisotropic remeshing...")
+                            mesh_file = "temp_anisotropic_mesh.mesh"
+                            output_file = "temp_anisotropic_output.mesh"
+
+                            # Export current mesh for MMG3D
+                            gmsh.write(mesh_file)
+
+                            # Run MMG3D
+                            if aniso_gen.run_mmg3d_remeshing(mesh_file, sol_file, output_file):
+                                self.log_message("  ✓ MMG3D remeshing successful")
+
+                                # Load anisotropic mesh back
+                                gmsh.model.mesh.clear()
+                                gmsh.open(output_file)
+                                self.log_message("  ✓ Loaded anisotropic mesh")
+
+                                self.log_message("\n✅ TRUE ANISOTROPIC MESHING COMPLETE")
+                                self.log_message("  → Mesh now has stretched elements with high aspect ratios")
+                            else:
+                                self.log_message("  ⚠ MMG3D remeshing failed, using Gmsh mesh")
+                        else:
+                            self.log_message("  ⚠ Failed to export .sol file, using Gmsh mesh")
+
+                    except Exception as e:
+                        self.log_message(f"  ⚠ Anisotropic workflow failed: {e}")
+                        self.log_message("  → Continuing with Gmsh mesh")
+
+                    self.log_message("="*70 + "\n")
+
+            # Analyze initial quality
+            metrics = self.analyze_current_mesh()
+            if not metrics:
+                return False, None
+
+            # Check if we have valid elements
+            if metrics.get('total_elements', 0) == 0:
+                self.log_message("⚠ No elements generated")
+                return False, None
+
+            # ITERATIVE QUALITY REFINEMENT
+            # If quality is poor, try to fix it with targeted refinement
+            sicn_min = metrics.get('sicn', {}).get('min', 1.0)
+            skewness_max = metrics.get('skewness', {}).get('max', 0.0)
+
+            needs_refinement = (
+                sicn_min < 0.3 or  # Poor SICN (< 0.3)
+                sicn_min < 0 or     # Inverted elements
+                skewness_max >= 0.99  # Degenerate elements
+            )
+
+            if needs_refinement:
+                self.log_message(f"\n⚠ Poor quality detected (SICN={sicn_min:.3f}, Skewness={skewness_max:.3f})")
+                self.log_message("🔄 Attempting iterative quality refinement...")
+
+                refined_metrics = self._apply_iterative_quality_refinement(metrics)
+                if refined_metrics:
+                    # Use refined metrics if they're better
+                    new_sicn = refined_metrics.get('sicn', {}).get('min', sicn_min)
+                    new_skewness = refined_metrics.get('skewness', {}).get('max', skewness_max)
+
+                    if new_sicn > sicn_min:
+                        self.log_message(f"✓ Quality improved: SICN {sicn_min:.3f} → {new_sicn:.3f}")
+                        metrics = refined_metrics
+                    else:
+                        self.log_message(f"✗ Refinement didn't improve quality, keeping original mesh")
+
+            # Check for degenerate elements (skewness = 1.0)
+            if metrics.get('skewness') and metrics['skewness']['max'] >= 0.99:
+                self.log_message("⚠ Degenerate elements detected (skewness ≈ 1.0)")
+                # Still return the metrics for comparison, but mark as problematic
+                return True, metrics  # Allow comparison even if poor
+
+            # FINAL QUALITY VALIDATION & REPAIR (ENHANCED WITH MMG3D!)
+            # Check for poor quality and attempt repair
+            if sicn_min < 0 or sicn_min < 0.3:
+                severity = "CRITICAL" if sicn_min < 0 else "WARNING"
+                self.log_message(f"\n⚠ {severity}: Poor SICN detected ({sicn_min:.4f})")
+
+                if sicn_min < 0:
+                    self.log_message("  Inverted elements detected!")
+
+                # STEP 1: Try MMG3D anisotropic remeshing first (most powerful)
+                self.log_message("\n[1/2] Attempting MMG3D anisotropic remeshing...")
+
+                try:
+                    from core.true_anisotropic_meshing import TrueAnisotropicMeshGenerator
+                    import tempfile
+                    import os
+
+                    # Try MMG3D remeshing with metric tensors
+                    aniso_gen = TrueAnisotropicMeshGenerator(
+                        base_size=self.config.default_params.get('cl_max', 0.1) * 1000,
+                        anisotropy_ratio=100.0,
+                        curvature_threshold=10.0
+                    )
+
+                    # Compute curvature and metric field
+                    aniso_gen.compute_curvature_at_curves()
+                    aniso_gen.compute_metric_field()
+
+                    # Try MMG3D remeshing
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        input_mesh = os.path.join(tmpdir, "input.mesh")
+                        sol_file = os.path.join(tmpdir, "input.sol")
+                        output_mesh = os.path.join(tmpdir, "output.mesh")
+
+                        gmsh.write(input_mesh)
+
+                        if aniso_gen.export_sol_file(sol_file):
+                            if aniso_gen.run_mmg3d_remeshing(input_mesh, output_mesh, sol_file):
+                                # Load remeshed result
+                                gmsh.model.mesh.clear()
+                                gmsh.open(output_mesh)
+
+                                # Re-analyze
+                                mmg3d_metrics = self.analyze_current_mesh()
+                                if mmg3d_metrics:
+                                    new_sicn = mmg3d_metrics.get('sicn', {}).get('min', sicn_min)
+                                    if new_sicn > sicn_min:
+                                        self.log_message(f"  ✓ MMG3D remeshing improved quality: SICN {sicn_min:.4f} → {new_sicn:.4f}")
+                                        metrics = mmg3d_metrics
+                                        sicn_min = new_sicn
+                                    else:
+                                        self.log_message(f"  ⚠ MMG3D didn't improve quality")
+                            else:
+                                self.log_message(f"  ⚠ MMG3D remeshing failed")
+                        else:
+                            self.log_message(f"  ⚠ Metric field export failed")
+
+                except Exception as e:
+                    self.log_message(f"  ⚠ MMG3D approach failed: {e}")
+
+                # STEP 2: If still poor, try standard quality validator
+                if sicn_min < 0:
+                    self.log_message("\n[2/2] Attempting standard quality repair...")
+
+                    try:
+                        from core.mesh_quality_validator import MeshQualityValidator
+
+                        validator = MeshQualityValidator(
+                            sicn_threshold=0.0,  # No inverted elements
+                            skewness_threshold=0.95,
+                            aspect_ratio_threshold=1000.0,
+                            verbose=True
+                        )
+
+                        # Validate
+                        validation_result = validator.validate_current_mesh()
+
+                        if not validation_result['valid']:
+                            # Attempt repair
+                            self.log_message(f"  Found {validation_result['violations']} violations, repairing...")
+
+                            repair_success = validator.repair_mesh(max_iterations=3)
+
+                            if repair_success:
+                                # Re-analyze after repair
+                                repaired_metrics = self.analyze_current_mesh()
+                                if repaired_metrics:
+                                    new_sicn = repaired_metrics.get('sicn', {}).get('min', sicn_min)
+                                    if new_sicn > sicn_min:
+                                        self.log_message(f"  ✓ Quality repaired: SICN {sicn_min:.4f} → {new_sicn:.4f}")
+                                        metrics = repaired_metrics
+                                    else:
+                                        self.log_message("  ⚠ Repair didn't improve SICN")
+                            else:
+                                self.log_message("  ⚠ Repair unsuccessful")
+
+                    except Exception as repair_error:
+                        self.log_message(f"  ⚠ Quality validator failed: {repair_error}")
+
+            return True, metrics
+
+        except Exception as e:
+            self.log_message(f"⚠ Generation/analysis failed: {e}")
+            return False, None
+
+    def _apply_iterative_quality_refinement(self, initial_metrics: Dict) -> Optional[Dict]:
+        """Apply iterative quality refinement to fix bad elements"""
+        import tempfile
+
+        try:
+            from strategies.adaptive.iterative_quality_refiner import IterativeQualityRefiner
+
+            # Save current mesh to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.msh', delete=False) as tmp:
+                temp_mesh_file = tmp.name
+
+            gmsh.write(temp_mesh_file)
+
+            # Get base size from config
+            base_size = self.config.default_params.get('cl_max', 0.01) if hasattr(self.config, 'default_params') else 0.01
+            base_size_mm = base_size * 1000
+
+            # Create refiner
+            refiner = IterativeQualityRefiner(verbose=True)
+
+            # Run iterative refinement (max 3 passes)
+            max_iterations = 3
+            for iteration in range(max_iterations):
+                # Analyze bad elements and create refinement fields
+                result = refiner.refine_bad_quality_regions(
+                    temp_mesh_file,
+                    base_size_mm,
+                    iteration=iteration
+                )
+
+                if not result.get('should_refine', False):
+                    self.log_message(f"✓ Quality acceptable after {iteration} iterations")
+                    break
+
+                # Apply refinement fields to current gmsh model
+                self.log_message(f"\n[Iteration {iteration + 1}] Regenerating mesh with {len(result['field_tags'])} refinement fields...")
+
+                # Note: refinement fields were already created in gmsh by the refiner
+                # They're still active in the gmsh model
+
+                # Regenerate mesh with refinement fields
+                gmsh.model.mesh.clear()
+                if not self.generate_mesh_internal(dimension=3):
+                    self.log_message("✗ Regeneration failed")
+                    break
+
+                # Save updated mesh
+                gmsh.write(temp_mesh_file)
+
+                # Analyze new quality
+                new_metrics = self.analyze_current_mesh()
+                if not new_metrics:
+                    self.log_message("✗ Analysis failed")
+                    break
+
+                new_sicn = new_metrics.get('sicn', {}).get('min', 0)
+                self.log_message(f"  New SICN min: {new_sicn:.3f}")
+
+                # Check if quality is now acceptable
+                if new_sicn >= 0.3:
+                    self.log_message(f"✓ Quality goal achieved after {iteration + 1} iterations!")
+                    os.unlink(temp_mesh_file)
+                    return new_metrics
+
+            # Clean up
+            os.unlink(temp_mesh_file)
+
+            # Return final metrics
+            final_metrics = self.analyze_current_mesh()
+            return final_metrics
+
+        except ImportError:
+            self.log_message("⚠ IterativeQualityRefiner not available")
+            return None
+        except Exception as e:
+            self.log_message(f"⚠ Iterative refinement failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _generate_exhaustive_report(self, output_file: str):
+        """Generate comprehensive report of all attempts"""
+        self.log_message("\n" + "=" * 60)
+        self.log_message("EXHAUSTIVE MESHING REPORT")
+        self.log_message("=" * 60)
+
+        self.log_message(f"\nTotal strategies attempted: {len(self.all_attempts)}")
+
+        # Count successes
+        successes = [a for a in self.all_attempts if a.get('success', False)]
+        self.log_message(f"Successful: {len(successes)}/{len(self.all_attempts)}")
+
+        # Show all attempts
+        self.log_message("\nAll Attempts:")
+        for i, attempt in enumerate(self.all_attempts, 1):
+            strategy = attempt.get('strategy', 'unknown')
+            success = "✓" if attempt.get('success') else "✗"
+            score = attempt.get('score', float('inf'))
+
+            if score < float('inf'):
+                self.log_message(f"  {i}. {success} {strategy}: score={score:.2f}")
+            else:
+                error = attempt.get('error', 'failed')
+                self.log_message(f"  {i}. {success} {strategy}: {error}")
+
+        # Best result
+        best = min(self.all_attempts, key=lambda x: x.get('score', float('inf')))
+        if best.get('score', float('inf')) < float('inf'):
+            self.log_message(f"\n★ BEST RESULT: {best['strategy']}")
+            self.log_message(f"   Score: {best['score']:.2f}")
+
+            metrics = best.get('metrics', {})
+            if metrics.get('skewness'):
+                s = metrics['skewness']
+                self.log_message(f"   Skewness: Max={s['max']:.4f}, Avg={s['avg']:.4f}, Min={s['min']:.4f}")
+            if metrics.get('aspect_ratio'):
+                a = metrics['aspect_ratio']
+                self.log_message(f"   Aspect Ratio: Max={a['max']:.2f}, Avg={a['avg']:.2f}")
+
+        self.log_message(f"\nFinal mesh saved to: {output_file}")
+        self.log_message("=" * 60)
+
+    def _generate_failure_report(self):
+        """Generate report when everything failed"""
+        self.log_message("\n" + "=" * 60)
+        self.log_message("COMPLETE FAILURE REPORT")
+        self.log_message("=" * 60)
+
+        self.log_message(f"\nAll {len(self.all_attempts)} strategies failed!")
+        self.log_message("\nAttempted strategies:")
+        for attempt in self.all_attempts:
+            strategy = attempt.get('strategy', 'unknown')
+            error = attempt.get('error', 'unknown failure')
+            self.log_message(f"  ✗ {strategy}: {error}")
+
+        self.log_message("\nPossible causes:")
+        self.log_message("  1. Geometry has serious issues (self-intersections, gaps, etc.)")
+        self.log_message("  2. Very small features that can't be meshed")
+        self.log_message("  3. Invalid CAD file")
+        self.log_message("  4. Geometry too complex for automatic meshing")
+
+        self.log_message("\nRecommendations:")
+        self.log_message("  1. Check geometry in CAD software")
+        self.log_message("  2. Simplify geometry (remove small features)")
+        self.log_message("  3. Try manual meshing in Gmsh GUI: gmsh your_file.step")
+        self.log_message("  4. Check for geometry errors in CAD export")
+        self.log_message("=" * 60)
+
+    def _save_detailed_report_to_file(self, output_file: str, success: bool):
+        """
+        Save comprehensive report to text file for crash/failure analysis
+
+        Creates a report with:
+        - Human-readable summary at the top
+        - All technical details below for debugging
+        """
+        # Create report filename
+        report_file = output_file.replace('.msh', '_exhaustive_report.txt')
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            with open(report_file, 'w') as f:
+                # ===== HUMAN-READABLE SUMMARY =====
+                f.write("=" * 70 + "\n")
+                f.write("EXHAUSTIVE MESH GENERATION REPORT - SUMMARY\n")
+                f.write("=" * 70 + "\n\n")
+                f.write(f"Report Generated: {timestamp}\n")
+                f.write(f"Output File: {output_file}\n")
+                f.write(f"Overall Status: {'SUCCESS' if success else 'FAILED'}\n\n")
+
+                # Strategy summary
+                f.write(f"Total Strategies Attempted: {len(self.all_attempts)}\n")
+                successes = [a for a in self.all_attempts if a.get('success', False)]
+                f.write(f"Successful Strategies: {len(successes)}/{len(self.all_attempts)}\n\n")
+
+                # Best result (if any)
+                if successes:
+                    best = min(self.all_attempts, key=lambda x: x.get('score', float('inf')))
+                    if best.get('score', float('inf')) < float('inf'):
+                        f.write("★ BEST RESULT:\n")
+                        f.write(f"  Strategy: {best['strategy']}\n")
+                        f.write(f"  Quality Score: {best['score']:.2f} (lower is better)\n")
+
+                        metrics = best.get('metrics', {})
+
+                        # Show Gmsh native metrics (primary - most accurate)
+                        if metrics.get('gmsh_sicn'):
+                            s = metrics['gmsh_sicn']
+                            f.write(f"  SICN (Gmsh): Min={s['min']:.4f}, Max={s['max']:.4f}, Avg={s['avg']:.4f}\n")
+                        if metrics.get('gmsh_gamma'):
+                            g = metrics['gmsh_gamma']
+                            f.write(f"  Gamma (Gmsh): Min={g['min']:.4f}, Max={g['max']:.4f}, Avg={g['avg']:.4f}\n")
+
+                        # Show converted metrics (secondary - for reference)
+                        if metrics.get('skewness'):
+                            s = metrics['skewness']
+                            f.write(f"  Skewness (converted): Max={s['max']:.4f}, Avg={s['avg']:.4f}, Min={s['min']:.4f}\n")
+                        if metrics.get('aspect_ratio'):
+                            a = metrics['aspect_ratio']
+                            f.write(f"  Aspect Ratio (converted): Max={a['max']:.2f}, Avg={a['avg']:.2f}, Min={a['min']:.2f}\n")
+
+                        # Show element counts
+                        if metrics.get('total_elements'):
+                            f.write(f"  Total Elements: {metrics['total_elements']:,}\n")
+                        if metrics.get('total_nodes'):
+                            f.write(f"  Total Nodes: {metrics['total_nodes']:,}\n")
+                        f.write("\n")
+
+                # Quality assessment
+                if success and successes:
+                    best = min(self.all_attempts, key=lambda x: x.get('score', float('inf')))
+                    metrics = best.get('metrics', {})
+                    f.write("QUALITY ASSESSMENT:\n")
+
+                    # Assess based on Gmsh SICN (most accurate)
+                    if metrics.get('gmsh_sicn'):
+                        sicn_min = metrics['gmsh_sicn']['min']
+                        if sicn_min < 0:
+                            f.write(f"  ✗ SICN: CRITICAL - INVERTED ELEMENTS ({sicn_min:.4f} < 0)\n")
+                        elif sicn_min > 0.5:
+                            f.write(f"  ✓ SICN: EXCELLENT ({sicn_min:.4f} > 0.5)\n")
+                        elif sicn_min > 0.3:
+                            f.write(f"  ⚠ SICN: GOOD ({sicn_min:.4f} > 0.3)\n")
+                        else:
+                            f.write(f"  ✗ SICN: POOR ({sicn_min:.4f} ≤ 0.3)\n")
+
+                    # Assess based on Gmsh Gamma
+                    if metrics.get('gmsh_gamma'):
+                        gamma_min = metrics['gmsh_gamma']['min']
+                        if gamma_min > 0.4:
+                            f.write(f"  ✓ Gamma: EXCELLENT ({gamma_min:.4f} > 0.4)\n")
+                        elif gamma_min > 0.2:
+                            f.write(f"  ⚠ Gamma: GOOD ({gamma_min:.4f} > 0.2)\n")
+                        else:
+                            f.write(f"  ✗ Gamma: POOR ({gamma_min:.4f} ≤ 0.2)\n")
+
+                    # Also show converted metrics assessments for reference
+                    if metrics.get('skewness'):
+                        max_skew = metrics['skewness']['max']
+                        if max_skew <= 0.7:
+                            f.write(f"  ✓ Skewness (converted): EXCELLENT ({max_skew:.4f} ≤ 0.7)\n")
+                        elif max_skew <= 0.85:
+                            f.write(f"  ⚠ Skewness (converted): ACCEPTABLE ({max_skew:.4f} ≤ 0.85)\n")
+                        else:
+                            f.write(f"  ✗ Skewness (converted): POOR ({max_skew:.4f} > 0.85)\n")
+
+                    if metrics.get('aspect_ratio'):
+                        max_aspect = metrics['aspect_ratio']['max']
+                        if max_aspect <= 5.0:
+                            f.write(f"  ✓ Aspect Ratio (converted): EXCELLENT ({max_aspect:.2f} ≤ 5.0)\n")
+                        elif max_aspect <= 10.0:
+                            f.write(f"  ⚠ Aspect Ratio (converted): ACCEPTABLE ({max_aspect:.2f} ≤ 10.0)\n")
+                        else:
+                            f.write(f"  ✗ Aspect Ratio (converted): POOR ({max_aspect:.2f} > 10.0)\n")
+                    f.write("\n")
+
+                # ===== TECHNICAL DETAILS =====
+                f.write("\n" + "=" * 70 + "\n")
+                f.write("TECHNICAL DETAILS (For Crash/Failure Analysis)\n")
+                f.write("=" * 70 + "\n\n")
+
+                # Geometry information
+                f.write("GEOMETRY INFORMATION:\n")
+                for key, value in self.geometry_info.items():
+                    f.write(f"  {key}: {value}\n")
+                f.write("\n")
+
+                # Detailed attempt log
+                f.write("ALL STRATEGY ATTEMPTS:\n")
+                f.write("-" * 70 + "\n")
+
+                for i, attempt in enumerate(self.all_attempts, 1):
+                    strategy = attempt.get('strategy', 'unknown')
+                    success_flag = attempt.get('success', False)
+                    score = attempt.get('score', float('inf'))
+
+                    f.write(f"\nAttempt {i}: {strategy}\n")
+                    f.write(f"  Status: {'SUCCESS' if success_flag else 'FAILED'}\n")
+
+                    if success_flag:
+                        f.write(f"  Quality Score: {score:.2f}\n")
+                        metrics = attempt.get('metrics', {})
+                        if metrics:
+                            f.write(f"  Metrics:\n")
+                            # Gmsh native metrics (primary)
+                            if metrics.get('gmsh_sicn'):
+                                s = metrics['gmsh_sicn']
+                                f.write(f"    SICN (Gmsh): min={s['min']:.4f}, max={s['max']:.4f}, avg={s['avg']:.4f}\n")
+                            if metrics.get('gmsh_gamma'):
+                                g = metrics['gmsh_gamma']
+                                f.write(f"    Gamma (Gmsh): min={g['min']:.4f}, max={g['max']:.4f}, avg={g['avg']:.4f}\n")
+                            # Converted metrics (secondary)
+                            if metrics.get('skewness'):
+                                s = metrics['skewness']
+                                f.write(f"    Skewness (converted): min={s['min']:.4f}, max={s['max']:.4f}, avg={s['avg']:.4f}\n")
+                            if metrics.get('aspect_ratio'):
+                                a = metrics['aspect_ratio']
+                                f.write(f"    Aspect Ratio (converted): min={a['min']:.4f}, max={a['max']:.4f}, avg={a['avg']:.4f}\n")
+                            if metrics.get('total_elements'):
+                                f.write(f"    Total Elements: {metrics['total_elements']:,}\n")
+                            if metrics.get('total_nodes'):
+                                f.write(f"    Total Nodes: {metrics['total_nodes']:,}\n")
+                    else:
+                        error = attempt.get('error', 'unknown')
+                        f.write(f"  Error: {error}\n")
+
+                    f.write("-" * 70 + "\n")
+
+                # Configuration used
+                f.write("\nCONFIGURATION:\n")
+                f.write(f"  Quality Targets:\n")
+                f.write(f"    Max Skewness: {self.config.quality_targets.skewness_max}\n")
+                f.write(f"    Max Aspect Ratio: {self.config.quality_targets.aspect_ratio_max}\n")
+                f.write(f"    Min Angle: {self.config.quality_targets.min_angle_min}\n")
+                f.write(f"  Mesh Parameters:\n")
+                f.write(f"    Element Order: {self.config.mesh_params.element_order}\n")
+                f.write(f"    Max Iterations: {self.config.mesh_params.max_iterations}\n")
+
+                # Recommendations if failed
+                if not success:
+                    f.write("\nRECOMMENDATIONS:\n")
+                    f.write("  1. Check geometry for self-intersections or gaps in CAD software\n")
+                    f.write("  2. Simplify geometry (remove small features, fillets < 1mm)\n")
+                    f.write("  3. Try opening in Gmsh GUI: gmsh your_file.step\n")
+                    f.write("  4. Export CAD with higher tolerance or different format (IGES vs STEP)\n")
+                    f.write("  5. Consider defeaturing or geometry repair tools\n")
+
+                f.write("\n" + "=" * 70 + "\n")
+                f.write("END OF REPORT\n")
+                f.write("=" * 70 + "\n")
+
+            self.log_message(f"\n✓ Detailed report saved to: {report_file}")
+
+        except Exception as e:
+            self.log_message(f"⚠ Could not save detailed report: {e}")
+
+
+def main():
+    """Command-line interface"""
+    if len(sys.argv) > 1:
+        cad_file = sys.argv[1]
+    else:
+        cad_file = input("Enter CAD file path: ").strip()
+
+    try:
+        generator = ExhaustiveMeshGenerator()
+        result = generator.generate_mesh(cad_file)
+
+        if result.success:
+            print(f"\n✓ Exhaustive meshing completed!")
+            print(f"Output file: {result.output_file}")
+        else:
+            print(f"\n✗ All meshing strategies failed")
+            print("See detailed report above for diagnostics")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"\n✗ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
