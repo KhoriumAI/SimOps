@@ -200,12 +200,11 @@ class ConvexDecomposition:
             parts = coacd.run_coacd(
                 mesh=mesh,
                 threshold=threshold,
+                max_convex_hull=32,       # Hard limit to prevent over-shattering
+                preprocess_resolution=50, # Balanced resolution
                 mcts_nodes=20,
-                mcts_iterations=100,  # Increased for better cut search
-                mcts_max_depth=3,
-                resolution=2000,
-                preprocess_mode='auto',
-                preprocess_resolution=100 # Increased for higher fidelity
+                mcts_iterations=60,       # Reduced for faster search
+                mcts_max_depth=3
             )
             
             self.log(f"Decomposed into {len(parts)} convex parts.")

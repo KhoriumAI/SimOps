@@ -18,7 +18,7 @@ def test_step4():
     print("=== Testing Hex Dominant Meshing - Step 4 (Tetrahedral Baseline) ===")
     
     # Use the model.step from previous tests
-    cad_file = "C:/Users/Owner/Downloads/MeshTest/cad_files/model.step"
+    cad_file = "C:/Users/Owner/Downloads/MeshTest/cad_files/cube.step"
     
     if not os.path.exists(cad_file):
         print(f"Error: CAD file not found at {cad_file}")
@@ -41,8 +41,8 @@ def test_step4():
     # 2. Step 2: Convex Decomposition
     print("\n[Step 2] Running CoACD Decomposition...")
     step2 = ConvexDecomposition()
-    # Use 0.01 threshold (Max tightness)
-    parts, stats = step2.decompose_mesh(output_stl, threshold=0.01)
+    # Use 0.05 threshold (Safety First - prevent over-shattering)
+    parts, stats = step2.decompose_mesh(output_stl, threshold=0.05)
     
     if not parts:
         print("Failed Step 2.")

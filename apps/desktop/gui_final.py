@@ -520,7 +520,7 @@ class VTK3DViewer(QFrame):
         self.clip_axis = 'x'
         self.clip_offset = 0.0  # -50 to +50 percentage
         self.cross_section_actor = None  # Actor for cross-section visualization
-        self.cross_section_mode = "perfect"  # "perfect" or "layered"
+        self.cross_section_mode = "layered"  # Always use layered mode (show complete tets)
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -1141,7 +1141,7 @@ class VTK3DViewer(QFrame):
         for all tets that intersect the plane (ANSYS-style coarse visualization).
         
         Returns:
-            vtk.vtkPolyData containing complete tet faces
+            vtk.vtkPolyData containing complete tet faces with quality colors if available
         """
         import numpy as np
         
@@ -1166,6 +1166,9 @@ class VTK3DViewer(QFrame):
         all_triangles = []
         point_offset = 0
         
+        # Track tet IDs for quality coloring
+        face_to_tet_id = []  # Maps each face to its source tet ID
+        
         for tet in intersecting_tets:
             node_ids = tet['nodes']
             vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
@@ -1177,6 +1180,7 @@ class VTK3DViewer(QFrame):
             for face_indices in tet_faces:
                 tri_indices = [point_offset + i for i in face_indices]
                 all_triangles.append(tri_indices)
+                face_to_tet_id.append(tet['id'])  # Track which tet this face belongs to
             
             point_offset += 4  # 4 vertices per tet
         
@@ -1195,6 +1199,56 @@ class VTK3DViewer(QFrame):
         poly_data = vtk.vtkPolyData()
         poly_data.SetPoints(points)
         poly_data.SetPolys(triangles)
+        
+        # Apply quality colors if available
+        if hasattr(self, 'current_quality_data') and self.current_quality_data:
+            per_elem_quality = self.current_quality_data.get('per_element_quality', {})
+            
+            # Helper: HSL to RGB
+            def hsl_to_rgb(h, s, l):
+                def hue_to_rgb(p, q, t):
+                    if t < 0: t += 1
+                    if t > 1: t -= 1
+                    if t < 1/6: return p + (q - p) * 6 * t
+                    if t < 1/2: return q
+                    if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                    return p
+                
+                if s == 0:
+                    r = g = b = l
+                else:
+                    q = l * (1 + s) if l < 0.5 else l + s - l * s
+                    p = 2 * l - q
+                    r = hue_to_rgb(p, q, h + 1/3)
+                    g = hue_to_rgb(p, q, h)
+                    b = hue_to_rgb(p, q, h - 1/3)
+                
+                return int(r * 255), int(g * 255), int(b * 255)
+            
+            # Create color array
+            colors = vtk.vtkUnsignedCharArray()
+            colors.SetNumberOfComponents(3)
+            colors.SetName("Colors")
+            
+            colored_faces = 0
+            for face_idx, tet_id in enumerate(face_to_tet_id):
+                tet_id_str = str(tet_id)
+                quality = per_elem_quality.get(tet_id_str)
+                
+                if quality is not None:
+                    # Map quality [0, 1] to hue [0° (red), 120° (green)]
+                    # 0 = poor (red), 1 = good (green)
+                    hue = quality * 0.333  # 0.333 = 120°/360°
+                    r, g, b = hsl_to_rgb(hue, 0.8, 0.5)
+                    colors.InsertNextTuple3(r, g, b)
+                    colored_faces += 1
+                else:
+                    # No quality data for this tet, use gray
+                    colors.InsertNextTuple3(128, 128, 128)
+            
+            if colored_faces > 0:
+                poly_data.GetCellData().SetScalars(colors)
+                print(f"[DEBUG] Applied quality colors to {colored_faces}/{len(all_triangles)} layered faces")
         
         print(f"[DEBUG] Layered cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} faces")
         
@@ -1257,28 +1311,33 @@ class VTK3DViewer(QFrame):
             
         above_mapper = vtk.vtkPolyDataMapper()
         above_mapper.SetInputData(clipper_above.GetOutput())
+        
+        # IMPORTANT: Render ghost BEHIND cross-section using depth offset
+        # Positive offset pushes away from camera
+        above_mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1, 1)
+        
         self.above_cut_actor.SetMapper(above_mapper)
-        self.above_cut_actor.GetProperty().SetOpacity(0.05)  # Very transparent
+        self.above_cut_actor.GetProperty().SetOpacity(0.05)  # Very transparent ghost
+        self.above_cut_actor.GetProperty().SetColor(0.7, 0.7, 0.7)  # Light gray
+        # Set ghost visibility based on checkbox
+        if hasattr(self, 'show_ghost_cb') and self.show_ghost_cb.isChecked():
+            self.above_cut_actor.VisibilityOn()
+        else:
+            self.above_cut_actor.VisibilityOff()
         
-        # Copy color/material properties from main actor
-        self.above_cut_actor.GetProperty().SetColor(
-            self.current_actor.GetProperty().GetColor()
-        )
-        self.above_cut_actor.VisibilityOn()
+        # --- PART 3: CROSS-SECTION (LAYERED TETS) ---
+        # Generate cross-section showing complete tetrahedra
+        cross_section_poly = self._generate_layered_cross_section(origin, normal)
         
-        # --- PART 3: CROSS-SECTION PLANE ---
-        # Choose cross-section method based on mode
-        if self.cross_section_mode == "layered":
-            cross_section_poly = self._generate_layered_cross_section(origin, normal)
-        else:  # "perfect" mode (default)
-            cross_section_poly = self._generate_cross_section_mesh(origin, normal)
-        
-        has_cross_section = cross_section_poly.GetNumberOfCells() > 0
-        
-        if has_cross_section:
+        if cross_section_poly.GetNumberOfCells() > 0:
             # Create mapper for cross-section
             cs_mapper = vtk.vtkPolyDataMapper()
             cs_mapper.SetInputData(cross_section_poly)
+            
+            # CRITICAL: Use depth offset to render cross-section ABOVE everything else
+            # Negative offset shifts toward camera, eliminating z-fighting
+            cs_mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(-1, -1)
+            cs_mapper.SetRelativeCoincidentTopologyLineOffsetParameters(-1, -1)
             
             # Create actor if it doesn't exist
             if not self.cross_section_actor:
@@ -1287,32 +1346,43 @@ class VTK3DViewer(QFrame):
             
             self.cross_section_actor.SetMapper(cs_mapper)
             
-            # Style the cross-section plane based on mode
-            if self.cross_section_mode == "layered":
-                # Layered mode: show tet faces with edges
-                self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)  # Bright red
-                self.cross_section_actor.GetProperty().SetOpacity(1.0)  # Fully opaque to match surface
-                self.cross_section_actor.GetProperty().SetLighting(True)
-                self.cross_section_actor.GetProperty().EdgeVisibilityOn()  # Show edges
-                self.cross_section_actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)  # Dark gray edges
-                self.cross_section_actor.GetProperty().SetLineWidth(1.5)
-                print(f"[DEBUG] Layered mode: showing complete tetrahedra with edges")
+            # Check if we have quality colors
+            has_quality_colors = (cross_section_poly.GetCellData().GetScalars() is not None)
+            
+            if has_quality_colors:
+                # Use quality colors
+                cs_mapper.SetScalarModeToUseCellData()
+                cs_mapper.ScalarVisibilityOn()
+                cs_mapper.SetColorModeToDirectScalars()  # RGB 0-255 values
+                print(f"[DEBUG] Layered mode: using quality colors")
             else:
-                # Perfect mode: smooth slice
-                self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)  # Bright red
-                self.cross_section_actor.GetProperty().SetOpacity(0.9)  # Mostly opaque
-                self.cross_section_actor.GetProperty().SetLighting(True)
-                self.cross_section_actor.GetProperty().EdgeVisibilityOn()
-                self.cross_section_actor.GetProperty().SetEdgeColor(0.3, 0.0, 0.0)  # Dark red edges
-                self.cross_section_actor.GetProperty().SetLineWidth(2.0)
+                # Fallback to solid red if no quality data
+                self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)
+                cs_mapper.ScalarVisibilityOff()
+                print(f"[DEBUG] Layered mode: no quality data, using solid red")
+            
+            # Full opacity and BRIGHT lighting for cross-section tets
+            self.cross_section_actor.GetProperty().SetOpacity(1.0)  
+            self.cross_section_actor.GetProperty().SetLighting(True)
+            
+            # CRITICAL: Match surface mesh lighting for equal brightness
+            # Increase ambient to reduce shadow darkness
+            self.cross_section_actor.GetProperty().SetAmbient(0.6)  # Higher ambient = brighter
+            self.cross_section_actor.GetProperty().SetDiffuse(0.8)  # Strong diffuse
+            self.cross_section_actor.GetProperty().SetSpecular(0.2)  # Some shine
+            
+            # Edge visibility
+            self.cross_section_actor.GetProperty().EdgeVisibilityOn()
+            self.cross_section_actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)
+            self.cross_section_actor.GetProperty().SetLineWidth(1.0)
             
             self.cross_section_actor.VisibilityOn()
-            
             print(f"[DEBUG] Cross-section: {cross_section_poly.GetNumberOfCells()} triangles")
-            print(f"[DEBUG] Below cut: 100% opacity, Above cut: 5% opacity")
         else:
             if self.cross_section_actor:
                 self.cross_section_actor.VisibilityOff()
+        
+        print(f"[DEBUG] Below cut: 100% opacity, Above cut: 5% opacity (ghost)")
         
         self.vtk_widget.GetRenderWindow().Render()
     
@@ -1787,6 +1857,25 @@ except Exception as e:
             self.current_actor.SetMapper(mapper)
             
             # Styling: Smooth Blue CAD look
+            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
+            self.current_actor.GetProperty().SetInterpolationToPhong()
+            self.current_actor.GetProperty().EdgeVisibilityOff()
+            self.current_actor.GetProperty().SetAmbient(0.3)
+            self.current_actor.GetProperty().SetDiffuse(0.7)
+            self.current_actor.GetProperty().SetSpecular(0.2)
+
+            self.renderer.AddActor(self.current_actor)
+            self.renderer.ResetCamera()
+            self.vtk_widget.GetRenderWindow().Render()
+
+            # Update Info Label
+            volume_text = ""
+            if geom_info and 'volume' in geom_info:
+                v = geom_info['volume']
+                if v > 0.001: 
+                    volume_text = f"<br>Volume: {v:.4f} m³"
+                else: 
+                    volume_text = f"<br>Volume: {v*1e9:.0f} mm³"
 
             self.info_label.setText(
                 f"<b>CAD Preview</b><br>"
@@ -3108,12 +3197,13 @@ class ModernMeshGenGUI(QMainWindow):
         controls_layout.addWidget(axes_cb)
         
         # Cross-section mode toggle
-        self.layered_mode_cb = QCheckBox("Layered Cross-Section (ANSYS-style)")
-        self.layered_mode_cb.setChecked(False)  # Default to perfect mode
-        self.layered_mode_cb.setStyleSheet("QCheckBox { color: black; font-size: 11px; }")
-        self.layered_mode_cb.setToolTip("Show complete tetrahedra instead of perfect geometric slice")
-        self.layered_mode_cb.stateChanged.connect(self.on_layered_mode_toggled)
-        controls_layout.addWidget(self.layered_mode_cb)
+        # Ghost visibility toggle
+        self.show_ghost_cb = QCheckBox("Show Ghost (Above Cut)")
+        self.show_ghost_cb.setChecked(False)  # Default: hide ghost for full brightness
+        self.show_ghost_cb.setStyleSheet("QCheckBox { color: black; font-size: 11px; }")
+        self.show_ghost_cb.setToolTip("Show transparent outline of portion above cross-section")
+        self.show_ghost_cb.stateChanged.connect(self.on_ghost_visibility_toggled)
+        controls_layout.addWidget(self.show_ghost_cb)
         
         controls_layout.addStretch()
 
@@ -3283,14 +3373,15 @@ class ModernMeshGenGUI(QMainWindow):
             axis=self.clip_axis_combo.currentText(),
             offset=value
         )
-    def on_layered_mode_toggled(self, state):
-        """Handle layered cross-section mode toggle"""
-        if hasattr(self, 'viewer') and self.viewer:
-            # state is an integer (0 = unchecked, 2 = checked)
-            # We convert it to boolean for our logic
-            mode = "layered" if state else "perfect"
-            self.viewer.set_cross_section_mode(mode)
-            self.add_log(f"Cross-section mode set to: {mode}")
+    def on_ghost_visibility_toggled(self, state):
+        """Handle ghost visibility toggle"""
+        if hasattr(self, 'above_cut_actor') and self.above_cut_actor:
+            if state:  # Checked = show ghost
+                self.above_cut_actor.VisibilityOn()
+            else:  # Unchecked = hide ghost for full brightness
+                self.above_cut_actor.VisibilityOff()
+            self.vtk_widget.GetRenderWindow().Render()
+            self.add_log(f"Ghost visibility: {'ON' if state else 'OFF'}")
 
 # --- VISUALIZATION HANDLERS ---
     def on_viz_range_slider_changed(self, value):
