@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QFileDialog, QFrame, QScrollArea, QGridLayout,
     QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox
 )
+from qtrangeslider import QRangeSlider
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QPalette, QColor
 
@@ -1786,23 +1787,6 @@ except Exception as e:
             self.current_actor.SetMapper(mapper)
             
             # Styling: Smooth Blue CAD look
-            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
-            self.current_actor.GetProperty().SetInterpolationToPhong()
-            self.current_actor.GetProperty().EdgeVisibilityOff()
-            self.current_actor.GetProperty().SetAmbient(0.3)
-            self.current_actor.GetProperty().SetDiffuse(0.7)
-            self.current_actor.GetProperty().SetSpecular(0.2)
-
-            self.renderer.AddActor(self.current_actor)
-            self.renderer.ResetCamera()
-            self.vtk_widget.GetRenderWindow().Render()
-
-            # Update Info Label
-            volume_text = ""
-            if geom_info and 'volume' in geom_info:
-                v = geom_info['volume']
-                if v > 0.001: volume_text = f"<br>Volume: {v:.4f} m³"
-                else: volume_text = f"<br>Volume: {v*1e9:.0f} mm³"
 
             self.info_label.setText(
                 f"<b>CAD Preview</b><br>"
@@ -2878,55 +2862,43 @@ class ModernMeshGenGUI(QMainWindow):
         viz_layout.addLayout(opacity_layout)
 
 
-        # Filter Range (Min/Max Spinbox Controls)
+        # Filter Range (Dual-Handled Range Slider)
         filter_label = QLabel("Show Quality Range:")
         filter_label.setStyleSheet("font-size: 11px; color: #495057; margin-top: 5px;")
         viz_layout.addWidget(filter_label)
 
-        range_layout = QHBoxLayout()
-        range_layout.setSpacing(8)
+        # Value display (shows current min/max)
+        range_value_layout = QHBoxLayout()
+        self.viz_range_min_label = QLabel("Min: 0.00")
+        self.viz_range_min_label.setStyleSheet("font-size: 10px; color: #0d6efd; font-weight: bold;")
+        self.viz_range_max_label = QLabel("Max: 1.00")
+        self.viz_range_max_label.setStyleSheet("font-size: 10px; color: #dc3545; font-weight: bold;")
+        range_value_layout.addWidget(self.viz_range_min_label)
+        range_value_layout.addStretch()
+        range_value_layout.addWidget(self.viz_range_max_label)
+        viz_layout.addLayout(range_value_layout)
         
-        # Min SpinBox
-        self.viz_min_spin = QDoubleSpinBox()
-        self.viz_min_spin.setRange(0.0, 10.0)  # Wide range for all metrics
-        self.viz_min_spin.setSingleStep(0.1)
-        self.viz_min_spin.setValue(0.0)
-        self.viz_min_spin.setDecimals(2)
-        self.viz_min_spin.setPrefix("Min: ")
-        self.viz_min_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                padding: 5px;
-                border: 2px solid #0d6efd;
-                border-radius: 4px;
-                background-color: white;
-                font-size: 11px;
-                font-weight: bold;
+        # Dual-handled range slider
+        self.viz_range_slider = QRangeSlider(Qt.Horizontal)
+        self.viz_range_slider.setMinimum(0)
+        self.viz_range_slider.setMaximum(100)
+        self.viz_range_slider.setValue((0, 100))
+        self.viz_range_slider.setStyleSheet("""
+            QRangeSlider {
+                qproperty-barColor: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #dc3545, stop:0.5 #ffc107, stop:1 #28a745);
             }
         """)
-        self.viz_min_spin.valueChanged.connect(self.on_viz_range_changed)
-        range_layout.addWidget(self.viz_min_spin)
-
-        # Max SpinBox
-        self.viz_max_spin = QDoubleSpinBox()
-        self.viz_max_spin.setRange(0.0, 100.0) # Allow high values for Aspect Ratio
-        self.viz_max_spin.setSingleStep(0.1)
-        self.viz_max_spin.setValue(1.0)
-        self.viz_max_spin.setDecimals(2)
-        self.viz_max_spin.setPrefix("Max: ")
-        self.viz_max_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                padding: 5px;
-                border: 2px solid #dc3545;
-                border-radius: 4px;
-                background-color: white;
-                font-size: 11px;
-                font-weight: bold;
-            }
-        """)
-        self.viz_max_spin.valueChanged.connect(self.on_viz_range_changed)
-        range_layout.addWidget(self.viz_max_spin)
+        self.viz_range_slider.valueChanged.connect(self.on_viz_range_slider_changed)
+        viz_layout.addWidget(self.viz_range_slider)
         
-        viz_layout.addLayout(range_layout)
+        # Store quality data ranges for auto-update
+        self.quality_data_ranges = {
+            'SICN': (0.0, 1.0),
+            'Gamma': (0.0, 1.0),
+            'Skewness': (0.0, 1.0),
+            'Aspect Ratio': (1.0, 10.0)
+        }
 
         viz_group.setLayout(viz_layout)
         layout.addWidget(viz_group)
@@ -3134,6 +3106,15 @@ class ModernMeshGenGUI(QMainWindow):
         axes_cb.setStyleSheet("QCheckBox { color: black; font-size: 11px; }")
         axes_cb.stateChanged.connect(lambda s: self.viewer.toggle_axes(s == Qt.Checked))
         controls_layout.addWidget(axes_cb)
+        
+        # Cross-section mode toggle
+        self.layered_mode_cb = QCheckBox("Layered Cross-Section (ANSYS-style)")
+        self.layered_mode_cb.setChecked(False)  # Default to perfect mode
+        self.layered_mode_cb.setStyleSheet("QCheckBox { color: black; font-size: 11px; }")
+        self.layered_mode_cb.setToolTip("Show complete tetrahedra instead of perfect geometric slice")
+        self.layered_mode_cb.stateChanged.connect(self.on_layered_mode_toggled)
+        controls_layout.addWidget(self.layered_mode_cb)
+        
         controls_layout.addStretch()
 
         layout.addWidget(controls)
@@ -3302,44 +3283,105 @@ class ModernMeshGenGUI(QMainWindow):
             axis=self.clip_axis_combo.currentText(),
             offset=value
         )
+    def on_layered_mode_toggled(self, state):
+        """Handle layered cross-section mode toggle"""
+        if hasattr(self, 'viewer') and self.viewer:
+            # state is an integer (0 = unchecked, 2 = checked)
+            # We convert it to boolean for our logic
+            mode = "layered" if state else "perfect"
+            self.viewer.set_cross_section_mode(mode)
+            self.add_log(f"Cross-section mode set to: {mode}")
 
 # --- VISUALIZATION HANDLERS ---
+    def on_viz_range_slider_changed(self, value):
+        """Handle range slider change - value is (min, max) tuple"""
+        min_slider, max_slider = value
+        
+        # Get current metric's data range
+        metric = self.viz_metric_combo.currentText()
+        data_min, data_max = self.quality_data_ranges.get(metric, (0.0, 1.0))
+        
+        # Convert slider position (0-100) to actual quality values
+        range_span = data_max - data_min
+        min_val = data_min + (min_slider / 100.0) * range_span
+        max_val = data_min + (max_slider / 100.0) * range_span
+        
+        # Update labels
+        self.viz_range_min_label.setText(f"Min: {min_val:.2f}")
+        self.viz_range_max_label.setText(f"Max: {max_val:.2f}")
+        
+        # Trigger visualization update
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.update_quality_visualization(
+                metric=metric,
+                opacity=self.viz_opacity_spin.value(),
+                min_val=min_val,
+                max_val=max_val
+            )
+
     def on_viz_metric_changed(self, text):
-        """Handle metric selection change (SICN, Gamma, etc.)"""
+        """Handle metric selection change - auto-update slider range"""
+        # Update slider range based on new metric
+        data_min, data_max = self.quality_data_ranges.get(text, (0.0, 1.0))
+        
+        # Reset slider to full range for new metric
+        self.viz_range_slider.setValue((0, 100))
+        
+        # Update labels with new metric's range
+        self.viz_range_min_label.setText(f"Min: {data_min:.2f}")
+        self.viz_range_max_label.setText(f"Max: {data_max:.2f}")
+        
+        # Trigger visualization update
         if hasattr(self, 'viewer') and self.viewer:
             self.viewer.update_quality_visualization(
                 metric=text,
                 opacity=self.viz_opacity_spin.value(),
-                min_val=self.viz_min_spin.value(),
-                max_val=self.viz_max_spin.value()
+                min_val=data_min,
+                max_val=data_max
             )
 
     def on_viz_opacity_changed(self, value):
         """Handle opacity change"""
         if hasattr(self, 'viewer') and self.viewer:
+            # Get current range from slider
+            min_slider, max_slider = self.viz_range_slider.value()
+            metric = self.viz_metric_combo.currentText()
+            data_min, data_max = self.quality_data_ranges.get(metric, (0.0, 1.0))
+            range_span = data_max - data_min
+            min_val = data_min + (min_slider / 100.0) * range_span
+            max_val = data_min + (max_slider / 100.0) * range_span
+            
             self.viewer.update_quality_visualization(
-                metric=self.viz_metric_combo.currentText(),
+                metric=metric,
                 opacity=value,
-                min_val=self.viz_min_spin.value(),
-                max_val=self.viz_max_spin.value()
+                min_val=min_val,
+                max_val=max_val
             )
 
-    def on_viz_range_changed(self, value):
-        """Handle min/max spinbox change"""
-        # Ensure min doesn't exceed max
-        if self.viz_min_spin.value() > self.viz_max_spin.value():
-            if self.sender() == self.viz_min_spin:
-                self.viz_max_spin.setValue(self.viz_min_spin.value())
-            else:
-                self.viz_min_spin.setValue(self.viz_max_spin.value())
+    def update_quality_data_ranges(self, per_element_quality, per_element_gamma, per_element_skewness, per_element_aspect_ratio):
+        """Update quality data ranges from loaded mesh data"""
+        if per_element_quality:
+            quality_values = list(per_element_quality.values())
+            self.quality_data_ranges['SICN'] = (min(quality_values), max(quality_values))
         
-        if hasattr(self, 'viewer') and self.viewer:
-            self.viewer.update_quality_visualization(
-                metric=self.viz_metric_combo.currentText(),
-                opacity=self.viz_opacity_spin.value(),
-                min_val=self.viz_min_spin.value(),
-                max_val=self.viz_max_spin.value()
-            )
+        if per_element_gamma:
+            gamma_values = list(per_element_gamma.values())
+            self.quality_data_ranges['Gamma'] = (min(gamma_values), max(gamma_values))
+        
+        if per_element_skewness:
+            skew_values = list(per_element_skewness.values())
+            self.quality_data_ranges['Skewness'] = (min(skew_values), max(skew_values))
+        
+        if per_element_aspect_ratio:
+            ar_values = list(per_element_aspect_ratio.values())
+            # Clamp max to reasonable value
+            self.quality_data_ranges['Aspect Ratio'] = (min(ar_values), min(max(ar_values), 20.0))
+        
+        # Update current metric's display
+        metric = self.viz_metric_combo.currentText()
+        data_min, data_max = self.quality_data_ranges.get(metric, (0.0, 1.0))
+        self.viz_range_min_label.setText(f"Min: {data_min:.2f}")
+        self.viz_range_max_label.setText(f"Max: {data_max:.2f}")
     # --------------------------------------
 
     def load_cad_file(self):
@@ -3745,6 +3787,15 @@ class ModernMeshGenGUI(QMainWindow):
 
                 self.add_log(f"[DEBUG] Calling viewer.show_quality_report...")
                 self.viewer.show_quality_report(metrics)
+                
+                # Update quality data ranges for the range slider
+                self.update_quality_data_ranges(
+                    result.get('per_element_quality', {}),
+                    result.get('per_element_gamma', {}),
+                    result.get('per_element_skewness', {}),
+                    result.get('per_element_aspect_ratio', {})
+                )
+                
                 self.add_log(f"[DEBUG] on_mesh_finished complete!")
 
                 # Update chatbox with mesh data, CAD file, and config
