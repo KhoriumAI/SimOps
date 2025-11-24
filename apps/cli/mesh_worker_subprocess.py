@@ -144,26 +144,79 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         num_tets = element_counts.get("4-node tetrahedron", 0) + element_counts.get("Tetrahedron 4", 0)
         total_3d = num_hexes + num_tets
         
-        # Extract per-element quality for visualization
+        # Count nodes
+        node_tags, _, _ = gmsh.model.mesh.getNodes()
+        total_nodes = len(node_tags)
+        
+        # Extract per-element quality for visualization (store as dict keyed by element id)
+        per_element_quality = {}
+        per_element_gamma = {}
+        per_element_skewness = {}
+        per_element_aspect_ratio = {}
+        volume_qualities = []
+        
         try:
-            from core.quality import compute_element_quality_gmsh
+            def _as_list(seq):
+                if hasattr(seq, "tolist"):
+                    return seq.tolist()
+                return list(seq)
             
-            # Get hex elements (type 5 = 8-node hex)
-            hex_tags, hex_nodes = gmsh.model.mesh.getElementsByType(5)
+            # Surface elements (triangles/quads) for viewer coloring
+            surf_types, surf_tags, _ = gmsh.model.mesh.getElements(2)
+            for elem_type, tags in zip(surf_types, surf_tags):
+                if elem_type in (2, 3, 9, 10):  # triangles + quads (linear/quadratic)
+                    tag_list = _as_list(tags)
+                    sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
+                    gamma_vals = gmsh.model.mesh.getElementQualities(tag_list, "gamma")
+                    for tag, sicn, gamma in zip(tag_list, sicn_vals, gamma_vals):
+                        tag_int = int(tag)
+                        sicn_val = float(sicn)
+                        gamma_val = float(gamma)
+                        per_element_quality[tag_int] = sicn_val
+                        per_element_gamma[tag_int] = gamma_val
+                        per_element_skewness[tag_int] = max(0.0, 1.0 - sicn_val)
+                        per_element_aspect_ratio[tag_int] = (1.0 / sicn_val) if sicn_val > 1e-6 else 1e6
             
-            if len(hex_tags) > 0:
-                # Compute quality for each hex
-                per_element_quality = []
-                for tag in hex_tags:
-                    quality = gmsh.model.mesh.getElementQualities([tag], "minSICN")
-                    per_element_quality.append(quality[0] if quality else 0.5)
-                
-                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
-            else:
-                per_element_quality = []
+            # Volume elements (tets/hexes) for statistics + cross-section
+            vol_types, vol_tags, _ = gmsh.model.mesh.getElements(3)
+            for elem_type, tags in zip(vol_types, vol_tags):
+                if elem_type in (4, 5, 11, 12):  # tets/hexes (linear + quadratic)
+                    tag_list = _as_list(tags)
+                    sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
+                    gamma_vals = gmsh.model.mesh.getElementQualities(tag_list, "gamma")
+                    for tag, sicn, gamma in zip(tag_list, sicn_vals, gamma_vals):
+                        tag_int = int(tag)
+                        sicn_val = float(sicn)
+                        gamma_val = float(gamma)
+                        per_element_quality[tag_int] = sicn_val
+                        per_element_gamma[tag_int] = gamma_val
+                        per_element_skewness[tag_int] = max(0.0, 1.0 - sicn_val)
+                        per_element_aspect_ratio[tag_int] = (1.0 / sicn_val) if sicn_val > 1e-6 else 1e6
+                        volume_qualities.append(sicn_val)
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
-            per_element_quality = []
+        
+        # Derive summary quality metrics (focus on volume elements if available)
+        if volume_qualities:
+            sorted_q = sorted(volume_qualities)
+            sicn_min = sorted_q[0]
+            sicn_max = sorted_q[-1]
+            sicn_avg = sum(sorted_q) / len(sorted_q)
+            idx_10 = max(0, int(len(sorted_q) * 0.10))
+            sicn_10 = sorted_q[idx_10]
+        elif per_element_quality:
+            values = list(per_element_quality.values())
+            values.sort()
+            sicn_min = values[0]
+            sicn_max = values[-1]
+            sicn_avg = sum(values) / len(values)
+            idx_10 = max(0, int(len(values) * 0.10))
+            sicn_10 = values[idx_10]
+        else:
+            sicn_min = 0.0
+            sicn_max = 1.0
+            sicn_avg = 0.0
+            sicn_10 = 0.0
         
         gmsh.finalize()
         
@@ -175,8 +228,11 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'strategy': 'hex_dominant_subdivision',
             'message': f'Hex-dominant mesh: {num_hexes} hexes, {num_tets} tets',
             'total_elements': total_3d,
-            'total_nodes': 0,  # TODO: count nodes
-            'per_element_quality': per_element_quality,  # For VTK visualization
+            'total_nodes': total_nodes,
+            'per_element_quality': per_element_quality,
+            'per_element_gamma': per_element_gamma,
+            'per_element_skewness': per_element_skewness,
+            'per_element_aspect_ratio': per_element_aspect_ratio,
             'metrics': {
                 'num_hexes': num_hexes,
                 'num_tets': num_tets,
@@ -185,9 +241,10 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                 'num_parts': len(parts)
             },
             'quality_metrics': {
-                'min_quality': min(per_element_quality) if per_element_quality else 0,
-                'max_quality': max(per_element_quality) if per_element_quality else 1,
-                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0
+                'sicn_min': sicn_min,
+                'sicn_max': sicn_max,
+                'sicn_avg': sicn_avg,
+                'sicn_10_percentile': sicn_10
             }
         }
         

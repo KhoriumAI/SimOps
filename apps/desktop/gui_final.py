@@ -514,13 +514,15 @@ class VTK3DViewer(QFrame):
         self.current_mesh_elements = None  # Store all elements list
         self.current_node_map = None  # Store node_id -> vtk_index mapping
         self.current_tetrahedra = None  # Store tetrahedra separately for cross-section
+        self.current_hexahedra = None  # Store hexahedra for volume visualization
         self.current_volumetric_grid = None  # Store full volumetric grid for 3D clipping
         self.clipping_enabled = False
         self.clip_plane = None
         self.clip_axis = 'x'
         self.clip_offset = 0.0  # -50 to +50 percentage
         self.cross_section_actor = None  # Actor for cross-section visualization
-        self.cross_section_mode = "layered"  # Always use layered mode (show complete tets)
+        self.cross_section_mode = "layered"  # Always use layered mode (show complete volume cells)
+        self.cross_section_element_mode = "auto"  # Auto-switch between tet/hex slicing
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -905,7 +907,7 @@ class VTK3DViewer(QFrame):
         Set cross-section visualization mode.
         
         Args:
-            mode: Either "perfect" for geometric slice or "layered" for complete tetrahedra
+            mode: Either "perfect" for geometric slice or "layered" for complete volume cells
         """
         if mode not in ["perfect", "layered"]:
             print(f"[WARNING] Invalid cross-section mode '{mode}', using 'perfect'")
@@ -915,6 +917,19 @@ class VTK3DViewer(QFrame):
         print(f"[DEBUG] Cross-section mode set to: {mode}")
         
         # Re-apply clipping if currently enabled
+        if self.clipping_enabled and self.current_poly_data:
+            self._apply_clipping()
+    
+    def set_cross_section_element_mode(self, mode: str):
+        """
+        Choose which volume elements to display in the slice
+        mode: 'auto', 'tetrahedra', or 'hexahedra'
+        """
+        mode = mode.lower()
+        if mode not in ("auto", "tetrahedra", "hexahedra"):
+            mode = "auto"
+        self.cross_section_element_mode = mode
+        print(f"[DEBUG] Cross-section element mode set to: {mode}")
         if self.clipping_enabled and self.current_poly_data:
             self._apply_clipping()
     
@@ -928,40 +943,55 @@ class VTK3DViewer(QFrame):
         diff = np.array(point) - np.array(plane_origin)
         return np.dot(diff, plane_normal)
     
-    def _get_tets_intersecting_plane(self, plane_origin, plane_normal):
+    def _iter_volume_elements(self):
+        """Yield stored volume cells for cross-section operations, respecting mode."""
+        if not self.current_mesh_nodes:
+            return
+        
+        mode = getattr(self, 'cross_section_element_mode', 'auto')
+        tets = self.current_tetrahedra or []
+        hexes = self.current_hexahedra or []
+        
+        if mode == "auto":
+            if hexes and (len(hexes) >= len(tets)):
+                mode = "hexahedra"
+            elif tets:
+                mode = "tetrahedra"
+            elif hexes:
+                mode = "hexahedra"
+            else:
+                mode = "tetrahedra"
+        
+        if mode == "tetrahedra" and tets:
+            for tet in tets:
+                yield tet
+        elif mode == "hexahedra" and hexes:
+            for hexa in hexes:
+                yield hexa
+        else:
+            # Fallback: yield whatever is available
+            for tet in tets:
+                yield tet
+            for hexa in hexes:
+                yield hexa
+    
+    def _get_volume_elements_intersecting_plane(self, plane_origin, plane_normal):
         """
-        Find all tetrahedra that intersect with the given plane.
-        A tet intersects if its vertices are on opposite sides of the plane.
-        
-        Returns:
-            List of tet elements that intersect the plane
+        Find all stored volume elements (tets/hexes) that intersect the plane.
         """
-        if not self.current_tetrahedra or not self.current_mesh_nodes:
-            return []
-        
-        intersecting_tets = []
-        
-        for tet in self.current_tetrahedra:
-            # Get the 4 vertices of this tet
-            node_ids = tet['nodes']
+        intersecting = []
+        for element in self._iter_volume_elements() or []:
+            node_ids = element['nodes']
             vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
-            
-            # Compute signed distance for each vertex
-            distances = [self._signed_distance_to_plane(v, plane_origin, plane_normal) 
-                        for v in vertices]
-            
-            # Check if vertices are on opposite sides
-            # (i.e., distances have different signs)
+            distances = [self._signed_distance_to_plane(v, plane_origin, plane_normal)
+                         for v in vertices]
             has_positive = any(d > 1e-10 for d in distances)
             has_negative = any(d < -1e-10 for d in distances)
-            
             if has_positive and has_negative:
-                # Tet crosses the plane
-                intersecting_tets.append(tet)
-        
-        return intersecting_tets
+                intersecting.append(element)
+        return intersecting
     
-    def _intersect_tet_edge_with_plane(self, v1, v2, plane_origin, plane_normal):
+    def _intersect_edge_with_plane(self, v1, v2, plane_origin, plane_normal):
         """
         Find the intersection point of a line segment (v1-v2) with a plane.
         Returns None if no intersection, otherwise returns the intersection point.
@@ -986,28 +1016,32 @@ class VTK3DViewer(QFrame):
         
         return intersection.tolist()
     
-    def _intersect_tet_with_plane(self, tet, plane_origin, plane_normal):
+    def _intersect_element_with_plane(self, element, plane_origin, plane_normal):
         """
-        Compute the intersection polygon of a tetrahedron with a plane.
-        
-        Returns:
-            List of 3D points forming the intersection polygon (typically 3 or 4 points),
-            ordered counterclockwise when viewed along the plane normal
+        Compute the intersection polygon of a volume element (tet or hex) with a plane.
         """
         import numpy as np
         
-        node_ids = tet['nodes']
+        node_ids = element['nodes']
         vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
         
-        # A tetrahedron has 6 edges: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
-        edges = [
-            (0, 1), (0, 2), (0, 3),
-            (1, 2), (1, 3), (2, 3)
-        ]
+        if element['type'] == 'tetrahedron':
+            edges = [
+                (0, 1), (0, 2), (0, 3),
+                (1, 2), (1, 3), (2, 3)
+            ]
+        elif element['type'] == 'hexahedron':
+            edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7)
+            ]
+        else:
+            return []
         
         intersection_points = []
         for i, j in edges:
-            point = self._intersect_tet_edge_with_plane(
+            point = self._intersect_edge_with_plane(
                 vertices[i], vertices[j], plane_origin, plane_normal
             )
             if point is not None:
@@ -1031,7 +1065,6 @@ class VTK3DViewer(QFrame):
             return unique_points
         
         # Order points by angle around centroid for correct winding
-        # This ensures triangulation doesn't create self-intersecting polygons
         centroid = np.mean(unique_points, axis=0)
         
         # Create two orthogonal vectors in the plane for 2D projection
@@ -1063,16 +1096,16 @@ class VTK3DViewer(QFrame):
     
     def _generate_cross_section_mesh(self, plane_origin, plane_normal):
         """
-        Generate VTK PolyData for the cross-section by intersecting all tets with the plane.
+        Generate VTK PolyData for the cross-section by intersecting all volume elements with the plane.
         
         Returns:
             vtk.vtkPolyData containing the cross-section geometry
         """
         import numpy as np
         
-        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
+        intersecting_elements = self._get_volume_elements_intersecting_plane(plane_origin, plane_normal)
         
-        if not intersecting_tets:
+        if not intersecting_elements:
             # No intersection, return empty polydata
             return vtk.vtkPolyData()
         
@@ -1083,8 +1116,8 @@ class VTK3DViewer(QFrame):
         
         skipped_degenerate = 0
         
-        for tet in intersecting_tets:
-            polygon_points = self._intersect_tet_with_plane(tet, plane_origin, plane_normal)
+        for element in intersecting_elements:
+            polygon_points = self._intersect_element_with_plane(element, plane_origin, plane_normal)
             
             if len(polygon_points) < 3:
                 skipped_degenerate += 1
@@ -1129,37 +1162,40 @@ class VTK3DViewer(QFrame):
         poly_data.SetPoints(points)
         poly_data.SetPolys(triangles)
         
-        print(f"[DEBUG] Cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} triangles, {len(all_points)} points")
+        print(f"[DEBUG] Cross-section: {len(intersecting_elements)} intersecting volume cells -> {len(all_triangles)} triangles, {len(all_points)} points")
         
         return poly_data
     
     def _generate_layered_cross_section(self, plane_origin, plane_normal):
         """
-        Generate VTK PolyData for layered cross-section showing complete tetrahedra.
+        Generate VTK PolyData for layered cross-section showing complete volume elements.
         
-        Instead of slicing tets geometrically, this shows the complete tetrahedral faces
-        for all tets that intersect the plane (ANSYS-style coarse visualization).
+        Instead of slicing geometrically, this shows the complete faces for all
+        tets/hexes that intersect the plane (ANSYS-style coarse visualization).
         
         Returns:
-            vtk.vtkPolyData containing complete tet faces with quality colors if available
+            vtk.vtkPolyData containing complete faces with quality colors if available
         """
         import numpy as np
         
-        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
+        intersecting_elements = self._get_volume_elements_intersecting_plane(plane_origin, plane_normal)
         
-        if not intersecting_tets:
+        if not intersecting_elements:
             return vtk.vtkPolyData()
         
-        # Each tetrahedron has 4 triangular faces
-        # Face 0: nodes (0,1,2)
-        # Face 1: nodes (0,1,3)
-        # Face 2: nodes (0,2,3)
-        # Face 3: nodes (1,2,3)
         tet_faces = [
             (0, 1, 2),
             (0, 1, 3),
             (0, 2, 3),
             (1, 2, 3)
+        ]
+        hex_faces = [
+            (0, 1, 2, 3),
+            (4, 5, 6, 7),
+            (0, 1, 5, 4),
+            (1, 2, 6, 5),
+            (2, 3, 7, 6),
+            (3, 0, 4, 7)
         ]
         
         all_points = []
@@ -1167,22 +1203,29 @@ class VTK3DViewer(QFrame):
         point_offset = 0
         
         # Track tet IDs for quality coloring
-        face_to_tet_id = []  # Maps each face to its source tet ID
+        face_to_element_id = []  # Maps each output triangle to its source element ID
         
-        for tet in intersecting_tets:
-            node_ids = tet['nodes']
+        for element in intersecting_elements:
+            node_ids = element['nodes']
             vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
             
-            # Add all 4 vertices of this tet
+            local_offset = point_offset
             all_points.extend(vertices)
             
-            # Add all 4 triangular faces
-            for face_indices in tet_faces:
-                tri_indices = [point_offset + i for i in face_indices]
-                all_triangles.append(tri_indices)
-                face_to_tet_id.append(tet['id'])  # Track which tet this face belongs to
+            if element['type'] == 'tetrahedron':
+                for face_indices in tet_faces:
+                    tri_indices = [local_offset + i for i in face_indices]
+                    all_triangles.append(tri_indices)
+                    face_to_element_id.append(element['id'])
+            elif element['type'] == 'hexahedron':
+                for quad in hex_faces:
+                    a, b, c, d = quad
+                    all_triangles.append([local_offset + a, local_offset + b, local_offset + c])
+                    face_to_element_id.append(element['id'])
+                    all_triangles.append([local_offset + a, local_offset + c, local_offset + d])
+                    face_to_element_id.append(element['id'])
             
-            point_offset += 4  # 4 vertices per tet
+            point_offset += len(vertices)
         
         # Create VTK PolyData
         points = vtk.vtkPoints()
@@ -1231,9 +1274,9 @@ class VTK3DViewer(QFrame):
             colors.SetName("Colors")
             
             colored_faces = 0
-            for face_idx, tet_id in enumerate(face_to_tet_id):
-                tet_id_str = str(tet_id)
-                quality = per_elem_quality.get(tet_id_str)
+            for face_idx, elem_id in enumerate(face_to_element_id):
+                elem_id_str = str(elem_id)
+                quality = per_elem_quality.get(elem_id_str)
                 
                 if quality is not None:
                     # Map quality [0, 1] to hue [0° (red), 120° (green)]
@@ -1250,7 +1293,7 @@ class VTK3DViewer(QFrame):
                 poly_data.GetCellData().SetScalars(colors)
                 print(f"[DEBUG] Applied quality colors to {colored_faces}/{len(all_triangles)} layered faces")
         
-        print(f"[DEBUG] Layered cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} faces")
+        print(f"[DEBUG] Layered cross-section: {len(intersecting_elements)} intersecting volume cells -> {len(all_triangles)} faces")
         
         return poly_data
     
@@ -1970,21 +2013,27 @@ except Exception as e:
 
             # Count elements for display
             tet_count = sum(1 for e in elements if e['type'] == 'tetrahedron')
+            hex_count = sum(1 for e in elements if e['type'] == 'hexahedron')
             tri_count = sum(1 for e in elements if e['type'] == 'triangle')
+            quad_count = sum(1 for e in elements if e['type'] == 'quadrilateral')
 
-            print(f"[DEBUG] Element counts: {tet_count} tets, {tri_count} triangles")
+            print(f"[DEBUG] Element counts: {tet_count} tets, {hex_count} hexes, {tri_count} triangles, {quad_count} quads")
 
             # CRITICAL: Only visualize SURFACE TRIANGLES, not volume tetrahedra!
-            # The triangles define the outer surface AND internal hole surfaces.
-            # Including tetrahedra creates a "web" through holes/cavities.
+            # Include quadrilateral surfaces for hex meshes.
             for element in elements:
                 if element['type'] == 'triangle':
                     tri = vtk.vtkTriangle()
                     for i, node_id in enumerate(element['nodes']):
                         tri.GetPointIds().SetId(i, node_map[node_id])
                     cells.InsertNextCell(tri)
+                elif element['type'] == 'quadrilateral':
+                    quad = vtk.vtkQuad()
+                    for i, node_id in enumerate(element['nodes']):
+                        quad.GetPointIds().SetId(i, node_map[node_id])
+                    cells.InsertNextCell(quad)
 
-            print(f"[DEBUG] Rendering {cells.GetNumberOfCells()} surface triangles (tets excluded)")
+            print(f"[DEBUG] Rendering {cells.GetNumberOfCells()} surface facets (triangles/quads only)")
 
             # Create PolyData directly from triangles (no geometry filter needed)
             poly_data = vtk.vtkPolyData()
@@ -1999,26 +2048,49 @@ except Exception as e:
             
             # Separate tetrahedra for cross-section computation
             self.current_tetrahedra = [e for e in elements if e['type'] == 'tetrahedron']
+            self.current_hexahedra = [e for e in elements if e['type'] == 'hexahedron']
             
             # Build volumetric grid for 3D clipping
-            if self.current_tetrahedra:
+            if self.current_tetrahedra or self.current_hexahedra:
                 self.current_volumetric_grid = vtk.vtkUnstructuredGrid()
                 self.current_volumetric_grid.SetPoints(points)
                 
-                tet_cells = vtk.vtkCellArray()
+                total_cells = 0
                 for tet in self.current_tetrahedra:
                     vtk_tet = vtk.vtkTetra()
                     for i, nid in enumerate(tet['nodes']):
                         vtk_tet.GetPointIds().SetId(i, node_map[nid])
-                    tet_cells.InsertNextCell(vtk_tet)
+                    self.current_volumetric_grid.InsertNextCell(vtk_tet.GetCellType(), vtk_tet.GetPointIds())
+                    total_cells += 1
                 
-                self.current_volumetric_grid.SetCells(vtk.VTK_TETRA, tet_cells)
-                print(f"[DEBUG] Built volumetric grid with {self.current_volumetric_grid.GetNumberOfCells()} tetrahedra")
+                for hex_elem in self.current_hexahedra:
+                    vtk_hex = vtk.vtkHexahedron()
+                    for i, nid in enumerate(hex_elem['nodes']):
+                        vtk_hex.GetPointIds().SetId(i, node_map[nid])
+                    self.current_volumetric_grid.InsertNextCell(vtk_hex.GetCellType(), vtk_hex.GetPointIds())
+                    total_cells += 1
+                
+                print(f"[DEBUG] Built volumetric grid with {total_cells} volume cells")
             else:
                 self.current_volumetric_grid = None
             
             print(f"[DEBUG] PolyData created with {poly_data.GetNumberOfCells()} cells")
-            print(f"[DEBUG] Stored {len(self.current_tetrahedra)} tetrahedra for cross-section visualization")
+            print(f"[DEBUG] Stored {len(self.current_tetrahedra)} tetrahedra and {len(self.current_hexahedra)} hexahedra for cross-section visualization")
+            
+            # Reset cross-section element mode combo availability
+            if hasattr(self, 'crosssection_cell_combo') and self.crosssection_cell_combo:
+                model = self.crosssection_cell_combo.model()
+                if model and hasattr(model, "item"):
+                    # Index 0 = Auto, 1 = Tetrahedra, 2 = Hexahedra
+                    if model.rowCount() >= 3:
+                        model.item(1).setEnabled(bool(tet_count))
+                        model.item(2).setEnabled(bool(hex_count))
+                self.crosssection_cell_combo.blockSignals(True)
+                self.crosssection_cell_combo.setCurrentText("Auto")
+                self.crosssection_cell_combo.blockSignals(False)
+            
+            if hasattr(self, 'viewer') and self.viewer:
+                self.viewer.set_cross_section_element_mode("auto")
 
             # Add per-cell colors based on quality (if available)
             print(f"[DEBUG] About to check quality coloring conditions...")
@@ -2037,11 +2109,13 @@ except Exception as e:
                     print(f"[DEBUG] Number of elements to iterate: {len(elements)}")
                     print(f"[DEBUG] Element types: {set(e['type'] for e in elements)}")
                     
+                    surface_elements = [e for e in elements if e['type'] in ('triangle', 'quadrilateral')]
+                    
                     # Show sample of quality keys vs element IDs
                     quality_keys_sample = list(per_elem_quality.keys())[:10]
-                    element_ids_sample = [e['id'] for e in elements if e['type'] == 'triangle'][:10]
+                    element_ids_sample = [e['id'] for e in surface_elements][:10]
                     print(f"[DEBUG] Sample quality keys: {quality_keys_sample}")
-                    print(f"[DEBUG] Sample triangle IDs: {element_ids_sample}")
+                    print(f"[DEBUG] Sample surface IDs: {element_ids_sample}")
                     print(f"[DEBUG] Sample quality values: {[per_elem_quality.get(k, 'MISSING') for k in element_ids_sample[:5]]}")
 
                     # Calculate global quality range for color mapping
@@ -2080,37 +2154,29 @@ except Exception as e:
                         
                         return int(r * 255), int(g * 255), int(b * 255)
 
-                    # Color each triangle with smooth gradient
-                    for element in elements:
-                        if element['type'] == 'triangle':
-                            elem_id = element['id']
-                            quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
+                    # Color each surface cell with smooth gradient
+                    for element in surface_elements:
+                        elem_id = element['id']
+                        quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
 
-                            if quality is None:
-                                # No quality data - use neutral gray
-                                colors.InsertNextTuple3(150, 150, 150)
+                        if quality is None:
+                            colors.InsertNextTuple3(150, 150, 150)
+                        else:
+                            quality_range = global_max - global_min
+                            if quality_range > 0.0001:
+                                normalized = (quality - global_min) / quality_range
                             else:
-                                # Normalize quality to 0-1 range based on actual min/max
-                                quality_range = global_max - global_min
-                                if quality_range > 0.0001:
-                                    normalized = (quality - global_min) / quality_range
-                                else:
-                                    normalized = 1.0  # All same quality
-                                
-                                normalized = max(0.0, min(1.0, normalized))  # Clamp to [0,1]
-                                
-                                # Map to hue: 0 (red) for low quality → 0.33 (green) for high quality
-                                # Invert so low quality = red, high quality = green
-                                hue = normalized * 0.33  # 0.33 = green in HSL
-                                
-                                # Convert HSL to RGB
-                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                                colors.InsertNextTuple3(r, g, b)
+                                normalized = 1.0
+                            
+                            normalized = max(0.0, min(1.0, normalized))
+                            hue = normalized * 0.33
+                            r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                            colors.InsertNextTuple3(r, g, b)
 
                     poly_data.GetCellData().SetScalars(colors)
                     print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
                     print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
-                    print(f"[DEBUG] [OK][OK]Total colored triangles: {len(elements)}")
+                    print(f"[DEBUG] [OK][OK]Total colored surface cells: {len(surface_elements)}")
 
                     # Verify scalars were set
                     check_scalars = poly_data.GetCellData().GetScalars()
@@ -2304,6 +2370,28 @@ except Exception as e:
                                         "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
                                     })
                                 i += 1
+                        # Handle linear hexahedra (8-node)
+                        elif element_type == 5:
+                            for _ in range(num_elements):
+                                data = lines[i].strip().split()
+                                if len(data) >= 9:
+                                    elements.append({
+                                        "id": int(data[0]),
+                                        "type": "hexahedron",
+                                        "nodes": [int(data[j]) for j in range(1, 9)]
+                                    })
+                                i += 1
+                        # Handle quadratic hexahedra (20-node) - use first 8 corner nodes
+                        elif element_type == 12:
+                            for _ in range(num_elements):
+                                data = lines[i].strip().split()
+                                if len(data) >= 13:
+                                    elements.append({
+                                        "id": int(data[0]),
+                                        "type": "hexahedron",
+                                        "nodes": [int(data[j]) for j in range(1, 9)]
+                                    })
+                                i += 1
                         # Handle linear triangles (3-node)
                         elif element_type == 2:
                             for _ in range(num_elements):
@@ -2324,6 +2412,28 @@ except Exception as e:
                                         "id": int(data[0]),
                                         "type": "triangle",
                                         "nodes": [int(data[1]), int(data[2]), int(data[3])]
+                                    })
+                                i += 1
+                        # Handle linear quads (4-node)
+                        elif element_type == 3:
+                            for _ in range(num_elements):
+                                data = lines[i].strip().split()
+                                if len(data) >= 5:
+                                    elements.append({
+                                        "id": int(data[0]),
+                                        "type": "quadrilateral",
+                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
+                                    })
+                                i += 1
+                        # Handle quadratic quads (8-node) - use first 4 corners
+                        elif element_type == 10:
+                            for _ in range(num_elements):
+                                data = lines[i].strip().split()
+                                if len(data) >= 9:
+                                    elements.append({
+                                        "id": int(data[0]),
+                                        "type": "quadrilateral",
+                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
                                     })
                                 i += 1
                         else:
@@ -2809,6 +2919,34 @@ class ModernMeshGenGUI(QMainWindow):
         self.clip_axis_combo.currentTextChanged.connect(self.on_clip_axis_changed)
         axis_layout.addWidget(self.clip_axis_combo, 1)
         crosssection_layout.addLayout(axis_layout)
+        
+        # Cell type selector
+        cell_mode_layout = QHBoxLayout()
+        cell_mode_label = QLabel("Slice Cells:")
+        cell_mode_label.setStyleSheet("font-size: 11px; color: #495057;")
+        cell_mode_layout.addWidget(cell_mode_label)
+        
+        self.crosssection_cell_combo = QComboBox()
+        self.crosssection_cell_combo.addItems(["Auto", "Tetrahedra", "Hexahedra"])
+        self.crosssection_cell_combo.setCurrentText("Auto")
+        self.crosssection_cell_combo.setEnabled(False)
+        self.crosssection_cell_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+            QComboBox:disabled {
+                background-color: #e9ecef;
+                color: #6c757d;
+            }
+        """)
+        self.crosssection_cell_combo.currentTextChanged.connect(self.on_crosssection_element_mode_changed)
+        cell_mode_layout.addWidget(self.crosssection_cell_combo, 1)
+        crosssection_layout.addLayout(cell_mode_layout)
 
         # Offset slider
         offset_layout = QVBoxLayout()
@@ -3326,6 +3464,8 @@ class ModernMeshGenGUI(QMainWindow):
         enabled = bool(state)
         self.clip_axis_combo.setEnabled(enabled)
         self.clip_offset_slider.setEnabled(enabled)
+        if hasattr(self, 'crosssection_cell_combo'):
+            self.crosssection_cell_combo.setEnabled(enabled)
         
         self.viewer.set_clipping(
             enabled=enabled,
@@ -3349,6 +3489,18 @@ class ModernMeshGenGUI(QMainWindow):
             axis=self.clip_axis_combo.currentText(),
             offset=value
         )
+    
+    def on_crosssection_element_mode_changed(self, text: str):
+        """Handle cell type selector for cross-section slices"""
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+        mode_map = {
+            "Auto": "auto",
+            "Tetrahedra": "tetrahedra",
+            "Hexahedra": "hexahedra"
+        }
+        mode = mode_map.get(text, "auto")
+        self.viewer.set_cross_section_element_mode(mode)
     def on_ghost_visibility_toggled(self, state):
         """Handle ghost visibility toggle"""
         if hasattr(self, 'above_cut_actor') and self.above_cut_actor:
