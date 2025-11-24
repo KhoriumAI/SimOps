@@ -271,15 +271,56 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 radius = region.get('radius')
                 
                 if not center or not radius:
+                    self.log_message(f"[!] Region {i+1}: Missing center or radius, skipping")
+                    continue
+                
+                # CRITICAL: Validate coordinates to prevent Gmsh parse errors
+                try:
+                    xc, yc, zc = center
+                    
+                    # DEBUG: Log the actual values
+                    self.log_message(f"[DEBUG] Region {i+1}: center=({xc}, {yc}, {zc}), radius={radius}")
+                    
+                    # Check for NaN, Infinity, or non-numeric values
+                    if not all(isinstance(v, (int, float)) and not (v != v or abs(v) == float('inf')) for v in [xc, yc, zc, radius]):
+                        self.log_message(f"[!] Region {i+1}: Invalid coordinates (NaN/Inf), skipping")
+                        continue
+                    
+                    # Ensure radius is positive and reasonable
+                    if radius <= 0 or radius > diagonal * 10:
+                        self.log_message(f"[!] Region {i+1}: Invalid radius {radius} (diagonal={diagonal}), skipping")
+                        continue
+                    
+                    # Check if coordinates are very large (could cause issues)
+                    if any(abs(v) > 1e6 for v in [xc, yc, zc]):
+                        self.log_message(f"[!] Region {i+1}: Coordinates too large, skipping")
+                        continue
+                        
+                except (ValueError, TypeError) as e:
+                    self.log_message(f"[!] Region {i+1}: Coordinate error: {e}, skipping")
                     continue
                     
-                xc, yc, zc = center
-                
                 # 1. Create distance field using MathEval
                 # F = Sqrt((x-xc)^2 + (y-yc)^2 + (z-zc)^2)
                 dist_field = gmsh.model.mesh.field.add("MathEval")
-                expr = f"Sqrt((x-{xc})*(x-{xc}) + (y-{yc})*(y-{yc}) + (z-{zc})*(z-{zc}))"
-                gmsh.model.mesh.field.setString(dist_field, "F", expr)
+                
+                # CRITICAL: Wrap negative coordinates in parentheses to avoid double-minus issue
+                # Example: x--14.5 becomes x-(-14.5) which Gmsh can parse correctly
+                xc_str = f"({xc:.6f})" if xc < 0 else f"{xc:.6f}"
+                yc_str = f"({yc:.6f})" if yc < 0 else f"{yc:.6f}"
+                zc_str = f"({zc:.6f})" if zc < 0 else f"{zc:.6f}"
+                
+                expr = f"Sqrt((x-{xc_str})*(x-{xc_str}) + (y-{yc_str})*(y-{yc_str}) + (z-{zc_str})*(z-{zc_str}))"
+                
+                self.log_message(f"[DEBUG] Region {i+1}: Creating field with expr: {expr[:80]}...")
+                
+                try:
+                    gmsh.model.mesh.field.setString(dist_field, "F", expr)
+                    self.log_message(f"[DEBUG] Region {i+1}: Field created successfully")
+                except Exception as e:
+                    self.log_message(f"[!] Region {i+1}: Failed to set MathEval expression: {e}")
+                    self.log_message(f"[!] Expression was: {expr}")
+                    continue
                 
                 # 2. Create Threshold field
                 thresh_field = gmsh.model.mesh.field.add("Threshold")
@@ -310,9 +351,13 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 # Set as background mesh
                 gmsh.model.mesh.field.setAsBackgroundMesh(min_field)
                 self.log_message(f"[OK] Applied refinement fields for {len(fields)} regions")
+            else:
+                self.log_message(f"[!] No valid refinement fields created")
                 
         except Exception as e:
             self.log_message(f"[!] Failed to apply painted refinement: {e}")
+            import traceback
+            self.log_message(f"[!] Traceback: {traceback.format_exc()}")
 
     def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
         """Standard Delaunay with maximum optimization"""

@@ -51,10 +51,73 @@ class PaintedRegion:
     timestamp: Optional[str] = None
 
     def to_dict(self) -> Dict:
-        """Convert to dictionary for JSON serialization"""
+        """
+        Convert to dictionary for JSON serialization.
+        
+        IMPORTANT: The backend expects volumetric refinement zones with 'center' and 'radius' keys.
+        This method converts surface-based painting to volumetric format by computing a bounding sphere.
+        """
         data = asdict(self)
         if data['center_point'] is not None:
             data['center_point'] = list(data['center_point'])
+        
+        # CRITICAL FIX: Convert surface-based data to volumetric format
+        # Backend needs {'center': [x,y,z], 'radius': r}
+        # We compute a bounding sphere from the painted surfaces
+        
+        if self.center_point is not None:
+            # If we have a center point, use it directly
+            data['center'] = list(self.center_point)
+            # Use brush radius as the volumetric refinement radius
+            data['radius'] = self.brush_radius
+        else:
+            # Fallback: If no center point stored, try to compute from surfaces
+            # This requires gmsh to be initialized with the geometry
+            try:
+                import gmsh
+                if self.surface_tags and gmsh.is_initialized():
+                    # Compute bounding box of all painted surfaces
+                    xmin, ymin, zmin = float('inf'), float('inf'), float('inf')
+                    xmax, ymax, zmax = float('-inf'), float('-inf'), float('-inf')
+                    
+                    for surf_tag in self.surface_tags:
+                        try:
+                            bbox = gmsh.model.getBoundingBox(2, surf_tag)
+                            xmin = min(xmin, bbox[0])
+                            ymin = min(ymin, bbox[1])
+                            zmin = min(zmin, bbox[2])
+                            xmax = max(xmax, bbox[3])
+                            ymax = max(ymax, bbox[4])
+                            zmax = max(zmax, bbox[5])
+                        except:
+                            pass
+                    
+                    # Compute center and radius of bounding sphere
+                    if xmin != float('inf'):
+                        cx = (xmin + xmax) / 2
+                        cy = (ymin + ymax) / 2
+                        cz = (zmin + zmax) / 2
+                        data['center'] = [cx, cy, cz]
+                        
+                        # Radius is half the diagonal of the bounding box
+                        dx = xmax - xmin
+                        dy = ymax - ymin
+                        dz = zmax - zmin
+                        radius = np.sqrt(dx**2 + dy**2 + dz**2) / 2
+                        data['radius'] = max(radius, self.brush_radius)
+                    else:
+                        # No valid surfaces - use defaults
+                        data['center'] = [0, 0, 0]
+                        data['radius'] = self.brush_radius
+                else:
+                    # Gmsh not available - use defaults
+                    data['center'] = [0, 0, 0]
+                    data['radius'] = self.brush_radius
+            except Exception as e:
+                print(f"[!] Warning: Could not compute volumetric bounds from surfaces: {e}")
+                data['center'] = [0, 0, 0]
+                data['radius'] = self.brush_radius
+        
         return data
 
     @classmethod

@@ -125,7 +125,7 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
             self.is_painting = True
             self.paint_at_cursor()
             # Abort event to prevent further processing
-            obj.SetAbortFlag(1)
+            self.GetInteractor().SetAbortFlag(1)
         else:
             # Normal rotate
             print("[DEBUG] Normal rotation mode")
@@ -135,7 +135,7 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
         if self.painting_mode:
             self.is_painting = False
             # Abort event
-            obj.SetAbortFlag(1)
+            self.GetInteractor().SetAbortFlag(1)
         else:
             self.OnLeftButtonUp()
 
@@ -144,14 +144,14 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
             # Continue painting while dragging - DON'T call OnMouseMove to prevent rotation
             self.paint_at_cursor()
             # Abort event to prevent camera rotation
-            obj.SetAbortFlag(1)
+            self.GetInteractor().SetAbortFlag(1)
         elif self.painting_mode and self.parent:
             # In paint mode but not actively painting - update cursor position only
             x, y = self.GetInteractor().GetEventPosition()
             if hasattr(self.parent, 'viewer') and self.parent.viewer:
                 self.parent.viewer.update_brush_cursor_position(x, y)
             # Abort event to prevent rotation while in paint mode
-            obj.SetAbortFlag(1)
+            self.GetInteractor().SetAbortFlag(1)
         else:
             # Normal rotation mode
             self.OnMouseMove()
@@ -519,6 +519,7 @@ class VTK3DViewer(QFrame):
         self.clip_axis = 'x'
         self.clip_offset = 0.0  # -50 to +50 percentage
         self.cross_section_actor = None  # Actor for cross-section visualization
+        self.cross_section_mode = "perfect"  # "perfect" or "layered"
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -898,6 +899,24 @@ class VTK3DViewer(QFrame):
         else:
             self._remove_clipping()
     
+    def set_cross_section_mode(self, mode: str):
+        """
+        Set cross-section visualization mode.
+        
+        Args:
+            mode: Either "perfect" for geometric slice or "layered" for complete tetrahedra
+        """
+        if mode not in ["perfect", "layered"]:
+            print(f"[WARNING] Invalid cross-section mode '{mode}', using 'perfect'")
+            mode = "perfect"
+        
+        self.cross_section_mode = mode
+        print(f"[DEBUG] Cross-section mode set to: {mode}")
+        
+        # Re-apply clipping if currently enabled
+        if self.clipping_enabled and self.current_poly_data:
+            self._apply_clipping()
+    
     def _signed_distance_to_plane(self, point, plane_origin, plane_normal):
         """
         Compute signed distance from a point to a plane.
@@ -971,8 +990,11 @@ class VTK3DViewer(QFrame):
         Compute the intersection polygon of a tetrahedron with a plane.
         
         Returns:
-            List of 3D points forming the intersection polygon (typically 3 or 4 points)
+            List of 3D points forming the intersection polygon (typically 3 or 4 points),
+            ordered counterclockwise when viewed along the plane normal
         """
+        import numpy as np
+        
         node_ids = tet['nodes']
         vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
         
@@ -990,7 +1012,53 @@ class VTK3DViewer(QFrame):
             if point is not None:
                 intersection_points.append(point)
         
-        return intersection_points
+        # Deduplicate points (when plane passes through tet vertex, multiple edges report same point)
+        EPSILON = 1e-9
+        unique_points = []
+        for pt in intersection_points:
+            is_duplicate = False
+            for existing_pt in unique_points:
+                dist_sq = sum((pt[k] - existing_pt[k])**2 for k in range(3))
+                if dist_sq < EPSILON * EPSILON:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                unique_points.append(pt)
+        
+        # Need at least 3 points to form a polygon
+        if len(unique_points) < 3:
+            return unique_points
+        
+        # Order points by angle around centroid for correct winding
+        # This ensures triangulation doesn't create self-intersecting polygons
+        centroid = np.mean(unique_points, axis=0)
+        
+        # Create two orthogonal vectors in the plane for 2D projection
+        normal = np.array(plane_normal)
+        normal = normal / np.linalg.norm(normal)
+        
+        # Pick arbitrary vector not parallel to normal
+        if abs(normal[0]) < 0.9:
+            arbitrary = np.array([1, 0, 0])
+        else:
+            arbitrary = np.array([0, 1, 0])
+        
+        # Create orthonormal basis in the plane
+        u = np.cross(normal, arbitrary)
+        u = u / np.linalg.norm(u)
+        v = np.cross(normal, u)
+        
+        # Project points to 2D and compute angles
+        def get_angle(pt):
+            relative = np.array(pt) - centroid
+            x = np.dot(relative, u)
+            y = np.dot(relative, v)
+            return np.arctan2(y, x)
+        
+        # Sort points by angle
+        unique_points.sort(key=get_angle)
+        
+        return unique_points
     
     def _generate_cross_section_mesh(self, plane_origin, plane_normal):
         """
@@ -1012,32 +1080,37 @@ class VTK3DViewer(QFrame):
         all_triangles = []
         point_offset = 0
         
+        skipped_degenerate = 0
+        
         for tet in intersecting_tets:
             polygon_points = self._intersect_tet_with_plane(tet, plane_origin, plane_normal)
             
             if len(polygon_points) < 3:
-                continue  # Not enough points to form a polygon
+                skipped_degenerate += 1
+                continue  # Skip degenerate polygons
             
             # Add points to the global list
             num_points = len(polygon_points)
             all_points.extend(polygon_points)
             
-            # Triangulate the polygon
+            # Triangulate the polygon (points are now ordered, so simple fan works)
             # For 3 points: single triangle
             # For 4 points: split into 2 triangles
             if num_points == 3:
                 all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
             elif num_points == 4:
-                # Order points in a consistent way for better visualization
-                # Create two triangles: (0,1,2) and (0,2,3)
+                # Create two triangles with consistent winding
                 all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
                 all_triangles.append([point_offset, point_offset + 2, point_offset + 3])
             else:
-                # For more points (rare), use a simple fan triangulation
+                # For more points (rare), use a fan triangulation from first point
                 for i in range(1, num_points - 1):
                     all_triangles.append([point_offset, point_offset + i, point_offset + i + 1])
             
             point_offset += num_points
+        
+        if skipped_degenerate > 0:
+            print(f"[DEBUG] Cross-section: skipped {skipped_degenerate} degenerate polygons")
         
         # Create VTK PolyData
         points = vtk.vtkPoints()
@@ -1055,10 +1128,79 @@ class VTK3DViewer(QFrame):
         poly_data.SetPoints(points)
         poly_data.SetPolys(triangles)
         
+        print(f"[DEBUG] Cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} triangles, {len(all_points)} points")
+        
+        return poly_data
+    
+    def _generate_layered_cross_section(self, plane_origin, plane_normal):
+        """
+        Generate VTK PolyData for layered cross-section showing complete tetrahedra.
+        
+        Instead of slicing tets geometrically, this shows the complete tetrahedral faces
+        for all tets that intersect the plane (ANSYS-style coarse visualization).
+        
+        Returns:
+            vtk.vtkPolyData containing complete tet faces
+        """
+        import numpy as np
+        
+        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
+        
+        if not intersecting_tets:
+            return vtk.vtkPolyData()
+        
+        # Each tetrahedron has 4 triangular faces
+        # Face 0: nodes (0,1,2)
+        # Face 1: nodes (0,1,3)
+        # Face 2: nodes (0,2,3)
+        # Face 3: nodes (1,2,3)
+        tet_faces = [
+            (0, 1, 2),
+            (0, 1, 3),
+            (0, 2, 3),
+            (1, 2, 3)
+        ]
+        
+        all_points = []
+        all_triangles = []
+        point_offset = 0
+        
+        for tet in intersecting_tets:
+            node_ids = tet['nodes']
+            vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
+            
+            # Add all 4 vertices of this tet
+            all_points.extend(vertices)
+            
+            # Add all 4 triangular faces
+            for face_indices in tet_faces:
+                tri_indices = [point_offset + i for i in face_indices]
+                all_triangles.append(tri_indices)
+            
+            point_offset += 4  # 4 vertices per tet
+        
+        # Create VTK PolyData
+        points = vtk.vtkPoints()
+        for pt in all_points:
+            points.InsertNextPoint(pt)
+        
+        triangles = vtk.vtkCellArray()
+        for tri in all_triangles:
+            triangle = vtk.vtkTriangle()
+            for i, idx in enumerate(tri):
+                triangle.GetPointIds().SetId(i, idx)
+            triangles.InsertNextCell(triangle)
+        
+        poly_data = vtk.vtkPolyData()
+        poly_data.SetPoints(points)
+        poly_data.SetPolys(triangles)
+        
+        print(f"[DEBUG] Layered cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} faces")
+        
         return poly_data
     
     def _apply_clipping(self):
-        """Apply capped cross-section cut to current mesh"""
+        """Apply cross-section with clear above/below separation"""
         if not self.current_poly_data or not self.current_actor:
             return
         
@@ -1088,34 +1230,49 @@ class VTK3DViewer(QFrame):
         plane.SetNormal(normal)
         plane.SetOrigin(origin)
         
-        # Create plane collection
-        planes = vtk.vtkPlaneCollection()
-        planes.AddItem(plane)
+        # --- PART 1: BELOW THE CUT (100% visible) ---
+        clipper_below = vtk.vtkClipPolyData()
+        clipper_below.SetInputData(self.current_poly_data)
+        clipper_below.SetClipFunction(plane)
+        clipper_below.InsideOutOff()  # Keep the side the normal points AWAY from
+        clipper_below.Update()
         
-        # --- NEW: Generate and display internal cross-section ---
-        # Generate cross-section geometry from tetrahedra
-        cross_section_poly = self._generate_cross_section_mesh(origin, normal)
-        has_cross_section = cross_section_poly.GetNumberOfCells() > 0
-        
-        # Use vtkClipClosedSurface for the outer shell
-        # We ALWAYS want the outer shell clipped
-        clipper = vtk.vtkClipClosedSurface()
-        clipper.SetInputData(self.current_poly_data)
-        clipper.SetClippingPlanes(planes)
-        clipper.SetActivePlaneId(0)
-        clipper.SetScalarModeToColors()
-        clipper.SetClipColor(0.9, 0.4, 0.4)
-        clipper.SetBaseColor(0.7, 0.85, 0.95)
-        clipper.SetActivePlaneColor(0.9, 0.4, 0.4)
-        
-        # Only generate standard cap if we DON'T have a cross-section to show
-        # This prevents Z-fighting between the cap and our custom cross-section
-        clipper.SetGenerateFaces(not has_cross_section)
-        clipper.Update()
-        
-        # Update actor with clipped mesh
+        # Update main actor with below-cut mesh (fully visible)
         mapper = self.current_actor.GetMapper()
-        mapper.SetInputData(clipper.GetOutput())
+        mapper.SetInputData(clipper_below.GetOutput())
+        self.current_actor.GetProperty().SetOpacity(1.0)  # Fully visible
+        
+        # --- PART 2: ABOVE THE CUT (5% visible for context) ---
+        clipper_above = vtk.vtkClipPolyData()
+        clipper_above.SetInputData(self.current_poly_data)
+        clipper_above.SetClipFunction(plane)
+        clipper_above.InsideOutOn()  # Keep the side the normal points TO
+        clipper_above.Update()
+        
+        # Create/update actor for above-cut mesh (transparent)
+        if not hasattr(self, 'above_cut_actor') or not self.above_cut_actor:
+            self.above_cut_actor = vtk.vtkActor()
+            self.renderer.AddActor(self.above_cut_actor)
+            
+        above_mapper = vtk.vtkPolyDataMapper()
+        above_mapper.SetInputData(clipper_above.GetOutput())
+        self.above_cut_actor.SetMapper(above_mapper)
+        self.above_cut_actor.GetProperty().SetOpacity(0.05)  # Very transparent
+        
+        # Copy color/material properties from main actor
+        self.above_cut_actor.GetProperty().SetColor(
+            self.current_actor.GetProperty().GetColor()
+        )
+        self.above_cut_actor.VisibilityOn()
+        
+        # --- PART 3: CROSS-SECTION PLANE ---
+        # Choose cross-section method based on mode
+        if self.cross_section_mode == "layered":
+            cross_section_poly = self._generate_layered_cross_section(origin, normal)
+        else:  # "perfect" mode (default)
+            cross_section_poly = self._generate_cross_section_mesh(origin, normal)
+        
+        has_cross_section = cross_section_poly.GetNumberOfCells() > 0
         
         if has_cross_section:
             # Create mapper for cross-section
@@ -1129,17 +1286,29 @@ class VTK3DViewer(QFrame):
             
             self.cross_section_actor.SetMapper(cs_mapper)
             
-            # Style the cross-section
-            # Make it slightly distinct from the cap color
-            self.cross_section_actor.GetProperty().SetColor(0.8, 0.2, 0.2)  # Darker red
-            self.cross_section_actor.GetProperty().SetOpacity(1.0)  # Opaque
-            self.cross_section_actor.GetProperty().SetLighting(False)  # Flat color
-            self.cross_section_actor.GetProperty().EdgeVisibilityOn()
-            self.cross_section_actor.GetProperty().SetEdgeColor(0.2, 0.0, 0.0)  # Dark red edges
-            self.cross_section_actor.GetProperty().SetLineWidth(1.5)
+            # Style the cross-section plane based on mode
+            if self.cross_section_mode == "layered":
+                # Layered mode: show tet faces with edges
+                self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)  # Bright red
+                self.cross_section_actor.GetProperty().SetOpacity(0.7)  # Semi-transparent to see through
+                self.cross_section_actor.GetProperty().SetLighting(True)
+                self.cross_section_actor.GetProperty().EdgeVisibilityOn()  # Show edges
+                self.cross_section_actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)  # Dark gray edges
+                self.cross_section_actor.GetProperty().SetLineWidth(1.5)
+                print(f"[DEBUG] Layered mode: showing complete tetrahedra with edges")
+            else:
+                # Perfect mode: smooth slice
+                self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)  # Bright red
+                self.cross_section_actor.GetProperty().SetOpacity(0.9)  # Mostly opaque
+                self.cross_section_actor.GetProperty().SetLighting(True)
+                self.cross_section_actor.GetProperty().EdgeVisibilityOn()
+                self.cross_section_actor.GetProperty().SetEdgeColor(0.3, 0.0, 0.0)  # Dark red edges
+                self.cross_section_actor.GetProperty().SetLineWidth(2.0)
+            
             self.cross_section_actor.VisibilityOn()
             
-            print(f"[DEBUG] Displaying cross-section with {cross_section_poly.GetNumberOfCells()} triangles")
+            print(f"[DEBUG] Cross-section: {cross_section_poly.GetNumberOfCells()} triangles")
+            print(f"[DEBUG] Below cut: 100% opacity, Above cut: 5% opacity")
         else:
             if self.cross_section_actor:
                 self.cross_section_actor.VisibilityOff()
@@ -1154,6 +1323,11 @@ class VTK3DViewer(QFrame):
         # Restore original unclipped data
         mapper = self.current_actor.GetMapper()
         mapper.SetInputData(self.current_poly_data)
+        self.current_actor.GetProperty().SetOpacity(1.0)  # Restore full opacity
+        
+        # Hide above-cut actor
+        if hasattr(self, 'above_cut_actor') and self.above_cut_actor:
+            self.above_cut_actor.VisibilityOff()
         
         # Hide cross-section actor
         if self.cross_section_actor:
@@ -2703,27 +2877,30 @@ class ModernMeshGenGUI(QMainWindow):
         opacity_layout.addWidget(self.viz_opacity_spin, 1)
         viz_layout.addLayout(opacity_layout)
 
-        # Filter Range (Min/Max)
+
+        # Filter Range (Min/Max Spinbox Controls)
         filter_label = QLabel("Show Quality Range:")
         filter_label.setStyleSheet("font-size: 11px; color: #495057; margin-top: 5px;")
         viz_layout.addWidget(filter_label)
 
         range_layout = QHBoxLayout()
+        range_layout.setSpacing(8)
         
         # Min SpinBox
         self.viz_min_spin = QDoubleSpinBox()
-        self.viz_min_spin.setRange(0.0, 1.0)
-        self.viz_min_spin.setSingleStep(0.05)
+        self.viz_min_spin.setRange(0.0, 10.0)  # Wide range for all metrics
+        self.viz_min_spin.setSingleStep(0.1)
         self.viz_min_spin.setValue(0.0)
         self.viz_min_spin.setDecimals(2)
         self.viz_min_spin.setPrefix("Min: ")
         self.viz_min_spin.setStyleSheet("""
             QDoubleSpinBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
+                padding: 5px;
+                border: 2px solid #0d6efd;
                 border-radius: 4px;
                 background-color: white;
                 font-size: 11px;
+                font-weight: bold;
             }
         """)
         self.viz_min_spin.valueChanged.connect(self.on_viz_range_changed)
@@ -2731,18 +2908,19 @@ class ModernMeshGenGUI(QMainWindow):
 
         # Max SpinBox
         self.viz_max_spin = QDoubleSpinBox()
-        self.viz_max_spin.setRange(0.0, 100.0) # Allow > 1.0 for Aspect Ratio
-        self.viz_max_spin.setSingleStep(0.05)
+        self.viz_max_spin.setRange(0.0, 100.0) # Allow high values for Aspect Ratio
+        self.viz_max_spin.setSingleStep(0.1)
         self.viz_max_spin.setValue(1.0)
         self.viz_max_spin.setDecimals(2)
         self.viz_max_spin.setPrefix("Max: ")
         self.viz_max_spin.setStyleSheet("""
             QDoubleSpinBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
+                padding: 5px;
+                border: 2px solid #dc3545;
                 border-radius: 4px;
                 background-color: white;
                 font-size: 11px;
+                font-weight: bold;
             }
         """)
         self.viz_max_spin.valueChanged.connect(self.on_viz_range_changed)
@@ -3125,7 +3303,7 @@ class ModernMeshGenGUI(QMainWindow):
             offset=value
         )
 
-# --- MISSING VISUALIZATION HANDLERS ---
+# --- VISUALIZATION HANDLERS ---
     def on_viz_metric_changed(self, text):
         """Handle metric selection change (SICN, Gamma, etc.)"""
         if hasattr(self, 'viewer') and self.viewer:
@@ -3147,7 +3325,14 @@ class ModernMeshGenGUI(QMainWindow):
             )
 
     def on_viz_range_changed(self, value):
-        """Handle min/max slider change"""
+        """Handle min/max spinbox change"""
+        # Ensure min doesn't exceed max
+        if self.viz_min_spin.value() > self.viz_max_spin.value():
+            if self.sender() == self.viz_min_spin:
+                self.viz_max_spin.setValue(self.viz_min_spin.value())
+            else:
+                self.viz_min_spin.setValue(self.viz_max_spin.value())
+        
         if hasattr(self, 'viewer') and self.viewer:
             self.viewer.update_quality_visualization(
                 metric=self.viz_metric_combo.currentText(),

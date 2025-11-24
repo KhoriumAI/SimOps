@@ -140,8 +140,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 for elem_type, tags in zip(tri_types, tri_tags):
                     if elem_type in [2, 9]: # Linear & Quadratic Triangles
                         try:
-                            # 1. SICN (Default)
-                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "sicn")
+                            # 1. SICN (Default) - use "minSICN" for post-processing
+                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
                             
                             # 2. Gamma
                             gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
@@ -167,9 +167,9 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 for elem_type, tags in zip(tet_types, tet_tags):
                     if elem_type in [4, 11]: # Linear & Quadratic Tets
                         try:
-                            # 1. SICN
-                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "sicn")
-                            # 2. Gamma
+                            # 1. SICN - use "minSICN" for post-processing
+                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                            # 2. Gamma  
                             gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
                             
                             for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
