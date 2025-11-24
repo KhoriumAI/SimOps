@@ -281,11 +281,28 @@ class TopologyGlue:
             gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
             gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
             gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-4)
+            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
             
             solid_tags = []
             
-            # 1. Convert each part to an OCC Solid
+            # 1. Convert each part to an OCC Solid (with cleaning)
             for i, (verts, faces) in enumerate(parts):
+                # Clean the mesh using trimesh to prevent PLC errors
+                chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+                
+                # Cleaning steps
+                chunk_mesh.merge_vertices(merge_tex=True, merge_norm=True)
+                chunk_mesh.remove_degenerate_faces()
+                chunk_mesh.remove_duplicate_faces()
+                try:
+                    trimesh.repair.fix_normals(chunk_mesh)
+                except:
+                    pass  # May fail on open meshes
+                
+                # Use cleaned vertices and faces
+                verts = chunk_mesh.vertices
+                faces = chunk_mesh.faces
+                
                 # Create vertices
                 occ_verts = []
                 for v in verts:
