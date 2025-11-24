@@ -25,3 +25,5 @@ tetgen>=0.6.0   # Alternative tetrahedral mesher
 # Development tools (optional)
 pytest>=7.2.0
 black>=23.0.0
+trimesh>=3.20.0
+coacd>=1.0.0

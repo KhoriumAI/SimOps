@@ -20,6 +20,7 @@ MeshTest/
 ├── strategies/                # Meshing strategies
 │   ├── adaptive/
 │   │   └── intelligent_sizing.py
+│   ├── hex_dominant_strategy.py # Hex-dominant meshing (NEW)
 │   └── ...
 │
 ├── apps/                      # Applications (NEW)

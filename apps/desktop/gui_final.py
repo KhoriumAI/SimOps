@@ -1291,7 +1291,7 @@ class VTK3DViewer(QFrame):
             if self.cross_section_mode == "layered":
                 # Layered mode: show tet faces with edges
                 self.cross_section_actor.GetProperty().SetColor(0.9, 0.3, 0.3)  # Bright red
-                self.cross_section_actor.GetProperty().SetOpacity(0.7)  # Semi-transparent to see through
+                self.cross_section_actor.GetProperty().SetOpacity(1.0)  # Fully opaque to match surface
                 self.cross_section_actor.GetProperty().SetLighting(True)
                 self.cross_section_actor.GetProperty().EdgeVisibilityOn()  # Show edges
                 self.cross_section_actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)  # Dark gray edges
