@@ -18,7 +18,186 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
+from strategies.hex_dominant_strategy import (
+    HighFidelityDiscretization,
+    ConvexDecomposition
+)
 from core.config import Config
+import tempfile
+import gmsh
+
+
+def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Generate hex-dominant mesh using CoACD + subdivision pipeline
+    
+    Steps:
+    1. High-fidelity STEP → STL
+    2. CoACD convex decomposition
+    3. Discrete mesh approach (merge cleaned STLs)
+    4. Surface classification → volume
+    5. Subdivision algorithm (tets → 4 hexes each)
+    """
+    try:
+        import trimesh
+        save_stl = quality_params.get('save_stl', False) if quality_params else False
+        
+        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
+        
+        # Determine output folders
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        output_file = str(mesh_folder / f"{mesh_name}_hex_mesh.msh")
+        
+        # Temporary STL path
+        temp_dir = Path(tempfile.gettempdir())
+        stl_file = temp_dir / f"{mesh_name}_step1.stl"
+        
+        # Step 1: STEP → STL
+        print("[HEX-DOM] Step 1: Converting STEP to STL...")
+        step1 = HighFidelityDiscretization()
+        success = step1.convert_step_to_stl(cad_file, str(stl_file))
+        if not success:
+            return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
+        
+        if save_stl:
+            saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
+            import shutil
+            shutil.copy(stl_file, saved_stl_step1)
+            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
+        
+        # Step 2: CoACD Decomposition
+        print("[HEX-DOM] Step 2: CoACD convex decomposition...")
+        step2 = ConvexDecomposition()
+        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
+        
+        if not parts:
+            return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
+        
+        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
+        
+        # Step 3-5: Hex Meshing
+        print("[HEX-DOM] Step 3-5: Generating hex mesh via subdivision...")
+        
+        gmsh.initialize()
+        gmsh.model.add("hex_dom_final")
+        
+        # Set tolerances
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
+        gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
+        
+        # Clean and merge each part
+        for i, (verts, faces) in enumerate(parts):
+            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+            chunk_mesh.merge_vertices()
+            chunk_mesh.remove_degenerate_faces()
+            chunk_mesh.remove_duplicate_faces()
+            
+            chunk_file = temp_dir / f"temp_chunk_{i}.stl"
+            chunk_mesh.export(str(chunk_file))
+            gmsh.merge(str(chunk_file))
+            chunk_file.unlink()  # Delete temp file
+        
+        # Classify surfaces to create volumes
+        try:
+            angle = 40
+            gmsh.model.mesh.classifySurfaces(angle * 3.14159 / 180, True, False, 180 * 3.14159 / 180)
+            gmsh.model.mesh.createGeometry()
+            
+            s = gmsh.model.getEntities(2)
+            l = gmsh.model.geo.addSurfaceLoop([s[i][1] for i in range(len(s))])
+            gmsh.model.geo.addVolume([l])
+            gmsh.model.geo.synchronize()
+            
+            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces")
+        except Exception as e:
+            gmsh.finalize()
+            return {'success': False, 'message': f'Step 3 failed: Surface classification - {e}'}
+        
+        # Generate 3D tet mesh first
+        try:
+            gmsh.model.mesh.generate(3)
+            print("[HEX-DOM] Generated intermediate tet mesh")
+        except Exception as e:
+            gmsh.finalize()
+            return {'success': False, 'message': f'Step 4 failed: Tet meshing - {e}'}
+        
+        # Apply subdivision (tet → hex)
+        print("[HEX-DOM] Applying subdivision algorithm...")
+        gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
+        gmsh.model.mesh.refine()
+        
+        # Write output
+        gmsh.write(output_file)
+        
+        # Count elements
+        element_types = gmsh.model.mesh.getElementTypes()
+        element_counts = {}
+        for etype in element_types:
+            elem_name = gmsh.model.mesh.getElementProperties(etype)[0]
+            elem_tags, _ = gmsh.model.mesh.getElementsByType(etype)
+            element_counts[elem_name] = len(elem_tags)
+        
+        num_hexes = element_counts.get("8-node hexahedron", 0) + element_counts.get("Hexahedron 8", 0)
+        num_tets = element_counts.get("4-node tetrahedron", 0) + element_counts.get("Tetrahedron 4", 0)
+        total_3d = num_hexes + num_tets
+        
+        # Extract per-element quality for visualization
+        try:
+            from core.quality import compute_element_quality_gmsh
+            
+            # Get hex elements (type 5 = 8-node hex)
+            hex_tags, hex_nodes = gmsh.model.mesh.getElementsByType(5)
+            
+            if len(hex_tags) > 0:
+                # Compute quality for each hex
+                per_element_quality = []
+                for tag in hex_tags:
+                    quality = gmsh.model.mesh.getElementQualities([tag], "minSICN")
+                    per_element_quality.append(quality[0] if quality else 0.5)
+                
+                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
+            else:
+                per_element_quality = []
+        except Exception as e:
+            print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
+            per_element_quality = []
+        
+        gmsh.finalize()
+        
+        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)")
+        
+        return {
+            'success': True,
+            'output_file': str(Path(output_file).absolute()),
+            'strategy': 'hex_dominant_subdivision',
+            'message': f'Hex-dominant mesh: {num_hexes} hexes, {num_tets} tets',
+            'total_elements': total_3d,
+            'total_nodes': 0,  # TODO: count nodes
+            'per_element_quality': per_element_quality,  # For VTK visualization
+            'metrics': {
+                'num_hexes': num_hexes,
+                'num_tets': num_tets,
+                'hex_ratio': (num_hexes / total_3d * 100) if total_3d > 0 else 0,
+                'volume_error_pct': stats['volume_error_pct'],
+                'num_parts': len(parts)
+            },
+            'quality_metrics': {
+                'min_quality': min(per_element_quality) if per_element_quality else 0,
+                'max_quality': max(per_element_quality) if per_element_quality else 1,
+                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'message': f'Hex dominant meshing failed: {str(e)}'
+        }
 
 
 def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -34,6 +213,15 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         Dict with success status and results
     """
     try:
+        # Check if hex dominant strategy is requested
+        mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
+        save_stl = quality_params.get('save_stl', False) if quality_params else False
+        
+        if 'Hex Dominant' in mesh_strategy:
+            print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
+            return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
+        
+        # Default: use exhaustive tet strategy
         # Initialize generator
         config = Config()
         

@@ -2716,22 +2716,12 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy = QComboBox()
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
-            "Tetrahedral (Frontal)",
-            "Tetrahedral (HXT - Parallel)",
-            "Polyhedral (Tet->Poly)",
-            "Hexahedral (Tet->Hex)",
-            "Hex-Dominant (Recombined)",
-            "Quad-Dominant (2D)"
+            "Hex Dominant (Subdivision)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
         self.mesh_strategy.setToolTip(
-            "Tetrahedral (Delaunay): Best for general use, robust\n"
-            "Tetrahedral (Frontal): Good for boundary layers\n"
-            "Tetrahedral (HXT): Fast parallel meshing\n"
-            "Polyhedral (Tet->Poly): CFD-optimized polyhedral cells (ANSYS/OpenFOAM style)\n"
-            "Hexahedral (Tet->Hex): Converts tets to hexes via THex splitting (4x elements)\n"
-            "Hex-Dominant: Creates hexahedral elements (experimental)\n"
-            "Quad-Dominant: 2D quadrilateral meshes"
+            "Tetrahedral (Delaunay): Robust conformal tet mesh\n"
+            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision (4x elements)"
         )
         self.mesh_strategy.setStyleSheet("""
             QComboBox {
@@ -2746,32 +2736,18 @@ class ModernMeshGenGUI(QMainWindow):
         strategy_layout.addWidget(self.mesh_strategy, 1)
         quality_layout.addLayout(strategy_layout)
 
-        # Curvature-adaptive checkbox - clean, no emoji/description
+        # Curvature-adaptive checkbox
         self.curvature_adaptive = QCheckBox("Curvature-Adaptive Meshing")
-        self.curvature_adaptive.setChecked(False)
-        self.curvature_adaptive.setStyleSheet("""
-            QCheckBox {
-                font-size: 11px;
-                color: #212529;
-                spacing: 5px;
-                margin-top: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                background-color: white;
-                border: 2px solid #6c757d;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #198754;
-                border: 2px solid #198754;
-            }
-            QCheckBox::indicator:checked {
-                image: none;
-            }
-        """)
+        self.curvature_adaptive.setStyleSheet("color: black; font-size: 11px;")
+        self.curvature_adaptive.setToolTip("Refine mesh on curved surfaces")
         quality_layout.addWidget(self.curvature_adaptive)
+        
+        # STL Export checkbox
+        self.save_stl = QCheckBox("Save intermediate STL files")
+        self.save_stl.setStyleSheet("color: black; font-size: 11px;")
+        self.save_stl.setToolTip("Save STL files from STEP conversion and CoACD decomposition")
+        self.save_stl.setChecked(False)  # Default off
+        quality_layout.addWidget(self.save_stl)
 
         quality_group.setLayout(quality_layout)
         layout.addWidget(quality_group)
@@ -3565,7 +3541,8 @@ class ModernMeshGenGUI(QMainWindow):
             "target_elements": self.target_elements.value(),
             "max_size_mm": self.max_size.value(),
             "curvature_adaptive": self.curvature_adaptive.isChecked(),
-            "mesh_strategy": self.mesh_strategy.currentText()
+            "mesh_strategy": self.mesh_strategy.currentText(),
+            "save_stl": self.save_stl.isChecked()  # Export intermediate STL files
         }
 
         # Add painted regions if any exist
