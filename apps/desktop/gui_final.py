@@ -309,6 +309,29 @@ class MeshWorker:
             print(f"[GUI-WORKER] Found JSON result line: {line[:100]}...")
             try:
                 result = json.loads(line)
+                
+                # Check if it's a progress update (intermediate)
+                if result.get('type') == 'progress' and result.get('phase') == 'coacd_preview':
+                    # CoACD component preview - show components immediately
+                    print(f"[GUI-WORKER] CoACD Preview: {result.get('num_components')} components")
+                    self.signals.log.emit(f"CoACD Decomposition: {result.get('num_components')} components (Volume error: {result.get('volume_error_pct', 0):.2f}%)")
+                    
+                    # Create preview result dict
+                    preview_result = {
+                        'success': True,
+                        'strategy': 'coacd_preview',
+                        'message': f"CoACD Preview: {result.get('num_components')} components",
+                        'component_files': result.get('component_files', []),
+                        'num_components': result.get('num_components', 0),
+                        'volume_error_pct': result.get('volume_error_pct', 0),
+                        'visualization_mode': 'components'
+                    }
+                    
+                    # Emit as a finished signal (GUI will display it)
+                    self.signals.finished.emit(True, preview_result)
+                    return  # Continue reading for final result
+                
+                # Check if it's the final result
                 print(f"[GUI-WORKER] Parsed result, success={result.get('success')}")
                 if result.get('success'):
                     # Mark all active phases as complete
@@ -649,9 +672,23 @@ class VTK3DViewer(QFrame):
         self.vtk_widget.GetRenderWindow().Render()
 
     def clear_view(self):
-        if self.current_actor:
-            self.renderer.RemoveActor(self.current_actor)
-            self.current_actor = None
+        # Remove ALL 3D actors from renderer
+        actors = self.renderer.GetActors()
+        actors.InitTraversal()
+        for i in range(actors.GetNumberOfItems()):
+            actor = actors.GetNextActor()
+            if actor:
+                self.renderer.RemoveActor(actor)
+        
+        # Remove ALL 2D actors (scalar bars, text, etc.)
+        actors2d = self.renderer.GetActors2D()
+        actors2d.InitTraversal()
+        for i in range(actors2d.GetNumberOfItems()):
+            actor = actors2d.GetNextActor2D()
+            if actor:
+                self.renderer.RemoveActor2D(actor)
+        
+        self.current_actor = None
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
 
@@ -2309,6 +2346,186 @@ except Exception as e:
             traceback.print_exc()
             self.info_label.setText(error_msg)
             return f"ERROR: {e}"
+
+    def load_component_visualization(self, result: dict):
+        """Load and display CoACD components with PyVista"""
+        print("="*80)
+        print("[COMPONENT-VIZ] *** FUNCTION CALLED *** IN GUI_FINAL.PY")
+        print("="*80)
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            component_files = result.get('component_files', [])
+            if not component_files:
+                print("[ERROR] No component files in result")
+                self.info_label.setText("Error: No components found")
+                return "FAILED"
+            
+            print(f"[COMPONENT-VIZ] Loading {len(component_files)} components...")
+            self.clear_view()
+            
+            # Load and merge all components
+            merged_mesh = None
+            for i, comp_file in enumerate(component_files):
+                if not Path(comp_file).exists():
+                    print(f"[WARNING] Component file not found: {comp_file}")
+                    continue
+                
+                # Load with PyVista
+                comp_mesh = pv.read(comp_file)
+                
+                print(f"[COMPONENT-VIZ] Component {i}: {comp_mesh.n_cells} cells, type={comp_mesh.GetCellType(0) if comp_mesh.n_cells > 0 else 'N/A'}")
+                print(f"[COMPONENT-VIZ] Component {i} cell data keys: {list(comp_mesh.cell_data.keys())}")
+                
+                # Ensure Component_ID scalar exists
+                if "Component_ID" not in comp_mesh.array_names:
+                    comp_mesh["Component_ID"] = np.full(comp_mesh.n_cells, i, dtype=int)
+                
+                # Merge into single mesh
+                if merged_mesh is None:
+                    merged_mesh = comp_mesh
+                else:
+                    merged_mesh = merged_mesh.merge(comp_mesh)
+                
+                print(f"[COMPONENT-VIZ] Loaded component {i}: {comp_mesh.n_cells} cells")
+            
+            if merged_mesh is None:
+                print("[ERROR] No components loaded")
+                self.info_label.setText("Error: Failed to load components")
+                return "FAILED"
+            
+            # Always extract surface for display, but check if we have volume data
+            ugrid = merged_mesh.cast_to_unstructured_grid()
+            
+            # Check if original mesh had volume elements (hex/tet)
+            ugrid = merged_mesh.cast_to_unstructured_grid()
+            
+            print(f"[COMPONENT-VIZ] Merged ugrid: {ugrid.n_cells} cells")
+            if ugrid.n_cells > 0:
+                cell_type = ugrid.GetCellType(0)
+                print(f"[COMPONENT-VIZ] First cell type: {cell_type} (VTK_HEXAHEDRON=12, VTK_TETRA=10, VTK_TRIANGLE=5)")
+                has_volume_cells = cell_type in [vtk.VTK_HEXAHEDRON, vtk.VTK_TETRA]
+                print(f"[COMPONENT-VIZ] has_volume_cells = {has_volume_cells}")
+            else:
+                has_volume_cells = False
+                print("[COMPONENT-VIZ] No cells in ugrid!")
+            
+            # Extract surface
+            import pyvista as pv
+            # Use PassCellData=True to ensure cell scalars transfer
+            surface_filter = ugrid.extract_surface()
+            polydata = surface_filter
+            
+            # PyVista's extract_surface should transfer cell data, but sometimes it doesn't
+            # for volume->surface extraction. Let's check and manually transfer if needed.
+            if "Component_ID" in ugrid.cell_data.keys():
+                if "Component_ID" not in polydata.cell_data.keys():
+                    print("[COMPONENT-VIZ] Component_ID not on surface cells, using volume cell mapping")
+                    # Get the original cell IDs that generated each surface face
+                    # This is complex, so for now just assign based on proximity or use a simpler method
+                    # Fallback: assign Component 0 to all surface cells
+                    import numpy as np
+                    # Better approach: use the first component ID we find
+                    first_comp_id = int(ugrid.cell_data["Component_ID"][0]) if ugrid.n_cells > 0 else 0
+                    polydata.cell_data["Component_ID"] = np.full(polydata.n_cells, first_comp_id, dtype=int)
+                    print(f"[COMPONENT-VIZ] Warning: Assigned Component_ID={first_comp_id} to all surface cells (fallback)")
+                else:
+                    print(f"[COMPONENT-VIZ] Component_ID successfully transferred to {polydata.n_cells} surface cells")
+            
+            # Ensure Component_ID is on surface cells (not just volume cells)
+            # PyVista's extract_surface should transfer cell data automatically, but verify
+            if "Component_ID" not in polydata.array_names and "Component_ID" in ugrid.array_names:
+                print("[COMPONENT-VIZ] Warning: Component_ID not transferred to surface, attempting manual transfer")
+                # Manually transfer Component_ID from volume to surface
+                # This is a fallback - extract_surface should handle this
+                import numpy as np
+                polydata["Component_ID"] = np.zeros(polydata.n_cells, dtype=int)
+            
+            print(f"[COMPONENT-VIZ] Displaying surface with {polydata.GetNumberOfCells()} faces (from {ugrid.n_cells} volume cells, edges={'ON' if has_volume_cells else 'OFF'})" if has_volume_cells else f"[COMPONENT-VIZ] Displaying surface mesh")
+            
+            # Create mapper with categorical colors
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
+            mapper.SetScalarModeToUseCellData()
+            mapper.SetScalarRange(0, result.get('num_components', 10))
+            mapper.ScalarVisibilityOn()
+            
+            # Create categorical color lookup table
+            lut = vtk.vtkLookupTable()
+            num_colors = max(10, result.get('num_components', 10))
+            lut.SetNumberOfTableValues(num_colors)
+            lut.Build()
+            
+            # Use distinct colors (tab20 colormap approximation)
+            colors = [
+                (0.12, 0.47, 0.71), (1.0, 0.50, 0.05), (0.17, 0.63, 0.17),
+                (0.84, 0.15, 0.16), (0.58, 0.40, 0.74), (0.55, 0.34, 0.29),
+                (0.89, 0.47, 0.76), (0.50, 0.50, 0.50), (0.74, 0.74, 0.13),
+                (0.09, 0.75, 0.81), (0.68, 0.78, 0.91), (1.0, 0.73, 0.47),
+                (0.60, 0.87, 0.54), (1.0, 0.60, 0.60), (0.79, 0.70, 0.84),
+                (0.78, 0.70, 0.65), (0.98, 0.75, 0.83), (0.78, 0.78, 0.78),
+                (0.86, 0.86, 0.55), (0.62, 0.85, 0.88)
+            ]
+            for i in range(num_colors):
+                color = colors[i % len(colors)]
+                lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
+            
+            mapper.SetLookupTable(lut)
+            
+            # Create actor
+            self.current_actor = vtk.vtkActor()
+            self.current_actor.SetMapper(mapper)
+            
+            # Set initial opacity from parent opacity slider if available
+            current_opacity = self.parent().viz_opacity_spin.value() if hasattr(self.parent(), 'viz_opacity_spin') else 1.0
+            self.current_actor.GetProperty().SetOpacity(current_opacity)
+            
+            # Increase ambient lighting to reduce dark shadows
+            self.current_actor.GetProperty().SetAmbient(0.6)  # High ambient for visibility
+            self.current_actor.GetProperty().SetDiffuse(0.6)
+            self.current_actor.GetProperty().SetSpecular(0.2)
+            
+            # Enable edge visibility to show hex mesh structure
+            if has_volume_cells:
+                self.current_actor.GetProperty().SetEdgeVisibility(True)
+                self.current_actor.GetProperty().SetEdgeColor(0.2, 0.2, 0.2)  # Dark gray edges
+                self.current_actor.GetProperty().SetLineWidth(1.0)
+            
+            # Add to renderer
+            self.renderer.AddActor(self.current_actor)
+            
+            # Create scalar bar for component IDs
+            scalar_bar = vtk.vtkScalarBarActor()
+            scalar_bar.SetLookupTable(lut)
+            scalar_bar.SetTitle("Component ID")
+            scalar_bar.SetNumberOfLabels(min(num_colors, 10))
+            scalar_bar.SetPosition(0.85, 0.1)
+            scalar_bar.SetWidth(0.12)
+            scalar_bar.SetHeight(0.8)
+            self.renderer.AddActor2D(scalar_bar)
+            
+            # Reset camera and render
+            self.renderer.ResetCamera()
+            self.vtk_widget.GetRenderWindow().Render()
+            
+            # Update info
+            self.info_label.setText(f"Components: {result.get('num_components', 0)} | "
+                                   f"Volume Error: {result.get('volume_error_pct', 0):.2f}%")
+            
+            print(f"[COMPONENT-VIZ] Displayed {result.get('num_components')} components successfully")
+            return "SUCCESS"
+            
+        except ImportError:
+            self.info_label.setText("Error: PyVista not installed (pip install pyvista)")
+            print("[ERROR] PyVista not available")
+            return "FAILED"
+        except Exception as e:
+            self.info_label.setText(f"Error loading components: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return "FAILED"
+
 
     def _parse_msh_file(self, filepath: str):
         nodes = {}
@@ -4310,8 +4527,9 @@ class ModernMeshGenGUI(QMainWindow):
 
                 # Update chatbox with mesh data, CAD file, and config
                 if self.chatbox:
+                    mesh_name = Path(self.mesh_file).name if self.mesh_file else "Component Visualization"
                     mesh_data = {
-                        'file_name': Path(self.mesh_file).name,
+                        'file_name': mesh_name,
                         'total_elements': result.get('total_elements', 0),
                         'total_nodes': result.get('total_nodes', 0),
                         **metrics

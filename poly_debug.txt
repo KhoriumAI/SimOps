@@ -1,0 +1,8 @@
+=== POLYHEDRAL LOAD DEBUG ===
+Function called at: C:\Users\Owner\Downloads\MeshPackageLean\apps\cli\generated_meshes\model_poly_dual.json
+Nodes: 837, Elements: 300
+Cells created: 300, Skipped: 0
+UGrid cells: 300
+Actor created and added to renderer
+Renderer actor count: 1
+=== COMPLETE SUCCESS ===

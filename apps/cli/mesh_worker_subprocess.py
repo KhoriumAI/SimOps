@@ -22,6 +22,7 @@ from strategies.hex_dominant_strategy import (
     HighFidelityDiscretization,
     ConvexDecomposition
 )
+from strategies.polyhedral_strategy import PolyhedralMeshGenerator
 from core.config import Config
 import tempfile
 import gmsh
@@ -41,6 +42,9 @@ def generate_hex_testing_visualization(cad_file: str, output_dir: str = None, qu
     """
     try:
         import trimesh
+        import numpy as np
+        import multiprocessing
+        import time
         
         print("[HEX-TEST] Starting CoACD component visualization...")
         
@@ -63,39 +67,90 @@ def generate_hex_testing_visualization(cad_file: str, output_dir: str = None, qu
         # Step 2: CoACD Decomposition
         print("[HEX-TEST] Step 2: CoACD convex decomposition...")
         step2 = ConvexDecomposition()
-        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
+        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.03)
         
         if not parts:
             return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
         
         print(f"[HEX-TEST] Decomposed into {len(parts)} convex parts")
         
-        # Step 3: Export each component with ID
+        # Step 3: Serialized Chunk Meshing (Fail-Fast)
+        print("[HEX-TEST] Step 3: Serialized Chunk Meshing (Fail-Fast)...")
+        
         component_files = []
+        timeout_seconds = 30
+        
         for i, (verts, faces) in enumerate(parts):
-            # Clean mesh
+            print(f"  > Processing Chunk {i+1}/{len(parts)}...")
+            
+            # Export chunk to temp STL
             chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
             chunk_mesh.merge_vertices()
             chunk_mesh.remove_degenerate_faces()
             chunk_mesh.remove_duplicate_faces()
             
-            # Save as VTK with component ID as scalar
-            component_file = mesh_folder / f"{mesh_name}_component_{i}.vtk"
+            chunk_stl = temp_dir / f"temp_chunk_{i}.stl"
+            chunk_vtk = temp_dir / f"temp_chunk_{i}.vtk"
+            chunk_mesh.export(str(chunk_stl))
             
-            # Use PyVista to add component ID scalar
-            try:
-                import pyvista as pv
-                pv_mesh = pv.PolyData(chunk_mesh.vertices, np.hstack([np.full((len(chunk_mesh.faces), 1), 3), chunk_mesh.faces]))
-                pv_mesh["Component_ID"] = np.full(len(chunk_mesh.faces), i, dtype=int)
-                pv_mesh.save(str(component_file))
-                component_files.append(str(component_file))
-                print(f"[HEX-TEST] Saved component {i} with {len(chunk_mesh.faces)} faces to {component_file.name}")
-            except ImportError:
-                # Fallback: save as STL without scalars
+            # Spawn worker process to mesh this chunk
+            p = multiprocessing.Process(
+                target=_mesh_chunk_process,
+                args=(str(chunk_stl), str(chunk_vtk), quality_params)
+            )
+            p.start()
+            
+            # Wait with timeout
+            p.join(timeout=timeout_seconds)
+            
+            if p.is_alive():
+                print(f"    [TIMEOUT] Chunk {i} hung after {timeout_seconds}s - Terminating...")
+                p.terminate()
+                p.join()
+                # Fallback: just show the STL if meshing failed
                 component_file = mesh_folder / f"{mesh_name}_component_{i}.stl"
                 chunk_mesh.export(str(component_file))
                 component_files.append(str(component_file))
-                print(f"[HEX-TEST] Warning: PyVista not available, saved as STL: {component_file.name}")
+                print(f"    [FALLBACK] Saved unmeshed STL: {component_file.name}")
+                
+            elif p.exitcode != 0:
+                print(f"    [FAILED] Chunk {i} failed with exit code {p.exitcode}")
+                # Fallback: just show the STL if meshing failed
+                component_file = mesh_folder / f"{mesh_name}_component_{i}.stl"
+                chunk_mesh.export(str(component_file))
+                component_files.append(str(component_file))
+                print(f"    [FALLBACK] Saved unmeshed STL: {component_file.name}")
+                
+            else:
+                print(f"    [SUCCESS] Chunk {i} meshed successfully")
+                # Load the generated VTK and add component ID
+                try:
+                    import pyvista as pv
+                    # Load the VTK file directly
+                    chunk_vtk_pv = pv.read(str(chunk_vtk))
+                    
+                    # Add component ID
+                    if "Component_ID" not in chunk_vtk_pv.array_names:
+                        chunk_vtk_pv["Component_ID"] = np.full(chunk_vtk_pv.n_cells, i, dtype=int)
+                    
+                    # Save final VTK
+                    component_file = mesh_folder / f"{mesh_name}_component_{i}.vtk"
+                    chunk_vtk_pv.save(str(component_file))
+                    component_files.append(str(component_file))
+                    print(f"    [EXPORT] Saved meshed component to {component_file.name}")
+                    
+                except Exception as e:
+                    print(f"    [ERROR] Failed to process VTK: {e}")
+                    # Fallback to STL
+                    component_file = mesh_folder / f"{mesh_name}_component_{i}.stl"
+                    chunk_mesh.export(str(component_file))
+                    component_files.append(str(component_file))
+            
+            # Cleanup temp files
+            if chunk_stl.exists():
+                chunk_stl.unlink()
+            if chunk_vtk.exists():
+                chunk_vtk.unlink()
         
         print(f"[HEX-TEST] Success! Exported {len(component_files)} components")
         
@@ -118,6 +173,58 @@ def generate_hex_testing_visualization(cad_file: str, output_dir: str = None, qu
         }
 
 
+def _mesh_chunk_process(chunk_stl_path: str, output_msh_path: str, quality_params: Dict):
+    """
+    Worker process to mesh a single convex chunk.
+    Isolated process prevents GMSH hangs from freezing the main application.
+    """
+    import gmsh
+    import sys
+    
+    try:
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Verbosity", 2)
+        
+        gmsh.model.add("chunk_mesh")
+        
+        # Set tolerances
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
+        gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
+        
+        # Merge the chunk STL
+        gmsh.merge(chunk_stl_path)
+        
+        # Classify surfaces
+        angle = 40
+        gmsh.model.mesh.classifySurfaces(angle * 3.14159 / 180, True, False, 180 * 3.14159 / 180)
+        gmsh.model.mesh.createGeometry()
+        
+        # Create volume
+        s = gmsh.model.getEntities(2)
+        l = gmsh.model.geo.addSurfaceLoop([s[i][1] for i in range(len(s))])
+        gmsh.model.geo.addVolume([l])
+        gmsh.model.geo.synchronize()
+        
+        # Generate 3D tet mesh
+        gmsh.model.mesh.generate(3)
+        
+        # Apply subdivision (tet -> hex)
+        gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
+        gmsh.model.mesh.refine()
+        
+        # Write output (VTK format for visualization)
+        gmsh.write(output_msh_path)
+        gmsh.finalize()
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"[CHUNK-WORKER] Failed: {e}")
+        if gmsh.isInitialized():
+            gmsh.finalize()
+        sys.exit(1)
+
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
     Generate hex-dominant mesh using CoACD + subdivision pipeline
@@ -125,13 +232,17 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
     Steps:
     1. High-fidelity STEP → STL
     2. CoACD convex decomposition
-    3. Discrete mesh approach (merge cleaned STLs)
-    4. Surface classification → volume
-    5. Subdivision algorithm (tets → 4 hexes each)
+    3. Serialized "Fail-Fast" Meshing of Chunks
+    4. Merge successful chunks
     """
     try:
         import trimesh
+        import numpy as np
+        import multiprocessing
+        import time
+        
         save_stl = quality_params.get('save_stl', False) if quality_params else False
+        timeout_seconds = 30  # Timeout per chunk
         
         print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
         
@@ -154,76 +265,126 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         if save_stl:
             saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
-            import shutil
             shutil.copy(stl_file, saved_stl_step1)
             print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
         
         # Step 2: CoACD Decomposition
         print("[HEX-DOM] Step 2: CoACD convex decomposition...")
         step2 = ConvexDecomposition()
-        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
+        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.03)
         
         if not parts:
             return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
         
         print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
         
-        # Step 3-5: Hex Meshing
-        print("[HEX-DOM] Step 3-5: Generating hex mesh via subdivision...")
-        
-        gmsh.initialize()
-        gmsh.model.add("hex_dom_final")
-        
-        # Set tolerances
-        gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
-        gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
-        
-        # Clean and merge each part
+        # Export component surfaces for preview
+        print("[HEX-DOM] Exporting CoACD components for preview...")
+        preview_files = []
         for i, (verts, faces) in enumerate(parts):
             chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
             chunk_mesh.merge_vertices()
             chunk_mesh.remove_degenerate_faces()
             chunk_mesh.remove_duplicate_faces()
             
-            chunk_file = temp_dir / f"temp_chunk_{i}.stl"
-            chunk_mesh.export(str(chunk_file))
-            gmsh.merge(str(chunk_file))
-            chunk_file.unlink()  # Delete temp file
+            # Save component surface for preview
+            preview_file = mesh_folder / f"{mesh_name}_preview_component_{i}.vtk"
+            try:
+                import pyvista as pv
+                pv_mesh = pv.PolyData(chunk_mesh.vertices, np.hstack([np.full((len(chunk_mesh.faces), 1), 3), chunk_mesh.faces]))
+                pv_mesh["Component_ID"] = np.full(len(chunk_mesh.faces), i, dtype=int)
+                pv_mesh.save(str(preview_file))
+                preview_files.append(str(preview_file))
+            except Exception as e:
+                print(f"[HEX-DOM] Warning: Could not export preview for component {i}: {e}")
         
-        # Classify surfaces to create volumes
-        try:
-            angle = 40
-            gmsh.model.mesh.classifySurfaces(angle * 3.14159 / 180, True, False, 180 * 3.14159 / 180)
-            gmsh.model.mesh.createGeometry()
+        # Emit progress update with component preview
+        if preview_files:
+            print(json.dumps({
+                'type': 'progress',
+                'phase': 'coacd_preview',
+                'percentage': 100,
+                'component_files': preview_files,
+                'num_components': len(parts),
+                'volume_error_pct': stats['volume_error_pct']
+            }))
+            sys.stdout.flush()
+        
+        # Step 3: Serialized Chunk Meshing
+        print("[HEX-DOM] Step 3: Serialized Chunk Meshing (Fail-Fast)...")
+        
+        successful_chunks = []
+        failed_chunks = []
+        
+        for i, (verts, faces) in enumerate(parts):
+            print(f"  > Processing Chunk {i+1}/{len(parts)}...")
             
-            s = gmsh.model.getEntities(2)
-            l = gmsh.model.geo.addSurfaceLoop([s[i][1] for i in range(len(s))])
-            gmsh.model.geo.addVolume([l])
-            gmsh.model.geo.synchronize()
+            # Export chunk to temp STL
+            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+            chunk_mesh.merge_vertices()
+            chunk_mesh.remove_degenerate_faces()
+            chunk_mesh.remove_duplicate_faces()
             
-            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces")
-        except Exception as e:
-            gmsh.finalize()
-            return {'success': False, 'message': f'Step 3 failed: Surface classification - {e}'}
+            chunk_stl = temp_dir / f"temp_chunk_{i}.stl"
+            chunk_msh = temp_dir / f"temp_chunk_{i}.msh"
+            chunk_mesh.export(str(chunk_stl))
+            
+            # Spawn worker process
+            p = multiprocessing.Process(
+                target=_mesh_chunk_process,
+                args=(str(chunk_stl), str(chunk_msh), quality_params)
+            )
+            p.start()
+            
+            # Wait with timeout
+            p.join(timeout=timeout_seconds)
+            
+            if p.is_alive():
+                print(f"    [TIMEOUT] Chunk {i} hung after {timeout_seconds}s - Terminating...")
+                p.terminate()
+                p.join()
+                
+                # Save failed chunk
+                fail_file = mesh_folder / f"FAIL_chunk_{i}.stl"
+                shutil.copy(chunk_stl, fail_file)
+                print(f"    [EXPORT] Saved failed chunk to {fail_file}")
+                failed_chunks.append(i)
+                
+            elif p.exitcode != 0:
+                print(f"    [FAILED] Chunk {i} failed with exit code {p.exitcode}")
+                
+                # Save failed chunk
+                fail_file = mesh_folder / f"FAIL_chunk_{i}.stl"
+                shutil.copy(chunk_stl, fail_file)
+                print(f"    [EXPORT] Saved failed chunk to {fail_file}")
+                failed_chunks.append(i)
+                
+            else:
+                print(f"    [SUCCESS] Chunk {i} meshed successfully")
+                successful_chunks.append(str(chunk_msh))
+            
+            # Cleanup temp STL
+            if chunk_stl.exists():
+                chunk_stl.unlink()
+
+        # Step 4: Merge Successful Chunks
+        if not successful_chunks:
+            return {'success': False, 'message': 'All chunks failed to mesh'}
+            
+        print(f"[HEX-DOM] Step 4: Merging {len(successful_chunks)} successful chunks...")
         
-        # Generate 3D tet mesh first
-        try:
-            gmsh.model.mesh.generate(3)
-            print("[HEX-DOM] Generated intermediate tet mesh")
-        except Exception as e:
-            gmsh.finalize()
-            return {'success': False, 'message': f'Step 4 failed: Tet meshing - {e}'}
+        gmsh.initialize()
+        gmsh.model.add("merged_hex_mesh")
         
-        # Apply subdivision (tet → hex)
-        print("[HEX-DOM] Applying subdivision algorithm...")
-        gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
-        gmsh.model.mesh.refine()
-        
-        # Write output
+        for msh_file in successful_chunks:
+            gmsh.merge(msh_file)
+            # Cleanup temp msh
+            Path(msh_file).unlink()
+            
+        # Write final output
         gmsh.write(output_file)
         
-        # Count elements
+        # Count elements (same as before)
         element_types = gmsh.model.mesh.getElementTypes()
         element_counts = {}
         for etype in element_types:
@@ -239,8 +400,12 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         node_tags, _, _ = gmsh.model.mesh.getNodes()
         total_nodes = len(node_tags)
         
-        # Extract per-element quality for visualization (store as dict keyed by element id)
+        # Extract per-element quality (simplified for merged mesh)
         per_element_quality = {}
+        # ... (rest of quality extraction logic can remain similar, 
+        # but we need to re-implement it since we replaced the whole block)
+        
+        # Re-implement quality extraction
         per_element_gamma = {}
         per_element_skewness = {}
         per_element_aspect_ratio = {}
@@ -252,90 +417,53 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                     return seq.tolist()
                 return list(seq)
             
-            # Surface elements (triangles/quads) for viewer coloring
+            # Surface elements
             surf_types, surf_tags, _ = gmsh.model.mesh.getElements(2)
             for elem_type, tags in zip(surf_types, surf_tags):
-                if elem_type in (2, 3, 9, 10):  # triangles + quads (linear/quadratic)
+                if elem_type in (2, 3, 9, 10):
                     tag_list = _as_list(tags)
                     sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
-                    gamma_vals = gmsh.model.mesh.getElementQualities(tag_list, "gamma")
-                    for tag, sicn, gamma in zip(tag_list, sicn_vals, gamma_vals):
-                        tag_int = int(tag)
-                        sicn_val = float(sicn)
-                        gamma_val = float(gamma)
-                        per_element_quality[tag_int] = sicn_val
-                        per_element_gamma[tag_int] = gamma_val
-                        per_element_skewness[tag_int] = max(0.0, 1.0 - sicn_val)
-                        per_element_aspect_ratio[tag_int] = (1.0 / sicn_val) if sicn_val > 1e-6 else 1e6
+                    for tag, sicn in zip(tag_list, sicn_vals):
+                        per_element_quality[int(tag)] = float(sicn)
             
-            # Volume elements (tets/hexes) for statistics + cross-section
+            # Volume elements
             vol_types, vol_tags, _ = gmsh.model.mesh.getElements(3)
             for elem_type, tags in zip(vol_types, vol_tags):
-                if elem_type in (4, 5, 11, 12):  # tets/hexes (linear + quadratic)
+                if elem_type in (4, 5, 11, 12):
                     tag_list = _as_list(tags)
                     sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
-                    gamma_vals = gmsh.model.mesh.getElementQualities(tag_list, "gamma")
-                    for tag, sicn, gamma in zip(tag_list, sicn_vals, gamma_vals):
-                        tag_int = int(tag)
-                        sicn_val = float(sicn)
-                        gamma_val = float(gamma)
-                        per_element_quality[tag_int] = sicn_val
-                        per_element_gamma[tag_int] = gamma_val
-                        per_element_skewness[tag_int] = max(0.0, 1.0 - sicn_val)
-                        per_element_aspect_ratio[tag_int] = (1.0 / sicn_val) if sicn_val > 1e-6 else 1e6
-                        volume_qualities.append(sicn_val)
+                    for tag, sicn in zip(tag_list, sicn_vals):
+                        val = float(sicn)
+                        per_element_quality[int(tag)] = val
+                        volume_qualities.append(val)
+                        
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
-        
-        # Derive summary quality metrics (focus on volume elements if available)
-        if volume_qualities:
-            sorted_q = sorted(volume_qualities)
-            sicn_min = sorted_q[0]
-            sicn_max = sorted_q[-1]
-            sicn_avg = sum(sorted_q) / len(sorted_q)
-            idx_10 = max(0, int(len(sorted_q) * 0.10))
-            sicn_10 = sorted_q[idx_10]
-        elif per_element_quality:
-            values = list(per_element_quality.values())
-            values.sort()
-            sicn_min = values[0]
-            sicn_max = values[-1]
-            sicn_avg = sum(values) / len(values)
-            idx_10 = max(0, int(len(values) * 0.10))
-            sicn_10 = values[idx_10]
-        else:
-            sicn_min = 0.0
-            sicn_max = 1.0
-            sicn_avg = 0.0
-            sicn_10 = 0.0
+            
+        # Summary metrics
+        sicn_avg = sum(volume_qualities) / len(volume_qualities) if volume_qualities else 0.0
         
         gmsh.finalize()
         
-        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)")
-        
+        msg = f'Hex-dominant mesh: {num_hexes} hexes'
+        if failed_chunks:
+            msg += f' ({len(failed_chunks)} chunks failed/skipped)'
+            
         return {
             'success': True,
             'output_file': str(Path(output_file).absolute()),
             'strategy': 'hex_dominant_subdivision',
-            'message': f'Hex-dominant mesh: {num_hexes} hexes, {num_tets} tets',
+            'message': msg,
             'total_elements': total_3d,
             'total_nodes': total_nodes,
             'per_element_quality': per_element_quality,
-            'per_element_gamma': per_element_gamma,
-            'per_element_skewness': per_element_skewness,
-            'per_element_aspect_ratio': per_element_aspect_ratio,
             'metrics': {
                 'num_hexes': num_hexes,
-                'num_tets': num_tets,
-                'hex_ratio': (num_hexes / total_3d * 100) if total_3d > 0 else 0,
-                'volume_error_pct': stats['volume_error_pct'],
-                'num_parts': len(parts)
+                'num_parts': len(parts),
+                'failed_parts': len(failed_chunks)
             },
             'quality_metrics': {
-                'sicn_min': sicn_min,
-                'sicn_max': sicn_max,
-                'sicn_avg': sicn_avg,
-                'sicn_10_percentile': sicn_10
+                'sicn_avg': sicn_avg
             }
         }
         
@@ -347,6 +475,56 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'message': f'Hex dominant meshing failed: {str(e)}'
         }
 
+
+def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Generate Polyhedral (Dual) mesh
+    """
+    try:
+        print("[POLY] Starting Polyhedral (Dual) meshing...")
+        
+        # Determine output folders
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        output_file = str(mesh_folder / f"{mesh_name}_poly_dual.msh")
+        
+        # Initialize generator
+        config = Config()
+        if quality_params and 'painted_regions' in quality_params:
+            config.painted_regions = quality_params['painted_regions']
+            
+        generator = PolyhedralMeshGenerator(config)
+        
+        # Run generation
+        success = generator.run_meshing_strategy(cad_file, output_file)
+        
+        if success:
+            # Check for JSON file with full polyhedral data
+            json_file = Path(output_file).with_suffix('.json')
+            poly_data_file = str(json_file.absolute()) if json_file.exists() else None
+            
+            return {
+                'success': True,
+                'output_file': str(Path(output_file).absolute()),
+                'polyhedral_data_file': poly_data_file,
+                'strategy': 'polyhedral_dual',
+                'message': 'Polyhedral dual mesh generated',
+                'visualization_mode': 'polyhedral' if poly_data_file else 'surface'
+            }
+        else:
+            return {
+                'success': False,
+                'message': 'Polyhedral meshing failed'
+            }
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'message': f'Polyhedral meshing failed: {str(e)}'
+        }
 
 def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
@@ -371,6 +549,9 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         elif 'Hex Dominant' in mesh_strategy:
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
+        elif 'Polyhedral' in mesh_strategy:
+            print("[DEBUG] Polyhedral strategy detected - using dual graph pipeline")
+            return generate_polyhedral_mesh(cad_file, output_dir, quality_params)
         
         # Default: use exhaustive tet strategy
         # Initialize generator

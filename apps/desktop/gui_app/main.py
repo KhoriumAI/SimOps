@@ -431,7 +431,8 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
             "Hex Dominant (Subdivision)",
-            "Hex Dominant Testing"
+            "Hex Dominant Testing",
+            "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
         self.mesh_strategy.setToolTip(
@@ -1864,15 +1865,29 @@ class ModernMeshGenGUI(QMainWindow):
                     self.mesh_file = self._convert_to_hexahedral(self.mesh_file)
                     self.add_log("="*70 + "\n")
 
-                self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
-                load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
-                self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
+                # Check for polyhedral visualization mode (use JSON data)
+                if result.get('visualization_mode') == 'polyhedral' and result.get('polyhedral_data_file'):
+                    poly_json = result.get('polyhedral_data_file')
+                    self.add_log(f"[POLY-VIZ] Loading polyhedral mesh from {poly_json}...")
+                    load_result = self.viewer.load_polyhedral_file(poly_json)
+                    self.add_log(f"[POLY-VIZ] Result: {load_result}")
+                else:
+                    # Standard mesh loading
+                    self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
+                    load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
+                    self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
             
             # Check for hex testing component visualization
             elif result.get('visualization_mode') == 'components' and result.get('component_files'):
                 self.add_log(f"[DEBUG] Loading component visualization with {result.get('num_components')} parts...")
                 load_result = self.viewer.load_component_visualization(result)
                 self.add_log(f"[DEBUG] Component visualization loaded")
+
+            # Check for surface visualization (e.g. Polyhedral Dual fallback)
+            elif result.get('visualization_mode') == 'surface':
+                self.add_log(f"[DEBUG] Loading surface visualization...")
+                load_result = self.viewer.load_mesh_file(self.mesh_file, result)
+                self.add_log(f"[DEBUG] Surface visualization loaded")
 
 
                 # Check if colors were applied

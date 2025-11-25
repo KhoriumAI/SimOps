@@ -10,7 +10,9 @@ import numpy as np
 import logging
 import tempfile
 import subprocess
+import sys
 import os
+import json
 from pathlib import Path
 from typing import Dict, Optional
 from PyQt5.QtWidgets import (
@@ -233,9 +235,23 @@ class VTK3DViewer(QFrame):
         self.vtk_widget.GetRenderWindow().Render()
 
     def clear_view(self):
-        if self.current_actor:
-            self.renderer.RemoveActor(self.current_actor)
-            self.current_actor = None
+        # Remove ALL 3D actors from renderer
+        actors = self.renderer.GetActors()
+        actors.InitTraversal()
+        for i in range(actors.GetNumberOfItems()):
+            actor = actors.GetNextActor()
+            if actor:
+                self.renderer.RemoveActor(actor)
+        
+        # Remove ALL 2D actors (scalar bars, text, etc.)
+        actors2d = self.renderer.GetActors2D()
+        actors2d.InitTraversal()
+        for i in range(actors2d.GetNumberOfItems()):
+            actor = actors2d.GetNextActor2D()
+            if actor:
+                self.renderer.RemoveActor2D(actor)
+        
+        self.current_actor = None
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
 
@@ -678,21 +694,222 @@ class VTK3DViewer(QFrame):
         
         return unique_points
     
+    def load_polyhedral_file(self, json_path: str):
+        """Load polyhedral mesh from JSON file"""
+        # DEBUG: Write to file to prove function is running
+        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/poly_debug.txt")
+        with open(debug_log, 'w') as f:
+            f.write(f"=== POLYHEDRAL LOAD DEBUG ===\n")
+            f.write(f"Function called at: {json_path}\n")
+        
+        print("=" * 80)
+        print("[POLY-VIZ v2.0] STARTING POLYHEDRAL LOAD")
+        print("=" * 80)
+        try:
+            print(f"[POLY-VIZ] Loading polyhedral data from {json_path}")
+            
+            # Check file exists
+            if not Path(json_path).exists():
+                print(f"[POLY-VIZ ERROR] File not found: {json_path}")
+                with open(debug_log, 'a') as f:
+                    f.write("[ERROR] File not found\n")
+                return "FAILED"
+            
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            nodes = data.get('nodes', {})
+            elements = data.get('elements', [])
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"Nodes: {len(nodes)}, Elements: {len(elements)}\n")
+            
+            print(f"[POLY-VIZ] Loaded {len(nodes)} nodes, {len(elements)} elements")
+            
+            if not nodes or not elements:
+                print("[POLY-VIZ ERROR] No nodes or elements in JSON")
+                with open(debug_log, 'a') as f:
+                    f.write("[ERROR] No data\n")
+                return "FAILED"
+            
+            self.clear_view()
+            
+            # 1. Create VTK Points
+            points = vtk.vtkPoints()
+            node_map = {}
+            sorted_node_ids = sorted(nodes.keys(), key=lambda x: int(x))
+            
+            print(f"[POLY-VIZ] Creating {len(sorted_node_ids)} points...")
+            for i, node_id in enumerate(sorted_node_ids):
+                coords = nodes[node_id]
+                points.InsertNextPoint(coords)
+                node_map[str(node_id)] = i
+                node_map[int(node_id)] = i
+                
+            # 2. Create Unstructured Grid
+            ugrid = vtk.vtkUnstructuredGrid()
+            ugrid.SetPoints(points)
+            
+            # 3. Insert Cells
+            print(f"[POLY-VIZ] Inserting {len(elements)} polyhedral cells...")
+            count = 0
+            skipped = 0
+            
+            for elem_idx, elem in enumerate(elements):
+                try:
+                    if elem['type'] != 'polyhedron':
+                        continue
+                        
+                    faces = elem['faces']
+                    if len(faces) < 3:
+                        skipped += 1
+                        continue
+                    
+                    face_stream = [len(faces)]
+                    
+                    for face_nodes in faces:
+                        face_stream.append(len(face_nodes))
+                        try:
+                            face_indices = [node_map[nid] for nid in face_nodes]
+                            face_stream.extend(face_indices)
+                        except KeyError as e:
+                            print(f"[POLY-VIZ WARNING] Node ID {e} not found in element {elem_idx}, skipping face")
+                            skipped += 1
+                            continue
+                    
+                    # Use vtkIdList for the face stream
+                    id_list = vtk.vtkIdList()
+                    for val in face_stream:
+                        id_list.InsertNextId(val)
+                    
+                    ugrid.InsertNextCell(vtk.VTK_POLYHEDRON, id_list)
+                    count += 1
+                    
+                    if count % 50 == 0:
+                        print(f"[POLY-VIZ] Inserted {count}/{len(elements)} cells...")
+                        
+                except Exception as e:
+                    print(f"[POLY-VIZ ERROR] Failed to insert element {elem_idx}: {e}")
+                    with open(debug_log, 'a') as f:
+                        f.write(f"[ERROR] Element {elem_idx}: {e}\n")
+                    skipped += 1
+                    continue
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"Cells created: {count}, Skipped: {skipped}\n")
+                f.write(f"UGrid cells: {ugrid.GetNumberOfCells()}\n")
+            
+            print(f"[POLY-VIZ] Created {count} polyhedral cells ({skipped} skipped)")
+            
+            if count == 0:
+                print("[POLY-VIZ ERROR] No cells were created!")
+                return "FAILED"
+            
+            # 4. Mapper/Actor
+            print("[POLY-VIZ] Creating mapper and actor...")
+            mapper = vtk.vtkDataSetMapper()
+            mapper.SetInputData(ugrid)
+            
+            self.current_actor = vtk.vtkActor()
+            self.current_actor.SetMapper(mapper)
+            self.current_actor.GetProperty().SetEdgeVisibility(1)
+            self.current_actor.GetProperty().SetColor(0.7, 0.8, 0.9)
+            self.current_actor.GetProperty().SetOpacity(0.8)
+            
+            self.renderer.AddActor(self.current_actor)
+            self.current_volumetric_grid = ugrid
+            self.current_poly_data = None
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"Actor created and added to renderer\n")
+                f.write(f"Renderer actor count: {self.renderer.GetActors().GetNumberOfItems()}\n")
+            
+            print("[POLY-VIZ] Resetting camera and rendering...")
+            
+            # Get bounds and log them
+            bounds = ugrid.GetBounds()
+            with open(debug_log, 'a') as f:
+                f.write(f"UGrid bounds: {bounds}\n")
+            
+            # Compute center and size
+            import numpy as np
+            center = np.array([
+                (bounds[0] + bounds[1]) / 2,
+                (bounds[2] + bounds[3]) / 2,
+                (bounds[4] + bounds[5]) / 2
+            ])
+            size = np.array([
+                bounds[1] - bounds[0],
+                bounds[3] - bounds[2],
+                bounds[5] - bounds[4]
+            ])
+            max_size = np.max(size)
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"Center: {center}\n")
+                f.write(f"Size: {size}\n")
+                f.write(f"Max size: {max_size}\n")
+            
+            # Reset camera with explicit positioning
+            camera = self.renderer.GetActiveCamera()
+            camera.SetFocalPoint(center[0], center[1], center[2])
+            camera.SetPosition(
+                center[0] + max_size * 1.5,
+                center[1] + max_size * 1.5,
+                center[2] + max_size * 1.5
+            )
+            camera.SetViewUp(0, 0, 1)
+            self.renderer.ResetCamera(bounds)
+            
+            self.vtk_widget.GetRenderWindow().Render()
+            
+            self.info_label.setText(f"Polyhedral Mesh: {ugrid.GetNumberOfCells()} cells")
+            print("[POLY-VIZ] SUCCESS!")
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"=== COMPLETE SUCCESS ===\n")
+            
+            return "SUCCESS"
+            
+        except Exception as e:
+            print(f"[POLY-VIZ ERROR] Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            with open(debug_log, 'a') as f:
+                f.write(f"[EXCEPTION] {e}\n")
+                f.write(traceback.format_exc())
+            self.info_label.setText(f"Error loading polyhedral mesh: {e}")
+            return "FAILED"
+
     def _generate_cross_section_mesh(self, plane_origin, plane_normal):
         """
-        Generate VTK PolyData for the cross-section by intersecting all volume elements with the plane.
-        
-        Returns:
-            vtk.vtkPolyData containing the cross-section geometry
+        Generate VTK PolyData for the cross-section.
+        Uses vtkCutter for Polyhedra, manual intersection for Tets/Hexes.
         """
+        # If we have a volumetric grid (Polyhedra), use vtkCutter
+        if self.current_volumetric_grid and self.current_volumetric_grid.GetNumberOfCells() > 0:
+            # Check if we have polyhedra
+            cell_type = self.current_volumetric_grid.GetCellType(0)
+            if cell_type == vtk.VTK_POLYHEDRON:
+                plane = vtk.vtkPlane()
+                plane.SetOrigin(plane_origin)
+                plane.SetNormal(plane_normal)
+                
+                cutter = vtk.vtkCutter()
+                cutter.SetInputData(self.current_volumetric_grid)
+                cutter.SetCutFunction(plane)
+                cutter.Update()
+                return cutter.GetOutput()
+        
+        # Fallback to manual intersection for standard meshes (Tets/Hexes)
         import numpy as np
         
         intersecting_elements = self._get_volume_elements_intersecting_plane(plane_origin, plane_normal)
         
         if not intersecting_elements:
-            # No intersection, return empty polydata
             return vtk.vtkPolyData()
         
+        # ... (rest of manual intersection logic) ...
         # Collect all intersection polygons
         all_points = []
         all_triangles = []
@@ -711,17 +928,13 @@ class VTK3DViewer(QFrame):
             num_points = len(polygon_points)
             all_points.extend(polygon_points)
             
-            # Triangulate the polygon (points are now ordered, so simple fan works)
-            # For 3 points: single triangle
-            # For 4 points: split into 2 triangles
+            # Triangulate the polygon
             if num_points == 3:
                 all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
             elif num_points == 4:
-                # Create two triangles with consistent winding
                 all_triangles.append([point_offset, point_offset + 1, point_offset + 2])
                 all_triangles.append([point_offset, point_offset + 2, point_offset + 3])
             else:
-                # For more points (rare), use a fan triangulation from first point
                 for i in range(1, num_points - 1):
                     all_triangles.append([point_offset, point_offset + i, point_offset + i + 1])
             
@@ -745,8 +958,6 @@ class VTK3DViewer(QFrame):
         poly_data = vtk.vtkPolyData()
         poly_data.SetPoints(points)
         poly_data.SetPolys(triangles)
-        
-        print(f"[DEBUG] Cross-section: {len(intersecting_elements)} intersecting volume cells -> {len(all_triangles)} triangles, {len(all_points)} points")
         
         return poly_data
     
@@ -2030,3 +2241,145 @@ except Exception as e:
                 i += 1
 
         return nodes, elements
+    def load_component_visualization(self, result: Dict):
+        """Load and display CoACD components with PyVista"""
+        from pathlib import Path
+        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/component_debug.txt")
+        with open(debug_log, 'w') as f:
+            f.write("=== COMPONENT VIZ DEBUG ===\n")
+            f.write(f"Function called\n")
+            f.write(f"Result keys: {list(result.keys())}\n")
+        
+        print("="*80)
+        print("[COMPONENT-VIZ] *** FUNCTION CALLED *** IN VTK_VIEWER.PY")
+        print("="*80)
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            component_files = result.get('component_files', [])
+            if not component_files:
+                print("[ERROR] No component files in result")
+                self.info_label.setText("Error: No components found")
+                return "FAILED"
+            
+            print(f"[COMPONENT-VIZ] Loading {len(component_files)} components...")
+            self.clear_view()
+            
+            # Load and merge all components
+            merged_mesh = None
+            for i, comp_file in enumerate(component_files):
+                if not Path(comp_file).exists():
+                    print(f"[WARNING] Component file not found: {comp_file}")
+                    continue
+                
+                # Load with PyVista
+                comp_mesh = pv.read(comp_file)
+                
+                # Ensure Component_ID scalar exists
+                if "Component_ID" not in comp_mesh.array_names:
+                    comp_mesh["Component_ID"] = np.full(comp_mesh.n_cells, i, dtype=int)
+                
+                # Merge into single mesh
+                if merged_mesh is None:
+                    merged_mesh = comp_mesh
+                else:
+                    merged_mesh = merged_mesh.merge(comp_mesh)
+                
+                print(f"[COMPONENT-VIZ] Loaded component {i}: {comp_mesh.n_cells} cells")
+            
+            if merged_mesh is None:
+                print("[ERROR] No components loaded")
+                self.info_label.setText("Error: Failed to load components")
+                return "FAILED"
+            
+            # Always extract surface for display, but check if we have volume data
+            ugrid = merged_mesh.cast_to_unstructured_grid()
+            polydata = ugrid.extract_surface()
+            
+            # Check if original mesh had volume elements (hex/tet)
+            has_volume_cells = ugrid.n_cells > 0 and ugrid.GetCellType(0) in [vtk.VTK_HEXAHEDRON, vtk.VTK_TETRA]
+            
+            print(f"[COMPONENT-VIZ] Displaying surface with {polydata.GetNumberOfCells()} faces (from {ugrid.n_cells} volume cells)" if has_volume_cells else f"[COMPONENT-VIZ] Displaying surface mesh")
+            
+            # Create mapper with categorical colors
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
+            mapper.SetScalarModeToUseCellData()
+            mapper.SetScalarRange(0, result.get('num_components', 10))
+            mapper.ScalarVisibilityOn()
+            
+            # Create categorical color lookup table
+            lut = vtk.vtkLookupTable()
+            num_colors = max(10, result.get('num_components', 10))
+            lut.SetNumberOfTableValues(num_colors)
+            lut.Build()
+            
+            # Use distinct colors (tab20 colormap approximation)
+            colors = [
+                (0.12, 0.47, 0.71), (1.0, 0.50, 0.05), (0.17, 0.63, 0.17),
+                (0.84, 0.15, 0.16), (0.58, 0.40, 0.74), (0.55, 0.34, 0.29),
+                (0.89, 0.47, 0.76), (0.50, 0.50, 0.50), (0.74, 0.74, 0.13),
+                (0.09, 0.75, 0.81), (0.68, 0.78, 0.91), (1.0, 0.73, 0.47),
+                (0.60, 0.87, 0.54), (1.0, 0.60, 0.60), (0.79, 0.70, 0.84),
+                (0.78, 0.70, 0.65), (0.98, 0.75, 0.83), (0.78, 0.78, 0.78),
+                (0.86, 0.86, 0.55), (0.62, 0.85, 0.88)
+            ]
+            for i in range(num_colors):
+                color = colors[i % len(colors)]
+                lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
+            
+            mapper.SetLookupTable(lut)
+            
+            # Create actor
+            self.current_actor = vtk.vtkActor()
+            self.current_actor.SetMapper(mapper)
+            
+            # Set initial opacity from parent opacity slider if available
+            current_opacity = self.parent().viz_opacity_spin.value() if hasattr(self.parent(), 'viz_opacity_spin') else 1.0
+            self.current_actor.GetProperty().SetOpacity(current_opacity)
+            
+            # Increase ambient lighting to reduce dark shadows
+            self.current_actor.GetProperty().SetAmbient(0.6)  # High ambient for visibility
+            self.current_actor.GetProperty().SetDiffuse(0.6)
+            self.current_actor.GetProperty().SetSpecular(0.2)
+            
+            # Enable edge visibility to show hex mesh structure
+            if has_volume_cells:
+                self.current_actor.GetProperty().SetEdgeVisibility(True)
+                self.current_actor.GetProperty().SetEdgeColor(0.2, 0.2, 0.2)  # Dark gray edges
+                self.current_actor.GetProperty().SetLineWidth(1.0)
+            
+            # Add to renderer
+            self.renderer.AddActor(self.current_actor)
+            
+            # Create scalar bar for component IDs
+            scalar_bar = vtk.vtkScalarBarActor()
+            scalar_bar.SetLookupTable(lut)
+            scalar_bar.SetTitle("Component ID")
+            scalar_bar.SetNumberOfLabels(min(num_colors, 10))
+            scalar_bar.SetPosition(0.85, 0.1)
+            scalar_bar.SetWidth(0.12)
+            scalar_bar.SetHeight(0.8)
+            self.renderer.AddActor2D(scalar_bar)
+            
+            # Reset camera and render
+            self.renderer.ResetCamera()
+            self.vtk_widget.GetRenderWindow().Render()
+            
+            # Update info
+            self.info_label.setText(f"Components: {result.get('num_components', 0)} | "
+                                   f"Volume Error: {result.get('volume_error_pct', 0):.2f}%")
+            
+            print(f"[COMPONENT-VIZ] Displayed {result.get('num_components')} components successfully")
+            return "SUCCESS"
+            
+        except ImportError:
+            self.info_label.setText("Error: PyVista not installed (pip install pyvista)")
+            print("[ERROR] PyVista not available")
+            return "FAILED"
+        except Exception as e:
+            self.info_label.setText(f"Error loading components: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return "FAILED"
