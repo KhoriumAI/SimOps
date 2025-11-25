@@ -25,6 +25,97 @@ from strategies.hex_dominant_strategy import (
 from core.config import Config
 import tempfile
 import gmsh
+import numpy as np
+
+
+def generate_hex_testing_visualization(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Generate CoACD component visualization for debugging
+    
+    Steps:
+    1. STEP → STL
+    2. CoACD decomposition
+    3. Export each component as separate mesh with Component_ID
+    
+    Returns dict with component_files list for PyVista loading
+    """
+    try:
+        import trimesh
+        
+        print("[HEX-TEST] Starting CoACD component visualization...")
+        
+        # Determine output folders
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        
+        # Temporary STL path
+        temp_dir = Path(tempfile.gettempdir())
+        stl_file = temp_dir / f"{mesh_name}_step1.stl"
+        
+        # Step 1: STEP → STL
+        print("[HEX-TEST] Step 1: Converting STEP to STL...")
+        step1 = HighFidelityDiscretization()
+        success = step1.convert_step_to_stl(cad_file, str(stl_file))
+        if not success:
+            return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
+        
+        # Step 2: CoACD Decomposition
+        print("[HEX-TEST] Step 2: CoACD convex decomposition...")
+        step2 = ConvexDecomposition()
+        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
+        
+        if not parts:
+            return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
+        
+        print(f"[HEX-TEST] Decomposed into {len(parts)} convex parts")
+        
+        # Step 3: Export each component with ID
+        component_files = []
+        for i, (verts, faces) in enumerate(parts):
+            # Clean mesh
+            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+            chunk_mesh.merge_vertices()
+            chunk_mesh.remove_degenerate_faces()
+            chunk_mesh.remove_duplicate_faces()
+            
+            # Save as VTK with component ID as scalar
+            component_file = mesh_folder / f"{mesh_name}_component_{i}.vtk"
+            
+            # Use PyVista to add component ID scalar
+            try:
+                import pyvista as pv
+                pv_mesh = pv.PolyData(chunk_mesh.vertices, np.hstack([np.full((len(chunk_mesh.faces), 1), 3), chunk_mesh.faces]))
+                pv_mesh["Component_ID"] = np.full(len(chunk_mesh.faces), i, dtype=int)
+                pv_mesh.save(str(component_file))
+                component_files.append(str(component_file))
+                print(f"[HEX-TEST] Saved component {i} with {len(chunk_mesh.faces)} faces to {component_file.name}")
+            except ImportError:
+                # Fallback: save as STL without scalars
+                component_file = mesh_folder / f"{mesh_name}_component_{i}.stl"
+                chunk_mesh.export(str(component_file))
+                component_files.append(str(component_file))
+                print(f"[HEX-TEST] Warning: PyVista not available, saved as STL: {component_file.name}")
+        
+        print(f"[HEX-TEST] Success! Exported {len(component_files)} components")
+        
+        return {
+            'success': True,
+            'strategy': 'hex_testing',
+            'message': f'CoACD decomposition: {len(parts)} components',
+            'component_files': component_files,
+            'num_components': len(parts),
+            'volume_error_pct': stats['volume_error_pct'],
+            'visualization_mode': 'components'
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'message': f'Hex testing visualization failed: {str(e)}'
+        }
 
 
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -274,7 +365,10 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        if 'Hex Dominant' in mesh_strategy:
+        if 'Hex Dominant Testing' in mesh_strategy:
+            print("[DEBUG] Hex Dominant Testing detected - visualizing CoACD components")
+            return generate_hex_testing_visualization(cad_file, output_dir, quality_params)
+        elif 'Hex Dominant' in mesh_strategy:
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         

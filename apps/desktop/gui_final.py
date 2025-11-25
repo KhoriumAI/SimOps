@@ -2461,6 +2461,13 @@ class ModernMeshGenGUI(QMainWindow):
         self.phase_base_names = {}
         self.active_phase = None
         self.dot_count = 0
+        
+        # Master progress tracking
+        self.phase_weights = {}  # {phase_name: percentage_weight}
+        self.completed_phases = []  # [phase_name, ...]
+        self.phase_completion_times = {}  # {phase_name: seconds}
+        self.mesh_start_time = None
+        self.master_progress = 0.0  # 0-100
 
         # AI chatbox
         self.chatbox = None
@@ -2826,12 +2833,14 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy = QComboBox()
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
-            "Hex Dominant (Subdivision)"
+            "Hex Dominant (Subdivision)",
+            "Hex Dominant Testing"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
         self.mesh_strategy.setToolTip(
             "Tetrahedral (Delaunay): Robust conformal tet mesh\n"
-            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision (4x elements)"
+            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision (4x elements)\n"
+            "Hex Dominant Testing: Visualize CoACD components with unique colors for debugging"
         )
         self.mesh_strategy.setStyleSheet("""
             QComboBox {
@@ -3209,50 +3218,92 @@ class ModernMeshGenGUI(QMainWindow):
             }
         """)
         progress_layout = QVBoxLayout()
-        progress_layout.setSpacing(3)  # More compact spacing
-
-        phases = [
-            ("strategy", "Strategy"),
-            ("1d", "1D"),
-            ("2d", "2D"),
-            ("3d", "3D"),
-            ("opt", "Optimize"),
-            ("netgen", "Netgen"),
-            ("order2", "Order 2"),
-            ("quality", "Quality")
-        ]
-
-        for phase_id, phase_name in phases:
-            phase_label = QLabel(phase_name)
-            phase_label.setStyleSheet("font-size: 8px; color: #495057; font-weight: 600;")
-            progress_layout.addWidget(phase_label)
-
-            # Store label reference and base name for animation
-            self.phase_labels[phase_id] = phase_label
-            self.phase_base_names[phase_id] = phase_name
-
-            phase_bar = QProgressBar()
-            phase_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #dee2e6;
-                    border-radius: 2px;
-                    text-align: center;
-                    background-color: #f8f9fa;
-                    height: 14px;
-                    font-size: 8px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: #0d6efd;
-                    border-radius: 1px;
-                }
-            """)
-            phase_bar.setMaximum(100)
-            phase_bar.setValue(0)
-            phase_bar.setFormat("%p%")  # Only show percentage
-            progress_layout.addWidget(phase_bar)
-
-            self.phase_bars[phase_id] = phase_bar
+        progress_layout.setSpacing(8)
+        
+        # === MASTER PROGRESS BAR ===
+        master_label = QLabel("Overall Progress")
+        master_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-bottom: 2px;")
+        progress_layout.addWidget(master_label)
+        
+        self.master_bar = QProgressBar()
+        self.master_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #0d6efd;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #e7f1ff;
+                height: 24px;
+                font-size: 11px;
+                font-weight: bold;
+                color: #212529;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #0d6efd, stop:1 #0a58ca);
+                border-radius: 2px;
+            }
+        """)
+        self.master_bar.setMaximum(100)
+        self.master_bar.setValue(0)
+        self.master_bar.setFormat("0% - Ready")
+        progress_layout.addWidget(self.master_bar)
+        
+        # === CURRENT PROCESS BAR ===
+        current_label = QLabel("Current Stage")
+        current_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-top: 8px; margin-bottom: 2px;")
+        progress_layout.addWidget(current_label)
+        
+        self.current_process_label = QLabel("Waiting to start...")
+        self.current_process_label.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic; margin-bottom: 2px;")
+        progress_layout.addWidget(self.current_process_label)
+        
+        self.current_process_bar = QProgressBar()
+        self.current_process_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #6c757d;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #f8f9fa;
+                height: 18px;
+                font-size: 9px;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #6c757d;
+                border-radius: 2px;
+            }
+        """)
+        self.current_process_bar.setMaximum(100)
+        self.current_process_bar.setValue(0)
+        self.current_process_bar.setFormat("%p%")
+        progress_layout.addWidget(self.current_process_bar)
+        
+        # === COMPLETED STAGES LIST ===
+        completed_label = QLabel("Completed Stages")
+        completed_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-top: 8px; margin-bottom: 2px;")
+        progress_layout.addWidget(completed_label)
+        
+        # Scroll area for completed stages
+        self.completed_stages_scroll = QScrollArea()
+        self.completed_stages_scroll.setWidgetResizable(True)
+        self.completed_stages_scroll.setMaximumHeight(120)
+        self.completed_stages_scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #dee2e6;
+                border-radius: 3px;
+                background-color: #f8f9fa;
+            }
+        """)
+        
+        # Widget to hold completed stages
+        self.completed_stages_widget = QWidget()
+        self.completed_stages_layout = QVBoxLayout(self.completed_stages_widget)
+        self.completed_stages_layout.setSpacing(2)
+        self.completed_stages_layout.setContentsMargins(5, 5, 5, 5)
+        self.completed_stages_layout.addStretch()  # Push items to top
+        
+        self.completed_stages_scroll.setWidget(self.completed_stages_widget)
+        progress_layout.addWidget(self.completed_stages_scroll)
 
         progress_group.setLayout(progress_layout)
         layout.addWidget(progress_group)
@@ -3675,6 +3726,79 @@ class ModernMeshGenGUI(QMainWindow):
             else:
                 self.add_log("[!] Could not calculate geometry volume - using default element counts")
 
+
+    def calculate_phase_weights(self, element_target, quality_preset):
+        """
+        Calculate relative time weights for each phase based on element count and quality.
+        
+        Args:
+            element_target: Target number of elements
+            quality_preset: "Draft", "Standard", or "High Fidelity"
+            
+        Returns:
+            dict {phase_name: weight_percentage}
+        """
+        # Base weights (for 10k elements, Standard quality)
+        base_weights = {
+            'cad': 5,
+            'surf': 20,
+            'refine': 15,
+            '3d': 35,
+            'opt': 20,
+            'quality': 5
+        }
+        
+        # Complexity multiplier based on element count
+        if element_target < 5000:
+            complexity = 0.7  # Simpler, faster
+        elif element_target < 50000:
+            complexity = 1.0  # Standard
+        else:
+            complexity = 1.5  # Complex, slower
+        
+        # Quality multipliers
+        quality_mult = {
+            'Draft': 0.6,
+            'Standard': 1.0,
+            'High Fidelity': 1.8
+        }.get(quality_preset, 1.0)
+        
+        # Adjust weights
+        adjusted = base_weights.copy()
+        adjusted['opt'] *= quality_mult  # Optimization scales with quality
+        adjusted['refine'] *= quality_mult  # Refinement scales with quality
+        adjusted['3d'] *= complexity  # 3D meshing scales with element count
+        
+        # Normalize to 100%
+        total = sum(adjusted.values())
+        return {k: (v/total)*100 for k, v in adjusted.items()}
+    
+    def update_eta(self, current_progress):
+        """Update ETA display on master progress bar"""
+        if not self.mesh_start_time or current_progress < 5:
+            return  # Wait for meaningful data
+        
+        import time
+        elapsed = time.time() - self.mesh_start_time
+        
+        if current_progress > 5:
+            estimated_total = elapsed / (current_progress / 100)
+            remaining = estimated_total - elapsed
+            
+            # Format as "Xm Ys" or "Xs"
+            if remaining < 0:
+                eta_text = "Finishing..."
+            elif remaining < 60:
+                eta_text = f"{int(remaining)}s"
+            else:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                eta_text = f"{mins}m {secs}s"
+            
+            # Update master bar format
+            if hasattr(self, 'master_bar'):
+                self.master_bar.setFormat(f"{int(current_progress)}% - ETA: {eta_text}")
+
     def start_mesh_generation(self):
         if not self.cad_file:
             return
@@ -3686,6 +3810,30 @@ class ModernMeshGenGUI(QMainWindow):
         for bar in self.phase_bars.values():
             bar.setValue(0)
             bar.setStyleSheet(bar.styleSheet().replace("background-color: #198754", "background-color: #0d6efd"))
+        
+        # Initialize master progress tracking
+        import time
+        self.mesh_start_time = time.time()
+        self.completed_phases = []
+        self.phase_completion_times = {}
+        self.master_progress = 0.0
+        
+        # Calculate phase weights based on target elements and quality preset
+        element_target = self.target_elements.value()
+        quality_preset = self.quality_preset.currentText()
+        self.phase_weights = self.calculate_phase_weights(element_target, quality_preset)
+        
+        self.add_log(f"[DEBUG] Phase weights calculated: {self.phase_weights}")
+        self.add_log(f"[DEBUG] Target elements: {element_target}, Quality: {quality_preset}")
+        
+        # Reset master bar if it exists
+        if hasattr(self, 'master_bar'):
+            self.master_bar.setValue(0)
+            self.master_bar.setFormat("0% - Starting...")
+        if hasattr(self, 'current_process_bar'):
+            self.current_process_bar.setValue(0)
+        if hasattr(self, 'current_process_label'):
+            self.current_process_label.setText("Initializing...")
 
         # Collect quality parameters from GUI
         quality_params = {
@@ -3886,17 +4034,152 @@ class ModernMeshGenGUI(QMainWindow):
         self.add_log("Console output copied to clipboard!")
 
     def update_progress(self, phase: str, percentage: int):
-        """Update progress bar and animate phase label"""
+        """Update progress bars and track master progress"""
+        import time
+        
+        # Map phase names to standardized names (map all possible phase IDs)
+        phase_map = {
+            'strategy': 'cad', 'CAD': 'cad', 'cad_preprocessing': 'cad', 'cad': 'cad',
+            '1d': 'surf', '2d': 'surf', 'surface_meshing': 'surf', 'surf': 'surf',
+            'refine': 'refine', 'refinement': 'refine',
+            '3d': '3d', 'meshing_3d': '3d',
+            'opt': 'opt', 'netgen': 'opt', 'optimization': 'opt',
+            'order2': 'quality', 'quality': 'quality', 'quality_assessment': 'quality',
+            # Additional mappings for complete coverage
+            'complete': 'quality',  # Final phase
+            'error': 'quality'  # Map errors to last phase
+        }
+        
+        normalized_phase = phase_map.get(phase, phase)
+        
+        # Update current process bar and color
+        self.current_process_bar.setValue(percentage)
+        
+        # Turn current bar green when complete
+        if percentage >= 100:
+            self.current_process_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #198754;
+                    border-radius: 3px;
+                    text-align: center;
+                    background-color: #d1e7dd;
+                    height: 18px;
+                    font-size: 9px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background-color: #198754;
+                    border-radius: 2px;
+                }
+            """)
+        else:
+            # Reset to gray if not complete
+            self.current_process_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #6c757d;
+                    border-radius: 3px;
+                    text-align: center;
+                    background-color: #f8f9fa;
+                    height: 18px;
+                    font-size: 9px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background-color: #6c757d;
+                    border-radius: 2px;
+                }
+            """)
+        
+        # Update current process label
+        phase_display_names = {
+            'cad': 'CAD Preprocessing',
+            'surf': 'Surface Meshing',
+            'refine': 'Refinement',
+            '3d': '3D Meshing',
+            'opt': 'Optimization',
+            'quality': 'Quality Assessment'
+        }
+        display_name = phase_display_names.get(normalized_phase, phase.upper())
+        self.current_process_label.setText(f"{display_name}")
+        
+        # Calculate master progress
+        if self.phase_weights and normalized_phase in self.phase_weights:
+            phase_weight = self.phase_weights[normalized_phase]
+            phase_contribution = (percentage / 100.0) * phase_weight
+            
+            # Sum completed phases
+            completed_weight = sum(
+                self.phase_weights.get(p, 0) for p in self.completed_phases 
+                if p != normalized_phase
+            )
+            
+            # Master progress = completed + current phase contribution
+            self.master_progress = completed_weight + phase_contribution
+            self.master_bar.setValue(int(self.master_progress))
+            
+            # Update ETA
+            self.update_eta(self.master_progress)
+        
+        # Force master bar to 100% if we receive a 'complete' phase
+        if phase == 'complete' or (percentage >= 100 and normalized_phase == 'quality'):
+            self.master_progress = 100.0
+            self.master_bar.setValue(100)
+            self.master_bar.setFormat("100% - Complete!")
+        
+        # Mark phase complete if 100%
+        if percentage >= 100 and normalized_phase not in self.completed_phases:
+            self.completed_phases.append(normalized_phase)
+            
+            # Calculate time taken for this phase
+            if self.mesh_start_time:
+                phase_time = time.time() - self.mesh_start_time
+                # Estimate time for this phase based on weight
+                if normalized_phase in self.phase_weights and self.master_progress > 0:
+                    phase_weight = self.phase_weights[normalized_phase]
+                    phase_duration = (phase_weight / 100.0) * (phase_time / (self.master_progress / 100.0))
+                else:
+                    phase_duration = 0
+                
+                self.phase_completion_times[normalized_phase] = phase_duration
+                self.add_completed_stage_to_ui(display_name, phase_duration)
+        
+        # Update old phase bars if they exist (backwards compatibility)
         if phase in self.phase_bars:
             bar = self.phase_bars[phase]
             bar.setValue(percentage)
-
+            
             # Start animation if this is a new active phase
             if self.active_phase != phase:
                 self.active_phase = phase
                 self.dot_count = 0
                 if not self.animation_timer.isActive():
                     self.animation_timer.start()
+    
+    def add_completed_stage_to_ui(self, stage_name: str, duration: float):
+        """Add a completed stage to the UI list"""
+        # Format duration
+        if duration < 1:
+            time_str = "< 1s"
+        elif duration < 60:
+            time_str = f"{int(duration)}s"
+        else:
+            mins = int(duration // 60)
+            secs = int(duration % 60)
+            time_str = f"{mins}m {secs}s"
+        
+        # Create stage label with checkmark
+        stage_label = QLabel(f"✓ {stage_name} ({time_str})")
+        stage_label.setStyleSheet("""
+            QLabel {
+                font-size: 9px;
+                color: #198754;
+                font-weight: 600;
+                padding: 2px;
+            }
+        """)
+        
+        # Insert at the top (before the stretch)
+        self.completed_stages_layout.insertWidget(0, stage_label)
 
     def mark_phase_complete(self, phase: str):
         """Turn bar green when complete and reset label"""
@@ -3987,6 +4270,13 @@ class ModernMeshGenGUI(QMainWindow):
                 self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
                 load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
                 self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
+            
+            # Check for hex testing component visualization
+            elif result.get('visualization_mode') == 'components' and result.get('component_files'):
+                self.add_log(f"[DEBUG] Loading component visualization with {result.get('num_components')} parts...")
+                load_result = self.viewer.load_component_visualization(result)
+                self.add_log(f"[DEBUG] Component visualization loaded")
+
 
                 # Check if colors were applied
                 if self.viewer.current_actor and result.get('per_element_quality'):
