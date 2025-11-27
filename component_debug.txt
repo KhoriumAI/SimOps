@@ -1,0 +1,3 @@
+=== COMPONENT VIZ DEBUG (Fixed) ===
+Function called
+Result keys: ['success', 'strategy', 'message', 'component_files', 'num_components', 'volume_error_pct', 'visualization_mode']

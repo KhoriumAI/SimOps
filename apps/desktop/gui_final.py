@@ -4490,7 +4490,9 @@ class ModernMeshGenGUI(QMainWindow):
             
             # Check for hex testing component visualization
             elif result.get('visualization_mode') == 'components' and result.get('component_files'):
-                self.add_log(f"[DEBUG] Loading component visualization with {result.get('num_components')} parts...")
+                # Switch to quality visualization for the final result
+                result['visualization_mode'] = 'quality'
+                self.add_log(f"[DEBUG] Loading component visualization with {result.get('num_components')} parts (Quality Mode)...")
                 load_result = self.viewer.load_component_visualization(result)
                 self.add_log(f"[DEBUG] Component visualization loaded")
 

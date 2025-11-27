@@ -805,16 +805,51 @@ class VTK3DViewer(QFrame):
                 print("[POLY-VIZ ERROR] No cells were created!")
                 return "FAILED"
             
-            # 4. Mapper/Actor
+            # 4. Manual Surface Extraction
+            # VTK's vtkDataSetMapper cannot render VTK_POLYHEDRON cells.
+            # Extract all faces from the JSON and create a surface mesh.
+            print("[POLY-VIZ] Manually extracting faces for visualization...")
+            
+            all_faces = []
+            for elem in elements:
+                if elem['type'] != 'polyhedron':
+                    continue
+                for face in elem['faces']:
+                    try:
+                        vtk_face = [node_map[nid] for nid in face]
+                        all_faces.append(vtk_face)
+                    except KeyError:
+                        continue
+            
+            # Create PolyData from extracted faces
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(points)
+            
+            polys = vtk.vtkCellArray()
+            for face_indices in all_faces:
+                polys.InsertNextCell(len(face_indices))
+                for idx in face_indices:
+                    polys.InsertCellPoint(idx)
+            
+            polydata.SetPolys(polys)
+            
+            with open(debug_log, 'a') as f:
+                f.write(f"=== MANUAL SURFACE ===\n")
+                f.write(f"Faces extracted: {len(all_faces)}\n")
+                f.write(f"PolyData cells: {polydata.GetNumberOfCells()}\n")
+            
+            print(f"[POLY-VIZ] Extracted {polydata.GetNumberOfCells()} face polygons")
+            
+            # 5. Mapper/Actor
             print("[POLY-VIZ] Creating mapper and actor...")
-            mapper = vtk.vtkDataSetMapper()
-            mapper.SetInputData(ugrid)
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(polydata)
             
             self.current_actor = vtk.vtkActor()
             self.current_actor.SetMapper(mapper)
             self.current_actor.GetProperty().SetEdgeVisibility(1)
             self.current_actor.GetProperty().SetColor(0.7, 0.8, 0.9)
-            self.current_actor.GetProperty().SetOpacity(0.8)
+            self.current_actor.GetProperty().SetOpacity(1.0)
             
             self.renderer.AddActor(self.current_actor)
             self.current_volumetric_grid = ugrid
@@ -2246,7 +2281,7 @@ except Exception as e:
         from pathlib import Path
         debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/component_debug.txt")
         with open(debug_log, 'w') as f:
-            f.write("=== COMPONENT VIZ DEBUG ===\n")
+            f.write("=== COMPONENT VIZ DEBUG (Fixed) ===\n")
             f.write(f"Function called\n")
             f.write(f"Result keys: {list(result.keys())}\n")
         
@@ -2295,41 +2330,106 @@ except Exception as e:
             
             # Always extract surface for display, but check if we have volume data
             ugrid = merged_mesh.cast_to_unstructured_grid()
-            polydata = ugrid.extract_surface()
             
-            # Check if original mesh had volume elements (hex/tet)
-            has_volume_cells = ugrid.n_cells > 0 and ugrid.GetCellType(0) in [vtk.VTK_HEXAHEDRON, vtk.VTK_TETRA]
+            # Filter to keep only volume cells if they exist (Robust check)
+            cell_types = ugrid.celltypes
+            # Check for 3D cell types: Tet(10), Voxel(11), Hex(12), Wedge(13), Pyramid(14)
+            vol_mask = np.isin(cell_types, [vtk.VTK_HEXAHEDRON, vtk.VTK_TETRA, vtk.VTK_WEDGE, vtk.VTK_PYRAMID, 
+                                          vtk.VTK_HEXAHEDRON, 11, 12, 10, 13, 14])
+            
+            has_volume_cells = False
+            if np.any(vol_mask):
+                print(f"[COMPONENT-VIZ] Found {np.sum(vol_mask)} volume cells! Filtering...")
+                ugrid = ugrid.extract_cells(vol_mask)
+                has_volume_cells = True
+            else:
+                print("[COMPONENT-VIZ] No volume cells found in successful meshes")
+            
+            polydata = ugrid.extract_surface()
             
             print(f"[COMPONENT-VIZ] Displaying surface with {polydata.GetNumberOfCells()} faces (from {ugrid.n_cells} volume cells)" if has_volume_cells else f"[COMPONENT-VIZ] Displaying surface mesh")
             
-            # Create mapper with categorical colors
+            # Determine visualization mode
+            viz_mode = result.get('visualization_mode', 'components')
+            print(f"[COMPONENT-VIZ] Visualization mode: {viz_mode}")
+
             mapper = vtk.vtkPolyDataMapper()
             mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUseCellData()
-            mapper.SetScalarRange(0, result.get('num_components', 10))
-            mapper.ScalarVisibilityOn()
             
-            # Create categorical color lookup table
-            lut = vtk.vtkLookupTable()
-            num_colors = max(10, result.get('num_components', 10))
-            lut.SetNumberOfTableValues(num_colors)
-            lut.Build()
-            
-            # Use distinct colors (tab20 colormap approximation)
-            colors = [
-                (0.12, 0.47, 0.71), (1.0, 0.50, 0.05), (0.17, 0.63, 0.17),
-                (0.84, 0.15, 0.16), (0.58, 0.40, 0.74), (0.55, 0.34, 0.29),
-                (0.89, 0.47, 0.76), (0.50, 0.50, 0.50), (0.74, 0.74, 0.13),
-                (0.09, 0.75, 0.81), (0.68, 0.78, 0.91), (1.0, 0.73, 0.47),
-                (0.60, 0.87, 0.54), (1.0, 0.60, 0.60), (0.79, 0.70, 0.84),
-                (0.78, 0.70, 0.65), (0.98, 0.75, 0.83), (0.78, 0.78, 0.78),
-                (0.86, 0.86, 0.55), (0.62, 0.85, 0.88)
-            ]
-            for i in range(num_colors):
-                color = colors[i % len(colors)]
-                lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
-            
-            mapper.SetLookupTable(lut)
+            if viz_mode == 'quality':
+                # Quality Visualization Mode (Green-Yellow-Red)
+                # Compute quality metric (Scaled Jacobian or similar)
+                print("[COMPONENT-VIZ] Computing quality metrics...")
+                quality = ugrid.compute_cell_quality(quality_measure='scaled_jacobian')
+                polydata.cell_data['Quality'] = quality.cell_data['CellQuality']
+                
+                mapper.SetScalarModeToUseCellData()
+                mapper.SetScalarRange(0.0, 1.0)  # Quality usually 0-1
+                mapper.ScalarVisibilityOn()
+                
+                # Create diverging colormap (Red=Bad, Green=Good)
+                lut = vtk.vtkLookupTable()
+                lut.SetNumberOfTableValues(256)
+                lut.Build()
+                ctf = vtk.vtkColorTransferFunction()
+                ctf.AddRGBPoint(0.0, 1.0, 0.0, 0.0)  # Red (Bad)
+                ctf.AddRGBPoint(0.5, 1.0, 1.0, 0.0)  # Yellow (Medium)
+                ctf.AddRGBPoint(1.0, 0.0, 1.0, 0.0)  # Green (Good)
+                
+                for i in range(256):
+                    val = i / 255.0
+                    rgb = ctf.GetColor(val)
+                    lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], 1.0)
+                
+                mapper.SetLookupTable(lut)
+                
+                # Add scalar bar for Quality
+                scalar_bar = vtk.vtkScalarBarActor()
+                scalar_bar.SetLookupTable(lut)
+                scalar_bar.SetTitle("Mesh Quality")
+                scalar_bar.SetNumberOfLabels(5)
+                scalar_bar.SetPosition(0.85, 0.1)
+                scalar_bar.SetWidth(0.12)
+                scalar_bar.SetHeight(0.8)
+                self.renderer.AddActor2D(scalar_bar)
+                
+            else:
+                # Component ID Mode (Default)
+                mapper.SetScalarModeToUseCellData()
+                mapper.SetScalarRange(0, result.get('num_components', 10))
+                mapper.ScalarVisibilityOn()
+                
+                # Create categorical color lookup table
+                lut = vtk.vtkLookupTable()
+                num_colors = max(10, result.get('num_components', 10))
+                lut.SetNumberOfTableValues(num_colors)
+                lut.Build()
+                
+                # Use distinct colors (tab20 colormap approximation)
+                colors = [
+                    (0.12, 0.47, 0.71), (1.0, 0.50, 0.05), (0.17, 0.63, 0.17),
+                    (0.84, 0.15, 0.16), (0.58, 0.40, 0.74), (0.55, 0.34, 0.29),
+                    (0.89, 0.47, 0.76), (0.50, 0.50, 0.50), (0.74, 0.74, 0.13),
+                    (0.09, 0.75, 0.81), (0.68, 0.78, 0.91), (1.0, 0.73, 0.47),
+                    (0.60, 0.87, 0.54), (1.0, 0.60, 0.60), (0.79, 0.70, 0.84),
+                    (0.78, 0.70, 0.65), (0.98, 0.75, 0.83), (0.78, 0.78, 0.78),
+                    (0.86, 0.86, 0.55), (0.62, 0.85, 0.88)
+                ]
+                for i in range(num_colors):
+                    color = colors[i % len(colors)]
+                    lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
+                
+                mapper.SetLookupTable(lut)
+                
+                # Add scalar bar for Component ID
+                scalar_bar = vtk.vtkScalarBarActor()
+                scalar_bar.SetLookupTable(lut)
+                scalar_bar.SetTitle("Component ID")
+                scalar_bar.SetNumberOfLabels(min(num_colors, 10))
+                scalar_bar.SetPosition(0.85, 0.1)
+                scalar_bar.SetWidth(0.12)
+                scalar_bar.SetHeight(0.8)
+                self.renderer.AddActor2D(scalar_bar)
             
             # Create actor
             self.current_actor = vtk.vtkActor()
@@ -2352,16 +2452,6 @@ except Exception as e:
             
             # Add to renderer
             self.renderer.AddActor(self.current_actor)
-            
-            # Create scalar bar for component IDs
-            scalar_bar = vtk.vtkScalarBarActor()
-            scalar_bar.SetLookupTable(lut)
-            scalar_bar.SetTitle("Component ID")
-            scalar_bar.SetNumberOfLabels(min(num_colors, 10))
-            scalar_bar.SetPosition(0.85, 0.1)
-            scalar_bar.SetWidth(0.12)
-            scalar_bar.SetHeight(0.8)
-            self.renderer.AddActor2D(scalar_bar)
             
             # Reset camera and render
             self.renderer.ResetCamera()

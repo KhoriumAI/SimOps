@@ -527,219 +527,6 @@ class ModernMeshGenGUI(QMainWindow):
         axis_layout.addWidget(self.clip_axis_combo, 1)
         crosssection_layout.addLayout(axis_layout)
         
-        # Cell type selector
-        cell_mode_layout = QHBoxLayout()
-        cell_mode_label = QLabel("Slice Cells:")
-        cell_mode_label.setStyleSheet("font-size: 11px; color: #495057;")
-        cell_mode_layout.addWidget(cell_mode_label)
-        
-        self.crosssection_cell_combo = QComboBox()
-        self.crosssection_cell_combo.addItems(["Auto", "Tetrahedra", "Hexahedra"])
-        self.crosssection_cell_combo.setCurrentText("Auto")
-        self.crosssection_cell_combo.setEnabled(False)
-        self.crosssection_cell_combo.setStyleSheet("""
-            QComboBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                background-color: white;
-                color: #212529;
-                font-size: 11px;
-            }
-            QComboBox:disabled {
-                background-color: #e9ecef;
-                color: #6c757d;
-            }
-        """)
-        self.crosssection_cell_combo.currentTextChanged.connect(self.on_crosssection_element_mode_changed)
-        cell_mode_layout.addWidget(self.crosssection_cell_combo, 1)
-        crosssection_layout.addLayout(cell_mode_layout)
-
-        # Offset slider
-        offset_layout = QVBoxLayout()
-        offset_layout.setSpacing(3)
-
-        offset_label_layout = QHBoxLayout()
-        offset_label = QLabel("Offset:")
-        offset_label.setStyleSheet("font-size: 11px; color: #495057;")
-        offset_label_layout.addWidget(offset_label)
-
-        self.clip_offset_value_label = QLabel("0%")
-        self.clip_offset_value_label.setStyleSheet("font-size: 11px; color: #007bff; font-weight: 600;")
-        self.clip_offset_value_label.setAlignment(Qt.AlignRight)
-        offset_label_layout.addWidget(self.clip_offset_value_label)
-        offset_layout.addLayout(offset_label_layout)
-
-        self.clip_offset_slider = QSlider(Qt.Horizontal)
-        self.clip_offset_slider.setRange(-50, 50)
-        self.clip_offset_slider.setValue(0)
-        self.clip_offset_slider.setEnabled(False)
-        self.clip_offset_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #e9ecef;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #007bff;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #0056b3;
-            }
-            QSlider::handle:horizontal:disabled {
-                background: #6c757d;
-            }
-        """)
-        self.clip_offset_slider.valueChanged.connect(self.on_clip_offset_changed)
-        offset_layout.addWidget(self.clip_offset_slider)
-        crosssection_layout.addLayout(offset_layout)
-
-        crosssection_group.setLayout(crosssection_layout)
-        layout.addWidget(crosssection_group)
-
-        # Quality Visualization Controls
-        viz_group = QGroupBox("Quality Visualization")
-        viz_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: 600;
-                font-size: 12px;
-                color: #2c3e50;
-                border: 1px solid #dee2e6;
-                border-radius: 6px;
-                margin-top: 8px;
-                padding-top: 12px;
-                background-color: #f8f9fa;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0 5px;
-                background-color: #f8f9fa;
-            }
-        """)
-        viz_layout = QVBoxLayout()
-        viz_layout.setSpacing(8)
-
-        # Metric Selector
-        metric_layout = QHBoxLayout()
-        metric_label = QLabel("Metric:")
-        metric_label.setStyleSheet("font-size: 11px; color: #495057;")
-        metric_layout.addWidget(metric_label)
-
-        self.viz_metric_combo = QComboBox()
-        self.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
-        self.viz_metric_combo.setCurrentIndex(0)
-        self.viz_metric_combo.setStyleSheet("""
-            QComboBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                background-color: white;
-                color: #212529;
-                font-size: 11px;
-            }
-        """)
-        self.viz_metric_combo.currentTextChanged.connect(self.on_viz_metric_changed)
-        metric_layout.addWidget(self.viz_metric_combo, 1)
-        viz_layout.addLayout(metric_layout)
-
-        # Opacity Control (SpinBox)
-        opacity_layout = QHBoxLayout()
-        opacity_label = QLabel("Opacity:")
-        opacity_label.setStyleSheet("font-size: 11px; color: #495057;")
-        opacity_layout.addWidget(opacity_label)
-        
-        self.viz_opacity_spin = QDoubleSpinBox()
-        self.viz_opacity_spin.setRange(0.0, 1.0)
-        self.viz_opacity_spin.setSingleStep(0.1)
-        self.viz_opacity_spin.setValue(1.0)
-        self.viz_opacity_spin.setDecimals(1)
-        self.viz_opacity_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                background-color: white;
-                font-size: 11px;
-            }
-        """)
-        self.viz_opacity_spin.valueChanged.connect(self.on_viz_opacity_changed)
-        opacity_layout.addWidget(self.viz_opacity_spin, 1)
-        viz_layout.addLayout(opacity_layout)
-
-
-        # Filter Range (Dual-Handled Range Slider)
-        filter_label = QLabel("Show Quality Range:")
-        filter_label.setStyleSheet("font-size: 11px; color: #495057; margin-top: 5px;")
-        viz_layout.addWidget(filter_label)
-
-        # Value display (shows current min/max)
-        range_value_layout = QHBoxLayout()
-        self.viz_range_min_label = QLabel("Min: 0.00")
-        self.viz_range_min_label.setStyleSheet("font-size: 10px; color: #0d6efd; font-weight: bold;")
-        self.viz_range_max_label = QLabel("Max: 1.00")
-        self.viz_range_max_label.setStyleSheet("font-size: 10px; color: #dc3545; font-weight: bold;")
-        range_value_layout.addWidget(self.viz_range_min_label)
-        range_value_layout.addStretch()
-        range_value_layout.addWidget(self.viz_range_max_label)
-        viz_layout.addLayout(range_value_layout)
-        
-        # Dual-handled range slider
-        self.viz_range_slider = QRangeSlider(Qt.Horizontal)
-        self.viz_range_slider.setMinimum(0)
-        self.viz_range_slider.setMaximum(100)
-        self.viz_range_slider.setValue((0, 100))
-        self.viz_range_slider.setStyleSheet("""
-            QRangeSlider {
-                qproperty-barColor: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #dc3545, stop:0.5 #ffc107, stop:1 #28a745);
-            }
-        """)
-        self.viz_range_slider.valueChanged.connect(self.on_viz_range_slider_changed)
-        viz_layout.addWidget(self.viz_range_slider)
-        
-        # Store quality data ranges for auto-update
-        self.quality_data_ranges = {
-            'SICN': (0.0, 1.0),
-            'Gamma': (0.0, 1.0),
-            'Skewness': (0.0, 1.0),
-            'Aspect Ratio': (1.0, 10.0)
-        }
-
-        viz_group.setLayout(viz_layout)
-        layout.addWidget(viz_group)
-
-        # Paintbrush refinement widget
-        print(f"[DEBUG] Paintbrush available: {PAINTBRUSH_AVAILABLE}")
-        print(f"[DEBUG] Paintbrush selector: {self.paintbrush_selector}")
-
-        if PAINTBRUSH_AVAILABLE and self.paintbrush_selector:
-            try:
-                print("[DEBUG] Creating paintbrush widget...")
-                self.paintbrush_widget = PaintbrushWidget()
-                print("[DEBUG] Paintbrush widget created successfully")
-
-                self.paintbrush_widget.paintbrush_enabled.connect(self.on_paintbrush_toggled)
-                self.paintbrush_widget.radius_changed.connect(self.on_brush_radius_changed)
-                self.paintbrush_widget.refinement_changed.connect(self.on_refinement_changed)
-                self.paintbrush_widget.clear_requested.connect(self.on_clear_painted_regions)
-                self.paintbrush_widget.preview_requested.connect(self.on_preview_refinement)
-                self.paintbrush_widget.region_deleted.connect(self.on_region_deleted)
-
-                print("[DEBUG] Adding paintbrush widget to layout...")
-                layout.addWidget(self.paintbrush_widget)
-                print("[DEBUG] Paintbrush widget added to GUI!")
-            except Exception as e:
-                print(f"[ERROR] Failed to create paintbrush widget: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"[DEBUG] Paintbrush widget NOT added - Available:{PAINTBRUSH_AVAILABLE}, Selector:{self.paintbrush_selector}")
-
         # Generate button
         self.generate_btn = QPushButton("Generate Mesh (Parallel)")
         self.generate_btn.setEnabled(False)
@@ -905,6 +692,277 @@ class ModernMeshGenGUI(QMainWindow):
 
         progress_group.setLayout(progress_layout)
         layout.addWidget(progress_group)
+
+        # Cross-section Controls
+        crosssection_group = QGroupBox("Cross-Section View")
+        crosssection_group.setCheckable(True)
+        crosssection_group.setChecked(False)
+        self.crosssection_enabled = crosssection_group
+        crosssection_group.toggled.connect(self.on_crosssection_toggled)
+        crosssection_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: 600;
+                font-size: 12px;
+                color: #2c3e50;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                background-color: #f8f9fa;
+            }
+        """)
+        crosssection_layout = QVBoxLayout()
+        crosssection_layout.setSpacing(8)
+
+        # Axis selection
+        axis_layout = QHBoxLayout()
+        axis_label = QLabel("Axis:")
+        axis_label.setStyleSheet("font-size: 11px; color: #495057;")
+        axis_layout.addWidget(axis_label)
+
+        self.clip_axis_combo = QComboBox()
+        self.clip_axis_combo.addItems(["X", "Y", "Z"])
+        self.clip_axis_combo.setEnabled(False)
+        self.clip_axis_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+            QComboBox:disabled {
+                background-color: #e9ecef;
+                color: #6c757d;
+            }
+        """)
+        self.clip_axis_combo.currentTextChanged.connect(self.on_clip_axis_changed)
+        axis_layout.addWidget(self.clip_axis_combo, 1)
+        crosssection_layout.addLayout(axis_layout)
+
+        # Cell type selector
+        cell_mode_layout = QHBoxLayout()
+        cell_mode_label = QLabel("Slice Cells:")
+        cell_mode_label.setStyleSheet("font-size: 11px; color: #495057;")
+        cell_mode_layout.addWidget(cell_mode_label)
+        
+        self.crosssection_cell_combo = QComboBox()
+        self.crosssection_cell_combo.addItems(["Auto", "Tetrahedra", "Hexahedra"])
+        self.crosssection_cell_combo.setCurrentText("Auto")
+        self.crosssection_cell_combo.setEnabled(False)
+        self.crosssection_cell_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+            QComboBox:disabled {
+                background-color: #e9ecef;
+                color: #6c757d;
+            }
+        """)
+        self.crosssection_cell_combo.currentTextChanged.connect(self.on_crosssection_element_mode_changed)
+        cell_mode_layout.addWidget(self.crosssection_cell_combo, 1)
+        crosssection_layout.addLayout(cell_mode_layout)
+
+        # Offset slider
+        offset_layout = QVBoxLayout()
+        offset_layout.setSpacing(3)
+
+        offset_label_layout = QHBoxLayout()
+        offset_label = QLabel("Offset:")
+        offset_label.setStyleSheet("font-size: 11px; color: #495057;")
+        offset_label_layout.addWidget(offset_label)
+
+        self.clip_offset_value_label = QLabel("0%")
+        self.clip_offset_value_label.setStyleSheet("font-size: 11px; color: #007bff; font-weight: 600;")
+        self.clip_offset_value_label.setAlignment(Qt.AlignRight)
+        offset_label_layout.addWidget(self.clip_offset_value_label)
+        offset_layout.addLayout(offset_label_layout)
+
+        self.clip_offset_slider = QSlider(Qt.Horizontal)
+        self.clip_offset_slider.setRange(-50, 50)
+        self.clip_offset_slider.setValue(0)
+        self.clip_offset_slider.setEnabled(False)
+        self.clip_offset_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #e9ecef;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #007bff;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #0056b3;
+            }
+            QSlider::handle:horizontal:disabled {
+                background: #6c757d;
+            }
+        """)
+        self.clip_offset_slider.valueChanged.connect(self.on_clip_offset_changed)
+        offset_layout.addWidget(self.clip_offset_slider)
+        crosssection_layout.addLayout(offset_layout)
+
+        crosssection_group.setLayout(crosssection_layout)
+        self.crosssection_group = crosssection_group
+        self.crosssection_group.setVisible(False)
+        layout.addWidget(self.crosssection_group)
+
+        # Quality Visualization Controls
+        viz_group = QGroupBox("Quality Visualization")
+        viz_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: 600;
+                font-size: 12px;
+                color: #2c3e50;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                background-color: #f8f9fa;
+            }
+        """)
+        viz_layout = QVBoxLayout()
+        viz_layout.setSpacing(8)
+
+        # Metric Selector
+        metric_layout = QHBoxLayout()
+        metric_label = QLabel("Metric:")
+        metric_label.setStyleSheet("font-size: 11px; color: #495057;")
+        metric_layout.addWidget(metric_label)
+
+        self.viz_metric_combo = QComboBox()
+        self.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
+        self.viz_metric_combo.setCurrentIndex(0)
+        self.viz_metric_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+        """)
+        self.viz_metric_combo.currentTextChanged.connect(self.on_viz_metric_changed)
+        metric_layout.addWidget(self.viz_metric_combo, 1)
+        viz_layout.addLayout(metric_layout)
+
+        # Opacity Control (SpinBox)
+        opacity_layout = QHBoxLayout()
+        opacity_label = QLabel("Opacity:")
+        opacity_label.setStyleSheet("font-size: 11px; color: #495057;")
+        opacity_layout.addWidget(opacity_label)
+        
+        self.viz_opacity_spin = QDoubleSpinBox()
+        self.viz_opacity_spin.setRange(0.0, 1.0)
+        self.viz_opacity_spin.setSingleStep(0.1)
+        self.viz_opacity_spin.setValue(1.0)
+        self.viz_opacity_spin.setDecimals(1)
+        self.viz_opacity_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.viz_opacity_spin.valueChanged.connect(self.on_viz_opacity_changed)
+        opacity_layout.addWidget(self.viz_opacity_spin, 1)
+        viz_layout.addLayout(opacity_layout)
+
+
+        # Filter Range (Dual-Handled Range Slider)
+        filter_label = QLabel("Show Quality Range:")
+        filter_label.setStyleSheet("font-size: 11px; color: #495057; margin-top: 5px;")
+        viz_layout.addWidget(filter_label)
+
+        # Value display (shows current min/max)
+        range_value_layout = QHBoxLayout()
+        self.viz_range_min_label = QLabel("Min: 0.00")
+        self.viz_range_min_label.setStyleSheet("font-size: 10px; color: #0d6efd; font-weight: bold;")
+        self.viz_range_max_label = QLabel("Max: 1.00")
+        self.viz_range_max_label.setStyleSheet("font-size: 10px; color: #dc3545; font-weight: bold;")
+        range_value_layout.addWidget(self.viz_range_min_label)
+        range_value_layout.addStretch()
+        range_value_layout.addWidget(self.viz_range_max_label)
+        viz_layout.addLayout(range_value_layout)
+        
+        # Dual-handled range slider
+        self.viz_range_slider = QRangeSlider(Qt.Horizontal)
+        self.viz_range_slider.setMinimum(0)
+        self.viz_range_slider.setMaximum(100)
+        self.viz_range_slider.setValue((0, 100))
+        self.viz_range_slider.setStyleSheet("""
+            QRangeSlider {
+                qproperty-barColor: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #dc3545, stop:0.5 #ffc107, stop:1 #28a745);
+            }
+        """)
+        self.viz_range_slider.valueChanged.connect(self.on_viz_range_slider_changed)
+        viz_layout.addWidget(self.viz_range_slider)
+        
+        # Store quality data ranges for auto-update
+        self.quality_data_ranges = {
+            'SICN': (0.0, 1.0),
+            'Gamma': (0.0, 1.0),
+            'Skewness': (0.0, 1.0),
+            'Aspect Ratio': (1.0, 10.0)
+        }
+
+        viz_group.setLayout(viz_layout)
+        self.viz_group = viz_group
+        self.viz_group.setVisible(False)
+        layout.addWidget(self.viz_group)
+
+        # Paintbrush refinement widget
+        print(f"[DEBUG] Paintbrush available: {PAINTBRUSH_AVAILABLE}")
+        print(f"[DEBUG] Paintbrush selector: {self.paintbrush_selector}")
+
+        if PAINTBRUSH_AVAILABLE and self.paintbrush_selector:
+            try:
+                print("[DEBUG] Creating paintbrush widget...")
+                self.paintbrush_widget = PaintbrushWidget()
+                print("[DEBUG] Paintbrush widget created successfully")
+
+                self.paintbrush_widget.paintbrush_enabled.connect(self.on_paintbrush_toggled)
+                self.paintbrush_widget.radius_changed.connect(self.on_brush_radius_changed)
+                self.paintbrush_widget.refinement_changed.connect(self.on_refinement_changed)
+                self.paintbrush_widget.clear_requested.connect(self.on_clear_painted_regions)
+                self.paintbrush_widget.preview_requested.connect(self.on_preview_refinement)
+                self.paintbrush_widget.region_deleted.connect(self.on_region_deleted)
+
+                print("[DEBUG] Adding paintbrush widget to layout...")
+                layout.addWidget(self.paintbrush_widget)
+                print("[DEBUG] Paintbrush widget added to GUI!")
+            except Exception as e:
+                print(f"[ERROR] Failed to create paintbrush widget: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[DEBUG] Paintbrush widget NOT added - Available:{PAINTBRUSH_AVAILABLE}, Selector:{self.paintbrush_selector}")
 
         layout.addStretch()
 
@@ -1619,6 +1677,23 @@ class ModernMeshGenGUI(QMainWindow):
         if self.animation_timer.isActive():
             self.animation_timer.stop()
         self.active_phase = None
+        
+        # Reset master progress
+        self.master_progress = 0.0
+        if hasattr(self, 'master_bar'):
+            self.master_bar.setValue(0)
+            self.master_bar.setFormat("0% - Ready")
+            
+        # Reset internal tracking
+        self.completed_phases = []
+        self.phase_completion_times = {}
+        
+        # Clear completed stages UI
+        if hasattr(self, 'completed_stages_layout'):
+            while self.completed_stages_layout.count() > 1: # Keep the stretch item
+                item = self.completed_stages_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
 
     def add_log(self, message: str):
         self.console.append(message)
@@ -1643,6 +1718,14 @@ class ModernMeshGenGUI(QMainWindow):
             '3d': '3d', 'meshing_3d': '3d',
             'opt': 'opt', 'netgen': 'opt', 'optimization': 'opt',
             'order2': 'quality', 'quality': 'quality', 'quality_assessment': 'quality',
+            # Hexahedral strategy phases
+            'hex_generation': '3d', 'hex_conversion': 'opt', 'hex_smoothing': 'opt',
+            'component_generation': '3d', 'hex_testing': 'quality',
+            'convex_decomposition': 'surf', 'merging_convex_hulls': 'refine',
+            'meshing_convex_hull': '3d', 'gluing_convex_hulls': 'opt',
+            # Polyhedral strategy phases  
+            'poly_generation': '3d', 'dual_graph': '3d', 'poly_construction': 'opt',
+            'face_generation': 'opt', 'polyhedral_meshing': '3d',
             # Additional mappings for complete coverage
             'complete': 'quality',  # Final phase
             'error': 'quality'  # Map errors to last phase
@@ -1821,6 +1904,10 @@ class ModernMeshGenGUI(QMainWindow):
             animated_text = f"{base_name}{dots_simple[self.dot_count]}"
 
             self.phase_labels[self.active_phase].setText(animated_text)
+            
+            # Update ETA live
+            if self.master_progress > 0:
+                self.update_eta(self.master_progress)
 
     def on_mesh_finished(self, success: bool, result: dict):
         self.add_log("[DEBUG] on_mesh_finished CALLBACK TRIGGERED!")
@@ -1837,6 +1924,48 @@ class ModernMeshGenGUI(QMainWindow):
 
         if success:
             self.refine_btn.setEnabled(True)  # Enable refine button after successful mesh
+            
+            # Show post-processing UI sections
+            if hasattr(self, 'crosssection_group'):
+                self.crosssection_group.setVisible(True)
+            if hasattr(self, 'viz_group'):
+                self.viz_group.setVisible(True)
+            
+            # Force progress bar to 100% and show total time
+            import time
+            if self.mesh_start_time:
+                total_time = time.time() - self.mesh_start_time
+                if total_time < 60:
+                    time_str = f"{int(total_time)}s"
+                else:
+                    mins = int(total_time // 60)
+                    secs = int(total_time % 60)
+                    time_str = f"{mins}m {secs}s"
+                
+                self.master_bar.setValue(100)
+                self.master_bar.setFormat(f"100% - Complete! (Total: {time_str})")
+            else:
+                self.master_bar.setValue(100)
+                self.master_bar.setFormat("100% - Complete!")
+            
+            # Mark current process as complete
+            self.current_process_bar.setValue(100)
+            self.current_process_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #198754;
+                    border-radius: 3px;
+                    text-align: center;
+                    background-color: #d1e7dd;
+                    height: 18px;
+                    font-size: 9px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background-color: #198754;
+                    border-radius: 2px;
+                }
+            """)
+            
             self.add_log("=" * 70)
             self.add_log("MESH GENERATION COMPLETE")
             self.add_log("=" * 70)
