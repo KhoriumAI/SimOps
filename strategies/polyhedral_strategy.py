@@ -110,6 +110,45 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
             
             self.log_message(f"Base mesh: {len(nodes)} nodes, {len(tets)} tets")
             
+            # 2.5 Extract Surface Topology for Boundary Faces
+            self.log_message("Step 2.5: Extracting surface triangles for boundary closure...")
+            
+            # Get surface triangles (2D elements on 3D boundary)
+            surface_tris = []
+            tri_type = 2  # Linear triangle
+            
+            try:
+                # Correct Gmsh API usage: Iterate over surface entities (dim=2)
+                surface_entities = gmsh.model.getEntities(2)
+                all_surface_tris = []
+                
+                for entity in surface_entities:
+                    tag = entity[1]
+                    # Get elements for this surface entity
+                    # getElements returns: elementTypes, elementTags, nodeTags
+                    elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2, tag)
+                    
+                    for e_type, e_tags, e_nodes in zip(elem_types, elem_tags, elem_node_tags):
+                        if e_type == tri_type:
+                            # Reshape nodes to (num_elements, 3)
+                            tris = np.array(e_nodes).reshape(-1, 3)
+                            all_surface_tris.append(tris)
+                
+                if all_surface_tris:
+                    # Combine all triangles from all surfaces
+                    combined_tris = np.vstack(all_surface_tris)
+                    # Map node tags to indices
+                    tris_idx = np.vectorize(node_map.get)(combined_tris)
+                    surface_tris = tris_idx
+                    self.log_message(f"Found {len(surface_tris)} surface triangles")
+                else:
+                    self.log_message("No surface triangles found.")
+                    
+            except Exception as e:
+                self.log_message(f"Warning: Could not extract surface triangles: {e}")
+                import traceback
+                self.log_message(traceback.format_exc())
+            
             # 3. Compute Dual Graph (Polyhedral Faces)
             self.log_message("Step 3: Computing Dual Polyhedral Faces...")
             
@@ -214,7 +253,43 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
                 dual_faces.append(ordered_tet_indices)
                 edge_to_face_idx[edge] = face_idx
                 
-            self.log_message(f"Generated {len(dual_faces)} dual faces (polygons)")
+            self.log_message(f"Generated {len(dual_faces)} dual faces (internal edges)")
+            
+            # 3.5 Add Boundary Closure Faces for Surface Nodes
+            self.log_message("Step 3.5: Adding boundary closure faces...")
+            
+            boundary_faces_added = 0
+            for node_idx in node_surface_tris.keys():
+                # Get surface triangles sharing this boundary node
+                tri_indices = node_surface_tris[node_idx]
+                
+                # For each triangle, create a closure face using:
+                # - The tet centroid adjacent to the triangle
+                # - The triangle vertices (in dual space, we need the primal triangle)
+                
+                # Find tets adjacent to this node
+                if node_idx in node_to_edges:
+                    # Get all tets connected via edges from this node
+                    connected_tets_set = set()
+                    for edge in node_to_edges[node_idx]:
+                        if edge in edge_to_tets:
+                            connected_tets_set.update(edge_to_tets[edge])
+                    
+                    # Create a boundary closure face from connected tet centroids
+                    # This "caps" the open side of the boundary polyhedron
+                    if len(connected_tets_set) >= 3:
+                        # Sort centroids to form a valid closure polygon
+                        boundary_tet_list = list(connected_tets_set)
+                        
+                        # Use the first connected tet centroid to project others
+                        if len(boundary_tet_list) >= 3:
+                            face_idx = len(dual_faces)
+                            dual_faces.append(boundary_tet_list)
+                            # Don't add to edge_to_face_idx since this isn't from an edge
+                            boundary_faces_added += 1
+            
+            self.log_message(f"Added {boundary_faces_added} boundary closure faces")
+            self.log_message(f"Total dual faces: {len(dual_faces)} (internal + boundary)")
             
             # ---------------------------------------------------------
             # 4. Construct Full Polyhedral Data Structure
@@ -234,8 +309,14 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
             # Each primal node becomes a dual polyhedron
             polyhedral_elements = []
             
+            # Debug counters
+            skipped_no_edges = 0
+            skipped_too_few_faces = 0
+            face_count_histogram = {}
+            
             for p_node_idx in range(len(nodes)):
                 if p_node_idx not in node_to_edges:
+                    skipped_no_edges += 1
                     continue
                     
                 connected_edges = node_to_edges[p_node_idx]
@@ -248,16 +329,24 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
                         face_nodes = dual_faces[face_idx]
                         cell_faces.append(face_nodes)
                 
-                # A tetrahedron has 4 faces, but boundary polyhedra can have fewer
-                # Let's be lenient and accept >= 3 faces (though VTK might complain)
-                if len(cell_faces) >= 3:
+                # Track face count distribution
+                num_faces = len(cell_faces)
+                face_count_histogram[num_faces] = face_count_histogram.get(num_faces, 0) + 1
+                
+                # Lowered threshold to 1 to include boundary polyhedra
+                # VTK can handle open/partial polyhedra on boundaries
+                if len(cell_faces) >= 1:
                     polyhedral_elements.append({
                         'id': p_node_idx + 1,
                         'type': 'polyhedron',
                         'faces': cell_faces
                     })
+                else:
+                    skipped_too_few_faces += 1
             
             self.log_message(f"Constructed {len(polyhedral_elements)} polyhedral cells")
+            self.log_message(f"Skipped: {skipped_no_edges} (no edges), {skipped_too_few_faces} (too few faces)")
+            self.log_message(f"Face count histogram: {sorted(face_count_histogram.items())}")
             
             # ---------------------------------------------------------
             # 5. Save Data

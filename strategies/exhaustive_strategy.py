@@ -360,20 +360,29 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             self.log_message(f"[!] Traceback: {traceback.format_exc()}")
 
     def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
-        """Standard Delaunay with maximum optimization"""
-        self.log_message("Tetrahedral Delaunay with aggressive optimization...")
+        """
+        Standard strategy (now using HXT for speed/robustness)
+        Renamed from 'Delaunay' but keeps the name for compatibility
+        """
+        self.log_message("Tetrahedral HXT (Fast-Path) with standard optimization...")
+
+        # PRODUCTION SETTINGS: Prevent 4-million element explosion
+        # Set reasonable mesh sizes (assuming typical mechanical part in mm)
+        diagonal = self.geometry_info.get('diagonal', 100.0)
+        gmsh.option.setNumber("Mesh.MeshSizeMin", diagonal / 200.0)  # Prevent microscopic tets
+        gmsh.option.setNumber("Mesh.MeshSizeMax", diagonal / 10.0)   # Allow coarser tets
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay 2D
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay 3D
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Parallel, Robust)
         gmsh.option.setNumber("Mesh.ElementOrder", 2)  # Quadratic
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
 
-        # Aggressive optimization
+        # Standard optimization only (Disable Netgen)
         gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-        gmsh.option.setNumber("Mesh.Smoothing", 20)  # Lots of smoothing
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0) # Disable slow Netgen
+        gmsh.option.setNumber("Mesh.Smoothing", 10)
 
         return self._generate_and_analyze()
 
@@ -397,14 +406,20 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         """HXT algorithm (good for quality)"""
         self.log_message("Tetrahedral HXT (quality-focused)...")
 
+        # PRODUCTION SETTINGS: Prevent 4-million element explosion
+        diagonal = self.geometry_info.get('diagonal', 100.0)
+        gmsh.option.setNumber("Mesh.MeshSizeMin", diagonal / 200.0)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", diagonal / 10.0)
+
         gmsh.option.setNumber("Mesh.Algorithm", 6)
-        gmsh.option.setNumber("Mesh.Algorithm3D", 4)  # HXT
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Correct ID is 10)
         gmsh.option.setNumber("Mesh.ElementOrder", 2)
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
 
         gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0) # Disable slow Netgen
         gmsh.option.setNumber("Mesh.Smoothing", 15)
 
         return self._generate_and_analyze()

@@ -966,7 +966,30 @@ class ModernMeshGenGUI(QMainWindow):
 
         layout.addStretch()
 
-        # Secret button at the bottom - converts tet mesh display to hex-like
+        # Secret buttons at the bottom
+        secret_buttons_layout = QHBoxLayout()
+        secret_buttons_layout.setSpacing(5)
+        
+        # Secret button 1 - Surface mesh only
+        self.surface_only_btn = QPushButton("📐")
+        self.surface_only_btn.setFixedSize(30, 30)
+        self.surface_only_btn.setToolTip("Secret: Generate surface mesh only (2D)")
+        self.surface_only_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #343a40;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                font-size: 16px;
+                padding: 2px;
+            }
+            QPushButton:hover { background-color: #495057; }
+            QPushButton:pressed { background-color: #0d6efd; }
+        """)
+        self.surface_only_btn.clicked.connect(self.generate_surface_mesh_only)
+        secret_buttons_layout.addWidget(self.surface_only_btn)
+        
+        # Secret button 2 - hex visualization
         self.hex_mode_btn = QPushButton("🔳")
         self.hex_mode_btn.setFixedSize(30, 30)
         self.hex_mode_btn.setToolTip("Secret: Make tets look like hexes")
@@ -987,7 +1010,10 @@ class ModernMeshGenGUI(QMainWindow):
             }
         """)
         self.hex_mode_btn.clicked.connect(self.toggle_hex_visualization)
-        layout.addWidget(self.hex_mode_btn, alignment=Qt.AlignLeft)
+        secret_buttons_layout.addWidget(self.hex_mode_btn)
+        
+        secret_buttons_layout.addStretch()
+        layout.addLayout(secret_buttons_layout)
 
         # Add content to scroll area
         scroll.setWidget(content_widget)
@@ -1350,6 +1376,13 @@ class ModernMeshGenGUI(QMainWindow):
 
                 # Load the mesh file directly through the viewer
                 self.viewer.load_mesh_file(filepath)
+                
+                # Show post-processing UI sections (quality visualization and cross-section)
+                if hasattr(self, 'crosssection_group'):
+                    self.crosssection_group.setVisible(True)
+                if hasattr(self, 'viz_group'):
+                    self.viz_group.setVisible(True)
+                
                 return
 
             # Otherwise treat as CAD file
@@ -1363,6 +1396,7 @@ class ModernMeshGenGUI(QMainWindow):
 
             # Load CAD and get geometry info
             geom_info = self.viewer.load_step_file(filepath)
+            self.current_geom_info = geom_info  # Store for logging
 
             # Load geometry for paintbrush (after CAD is loaded)
             if self.paintbrush_selector:
@@ -2503,6 +2537,53 @@ class ModernMeshGenGUI(QMainWindow):
             self.add_log("AI assistant closed")
             logging.info("Chatbox closed successfully")
         logging.info("="*60)
+
+    def generate_surface_mesh_only(self):
+        """Secret button: Generate surface mesh only (2D, no volume)"""
+        if not self.cad_file:
+            self.add_log("[!] No CAD file loaded")
+            return
+        
+        self.add_log("=" * 70)
+        self.add_log("SURFACE MESH ONLY (2D)")
+        self.add_log("=" * 70)
+        
+        try:
+            import gmsh
+            import multiprocessing
+            
+            # Initialize
+            gmsh.initialize()
+            num_cores = multiprocessing.cpu_count()
+            gmsh.option.setNumber("General.NumThreads", num_cores)
+            gmsh.option.setNumber("General.Terminal", 1)
+            
+            # Load CAD
+            gmsh.model.occ.importShapes(self.cad_file)
+            gmsh.model.occ.synchronize()
+            
+            # Generate 2D mesh only
+            self.add_log("Generating 2D surface mesh...")
+            gmsh.model.mesh.generate(2)
+            
+            # Save
+            output_file = str(Path(self.cad_file).stem) + "_surface.msh"
+            output_path = Path.home() / "Downloads" / "MeshPackageLean" / output_file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            gmsh.write(str(output_path))
+            gmsh.finalize()
+            
+            self.add_log(f"[OK] Surface mesh saved to: {output_file}")
+            self.add_log("=" * 70)
+            
+            # Load it in the viewer
+            self.viewer.load_mesh_file(str(output_path))
+            
+        except Exception as e:
+            self.add_log(f"[!] Surface mesh failed: {e}")
+            import traceback
+            self.add_log(traceback.format_exc())
 
 
 def main():

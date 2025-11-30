@@ -153,6 +153,9 @@ class WorkflowManager:
             # Show quality report
             if 'quality_metrics' in result:
                 self.window.viewer.show_quality_report(result['quality_metrics'])
+            
+            # Log timing data
+            self.log_mesh_timing(result)
                 
         else:
             self.window.add_log("\n[!] MESH GENERATION FAILED")
@@ -160,6 +163,56 @@ class WorkflowManager:
             if hasattr(self.window, 'master_bar'):
                 self.window.master_bar.setStyleSheet(self.window.master_bar.styleSheet().replace("#0d6efd", "#dc3545"))
                 self.window.master_bar.setFormat("Failed")
+
+    def log_mesh_timing(self, result):
+        """Log mesh timing data to CSV for calibration"""
+        try:
+            import csv
+            import datetime
+            import os
+            
+            # Get timing data
+            timings = result.get('timing_breakdown', {})
+            total_time = time.time() - self.window.mesh_start_time
+            
+            # Get geometry info
+            geom_info = getattr(self.window, 'current_geom_info', {}) or {}
+            volume = geom_info.get('volume', 0)
+            
+            # Prepare row data
+            row = {
+                'timestamp': datetime.datetime.now().isoformat(),
+                'filename': Path(self.window.cad_file).name if self.window.cad_file else "Unknown",
+                'strategy': result.get('strategy', 'Unknown'),
+                'total_elements': result.get('total_elements', 0),
+                'total_nodes': result.get('total_nodes', 0),
+                'volume_m3': volume,
+                'total_time_s': round(total_time, 2),
+                '2d_mesh_s': round(timings.get('2d_mesh', 0), 2),
+                'surface_opt_s': round(timings.get('surface_opt', 0), 2),
+                '3d_mesh_s': round(timings.get('3d_mesh', 0), 2),
+                'volume_opt_s': round(timings.get('volume_opt', 0), 2),
+                'quad_conv_s': round(timings.get('quadratic_conversion', 0), 2),
+                'est_elements': self.window.target_elements.value()
+            }
+            
+            # Define CSV file path
+            log_dir = Path.home() / "Downloads" / "MeshPackageLean"
+            log_file = log_dir / "mesh_timing_log.csv"
+            
+            # Check if file exists to write header
+            file_exists = log_file.exists()
+            
+            with open(log_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+                
+            self.window.add_log(f"[LOG] Timing data saved to {log_file.name}")
+            
+        except Exception as e:
+            print(f"Failed to log timing data: {e}")
 
     def refine_mesh_quality(self):
         if not self.window.mesh_file or not Path(self.window.mesh_file).exists():

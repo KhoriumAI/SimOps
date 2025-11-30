@@ -24,9 +24,273 @@ from strategies.hex_dominant_strategy import (
 )
 from strategies.polyhedral_strategy import PolyhedralMeshGenerator
 from core.config import Config
+from core.mesh_generator import BaseMeshGenerator
 import tempfile
 import gmsh
 import numpy as np
+
+
+class SimpleTetGenerator(BaseMeshGenerator):
+    """
+    Simple, fast tetrahedral mesh generator
+    
+    Uses a single algorithm (Delaunay or Frontal) for fast meshing
+    without the overhead of exhaustive trying.
+    """
+    
+    def __init__(self, algorithm_name: str = "Delaunay", config: Config = None):
+        super().__init__(config)
+        self.algorithm_name = algorithm_name
+        
+        # Map algorithm names to Gmsh algorithm codes
+        self.algorithm_map = {
+            "Delaunay": 1,  # Delaunay
+            "Frontal": 4,   # Frontal
+            "HXT": 10,      # HXT (requires HXT compiled)
+        }
+        
+    def run_meshing_strategy(self, input_file: str, output_file: str) -> bool:
+        """Meshing with linear-first strategy and repair retries"""
+        try:
+            self.log_message(f"Using {self.algorithm_name} algorithm with Linear-First Strategy")
+            
+            # 0. Pre-processing: Boolean Fragments (Fix for Assembly Overlaps)
+            self._apply_boolean_fragments()
+
+            # Calculate initial mesh parameters
+            self.current_mesh_params = self.calculate_initial_mesh_parameters()
+            self.apply_mesh_parameters(self.current_mesh_params)
+            
+            # PRODUCTION SETTINGS: Prevent 4-million element explosion
+            # Set reasonable mesh sizes (assuming typical mechanical part in mm)
+            diagonal = self.geometry_info.get('diagonal', 100.0)
+            gmsh.option.setNumber("Mesh.MeshSizeMin", diagonal / 200.0)  # Prevent microscopic tets
+            gmsh.option.setNumber("Mesh.MeshSizeMax", diagonal / 10.0)   # Allow coarser tets
+            
+            # OPTIMIZATION: Disable slow Netgen, use fast standard optimizer
+            gmsh.option.setNumber("Mesh.Optimize", 1)         # Enable standard optimization
+            gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)   # Disable slow Netgen (single-threaded)
+            
+            # Set mesh algorithms
+            gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay for 2D
+            
+            # CRITICAL: Use HXT for assemblies (multiple volumes) or complex geometry
+            # HXT (Algorithm 10) is parallel and handles dirty topology much better than Delaunay (1)
+            num_volumes = len(gmsh.model.getEntities(dim=3))
+            algo_3d = self.algorithm_map.get(self.algorithm_name, 1)
+            
+            if num_volumes > 1:
+                # Assembly detected - use HXT for robustness and parallelism
+                gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (parallel, robust)
+                self.log_message(f"Using HXT algorithm (parallel) for {num_volumes}-volume assembly")
+            else:
+                # Single volume - use HXT anyway for speed (fully parallelized)
+                gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT for speed
+            
+            self.log_message(f"Mesh algorithms: 2D=6, 3D={int(gmsh.option.getNumber('Mesh.Algorithm3D'))}")
+            self.log_message(f"Mesh size range: {gmsh.option.getNumber('Mesh.MeshSizeMin'):.2f} - {gmsh.option.getNumber('Mesh.MeshSizeMax'):.2f}")
+            
+            # Attempt 1: Standard Linear-First
+            self.log_message("[ATTEMPT 1] Standard Linear-First Meshing...")
+            if self._attempt_meshing(linear_first=True, optimize=True):
+                self._finalize_success(output_file)
+                return True
+                
+            # Attempt 2: Discrete Remeshing (Fix for PLC Error)
+            self.log_message("[ATTEMPT 2] Standard failed. Trying Discrete Remeshing...")
+            if self._attempt_discrete_remeshing(input_file):
+                self._finalize_success(output_file)
+                return True
+
+            # Attempt 3: Aggressive Tolerance + Frontal Algo (Last Resort)
+            self.log_message("[ATTEMPT 3] Discrete remeshing failed, retrying with aggressive tolerance & Frontal algo...")
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
+            gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 4) # Frontal
+            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-2)
+            
+            if self._attempt_meshing(linear_first=True, optimize=True):
+                self._finalize_success(output_file)
+                return True
+                
+            self.log_message(f"[!] All meshing attempts failed")
+            return False
+            
+        except Exception as e:
+            self.log_message(f"[!] Meshing failed: {e}", level="ERROR")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _attempt_meshing(self, linear_first=True, optimize=True) -> bool:
+        """Helper to run a single meshing attempt"""
+        import time
+        self.timings = {}
+        
+        try:
+            # 1. Generate 2D mesh (Linear first for stability)
+            t0 = time.time()
+            self.log_message("Generating 2D surface mesh (Linear)...")
+            self.set_element_order(1) 
+            if not self.generate_mesh_internal(2):
+                return False
+            self.timings['2d_mesh'] = time.time() - t0
+            
+            # Analyze surface quality
+            self.analyze_surface_mesh_quality()
+                
+            # 2. Optimize Surface
+            if optimize:
+                t0 = time.time()
+                self.log_message("Optimizing surface mesh (Netgen)...")
+                gmsh.model.mesh.optimize("Netgen")
+                self.timings['surface_opt'] = time.time() - t0
+                
+            # 3. Generate 3D mesh
+            t0 = time.time()
+            self.log_message("Generating 3D volume mesh...")
+            if not self.generate_mesh_internal(3):
+                return False
+            self.timings['3d_mesh'] = time.time() - t0
+                
+            # 4. Optimize Volume
+            if optimize:
+                t0 = time.time()
+                self.log_message("Optimizing volume mesh (Netgen)...")
+                gmsh.model.mesh.optimize("Netgen")
+                self.timings['volume_opt'] = time.time() - t0
+                
+            # 5. Compatibility Settings
+            # CRITICAL: Force saving of ALL elements (including surface triangles)
+            # This ensures the viewer sees the skin of the mesh even if it doesn't support volume rendering
+            gmsh.option.setNumber("Mesh.SaveAll", 1)
+            self.log_message("Enabled Mesh.SaveAll=1 for viewer compatibility")
+
+            # 6. Convert to Quadratic (Order 2) - Requested by User
+            # We keep SaveAll=1 so that if the viewer struggles with 2nd order volumes,
+            # it might still show the 2nd order surfaces.
+            t0 = time.time()
+            self.log_message("Converting to quadratic (Order 2)...")
+            gmsh.model.mesh.setOrder(2)
+            self.timings['quadratic_conversion'] = time.time() - t0
+                
+            return True
+        except Exception as e:
+            self.log_message(f"Meshing attempt failed: {e}")
+            return False
+
+    def _apply_boolean_fragments(self):
+        """
+        DISABLED: Fragment operations cause BOPAlgo_AlertSelfInterferingShape errors.
+        
+        The GUI doesn't use fragments - it relies on:
+        - Geometry.OCCAutoFix = 1 (fixes micro-gaps during import)
+        - Geometry.AutoCoherence = 1 (merges vertices during import)
+        
+        These settings are now applied in BaseMeshGenerator.load_cad_file()
+        BEFORE the file is loaded, so no post-processing is needed.
+        """
+        # Do nothing - the GUI settings handle everything during import
+        self.log_message("Skipping fragment operations (using GUI import settings instead)")
+        return
+
+    def _attempt_discrete_remeshing(self, input_file: str) -> bool:
+        """
+        Attempt to mesh by creating a discrete topology from the surface mesh.
+        This handles 'dirty' geometry by shrink-wrapping a new mesh over it.
+        """
+        try:
+            import time
+            import os
+            self.timings = {}
+            t0 = time.time()
+            self.log_message("Starting Discrete Remeshing Strategy...")
+            
+            gmsh.clear()
+            gmsh.merge(input_file)
+            
+            self.log_message("Generating initial surface mesh...")
+            gmsh.option.setNumber("Mesh.Algorithm", 6) 
+            gmsh.model.mesh.generate(2)
+            
+            self.log_message("Disconnecting mesh from CAD (Save -> Clear -> Load)...")
+            temp_msh = input_file + ".temp_discrete.msh"
+            gmsh.write(temp_msh)
+            gmsh.clear()
+            gmsh.merge(temp_msh)
+            
+            self.log_message("Creating discrete topology from mesh...")
+            gmsh.model.mesh.createTopology()
+            gmsh.model.mesh.createGeometry()
+            
+            self.log_message("Classifying discrete surfaces (40 deg)...")
+            gmsh.model.mesh.classifySurfaces(40 * 3.14159 / 180, True, True)
+            gmsh.model.mesh.createGeometry()
+            
+            self.log_message("Re-creating volume from discrete shell...")
+            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-3)
+            
+            surfaces = gmsh.model.getEntities(2)
+            if surfaces:
+                s_tags = [s[1] for s in surfaces]
+                vol_tag = gmsh.model.addDiscreteEntity(3, -1, s_tags)
+                self.log_message(f"Created discrete volume {vol_tag} with {len(s_tags)} surfaces")
+            
+            self.log_message("Generating 3D volume mesh from discrete geometry...")
+            gmsh.model.mesh.generate(3)
+            
+            self.log_message("Optimizing discrete volume mesh...")
+            gmsh.model.mesh.optimize("Netgen")
+            
+            try:
+                if os.path.exists(temp_msh):
+                    os.remove(temp_msh)
+            except:
+                pass
+
+            self.timings['discrete_remeshing'] = time.time() - t0
+            return True
+            
+        except Exception as e:
+            self.log_message(f"Discrete remeshing failed: {e}")
+            return False
+
+    def _finalize_success(self, output_file: str):
+        """Save and log success"""
+        # CRITICAL: Create Physical Groups before saving!
+        # Many viewers (including ours) require Physical Groups to visualize the mesh
+        # If they are missing, the mesh file might appear empty or invisible
+        
+        # 1. Create Physical Volume (if 3D)
+        volumes = gmsh.model.getEntities(3)
+        if volumes:
+            # Check if physical groups already exist
+            phys_vols = gmsh.model.getPhysicalGroups(3)
+            if not phys_vols:
+                p_tag = gmsh.model.addPhysicalGroup(3, [v[1] for v in volumes])
+                gmsh.model.setPhysicalName(3, p_tag, "Volume")
+                self.log_message(f"Created Physical Volume {p_tag} for {len(volumes)} volumes")
+        
+        # 2. Create Physical Surface (if 2D or 3D)
+        surfaces = gmsh.model.getEntities(2)
+        if surfaces:
+            phys_surfs = gmsh.model.getPhysicalGroups(2)
+            if not phys_surfs:
+                p_tag = gmsh.model.addPhysicalGroup(2, [s[1] for s in surfaces])
+                gmsh.model.setPhysicalName(2, p_tag, "Surface")
+                self.log_message(f"Created Physical Surface {p_tag} for {len(surfaces)} surfaces")
+
+        metrics = self.analyze_current_mesh()
+        if metrics:
+            self.quality_history.append({
+                'iteration': self.current_iteration,
+                'algorithm': self.algorithm_name,
+                'metrics': metrics
+            })
+        
+        if self.save_mesh(output_file):
+            self.log_message(f"[OK] Mesh generated successfully")
+
 
 
 def generate_hex_testing_visualization(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -227,24 +491,13 @@ def _mesh_chunk_process(chunk_stl_path: str, output_msh_path: str, quality_param
 
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
-    Generate hex-dominant mesh using CoACD + subdivision pipeline
-    
-    Steps:
-    1. High-fidelity STEP → STL
-    2. CoACD convex decomposition
-    3. Serialized "Fail-Fast" Meshing of Chunks
-    4. Merge successful chunks
+    Generate hex-dominant mesh using the HXT algorithm (Algorithm 3D = 10).
+    This replaces the legacy CoACD + Subdivision pipeline with a direct, robust approach.
     """
     try:
-        import trimesh
-        import numpy as np
-        import multiprocessing
-        import time
+        from strategies.hxt_strategy import HXTHexDominantGenerator
         
-        save_stl = quality_params.get('save_stl', False) if quality_params else False
-        timeout_seconds = 30  # Timeout per chunk
-        
-        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
+        print("[HEX-DOM] Starting HXT Hex-Dominant meshing strategy...")
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -252,221 +505,66 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         mesh_name = Path(cad_file).stem
         output_file = str(mesh_folder / f"{mesh_name}_hex_mesh.msh")
         
-        # Temporary STL path
-        temp_dir = Path(tempfile.gettempdir())
-        stl_file = temp_dir / f"{mesh_name}_step1.stl"
-        
-        # Step 1: STEP → STL
-        print("[HEX-DOM] Step 1: Converting STEP to STL...")
-        step1 = HighFidelityDiscretization()
-        success = step1.convert_step_to_stl(cad_file, str(stl_file))
-        if not success:
-            return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
-        
-        if save_stl:
-            saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
-            shutil.copy(stl_file, saved_stl_step1)
-            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
-        
-        # Step 2: CoACD Decomposition
-        print("[HEX-DOM] Step 2: CoACD convex decomposition...")
-        step2 = ConvexDecomposition()
-        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.03)
-        
-        if not parts:
-            return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
-        
-        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
-        
-        # Export component surfaces for preview
-        print("[HEX-DOM] Exporting CoACD components for preview...")
-        preview_files = []
-        for i, (verts, faces) in enumerate(parts):
-            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-            chunk_mesh.merge_vertices()
-            chunk_mesh.remove_degenerate_faces()
-            chunk_mesh.remove_duplicate_faces()
-            
-            # Save component surface for preview
-            preview_file = mesh_folder / f"{mesh_name}_preview_component_{i}.vtk"
-            try:
-                import pyvista as pv
-                pv_mesh = pv.PolyData(chunk_mesh.vertices, np.hstack([np.full((len(chunk_mesh.faces), 1), 3), chunk_mesh.faces]))
-                pv_mesh["Component_ID"] = np.full(len(chunk_mesh.faces), i, dtype=int)
-                pv_mesh.save(str(preview_file))
-                preview_files.append(str(preview_file))
-            except Exception as e:
-                print(f"[HEX-DOM] Warning: Could not export preview for component {i}: {e}")
-        
-        # Emit progress update with component preview
-        if preview_files:
-            print(json.dumps({
-                'type': 'progress',
-                'phase': 'coacd_preview',
-                'percentage': 100,
-                'component_files': preview_files,
-                'num_components': len(parts),
-                'volume_error_pct': stats['volume_error_pct']
-            }))
-            sys.stdout.flush()
-        
-        # Step 3: Serialized Chunk Meshing
-        print("[HEX-DOM] Step 3: Serialized Chunk Meshing (Fail-Fast)...")
-        
-        successful_chunks = []
-        failed_chunks = []
-        
-        for i, (verts, faces) in enumerate(parts):
-            print(f"  > Processing Chunk {i+1}/{len(parts)}...")
-            
-            # Export chunk to temp STL
-            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-            chunk_mesh.merge_vertices()
-            chunk_mesh.remove_degenerate_faces()
-            chunk_mesh.remove_duplicate_faces()
-            
-            chunk_stl = temp_dir / f"temp_chunk_{i}.stl"
-            chunk_msh = temp_dir / f"temp_chunk_{i}.msh"
-            chunk_mesh.export(str(chunk_stl))
-            
-            # Spawn worker process
-            p = multiprocessing.Process(
-                target=_mesh_chunk_process,
-                args=(str(chunk_stl), str(chunk_msh), quality_params)
-            )
-            p.start()
-            
-            # Wait with timeout
-            p.join(timeout=timeout_seconds)
-            
-            if p.is_alive():
-                print(f"    [TIMEOUT] Chunk {i} hung after {timeout_seconds}s - Terminating...")
-                p.terminate()
-                p.join()
+        # Initialize config
+        config = Config()
+        if quality_params:
+            if 'painted_regions' in quality_params:
+                config.painted_regions = quality_params['painted_regions']
+            if 'target_elements' in quality_params:
+                config.target_elements = quality_params['target_elements']
                 
-                # Save failed chunk
-                fail_file = mesh_folder / f"FAIL_chunk_{i}.stl"
-                shutil.copy(chunk_stl, fail_file)
-                print(f"    [EXPORT] Saved failed chunk to {fail_file}")
-                failed_chunks.append(i)
-                
-            elif p.exitcode != 0:
-                print(f"    [FAILED] Chunk {i} failed with exit code {p.exitcode}")
-                
-                # Save failed chunk
-                fail_file = mesh_folder / f"FAIL_chunk_{i}.stl"
-                shutil.copy(chunk_stl, fail_file)
-                print(f"    [EXPORT] Saved failed chunk to {fail_file}")
-                failed_chunks.append(i)
-                
-            else:
-                print(f"    [SUCCESS] Chunk {i} meshed successfully")
-                successful_chunks.append(str(chunk_msh))
+        # Create generator
+        generator = HXTHexDominantGenerator(config=config)
+        
+        # Run generation
+        success = generator.run_meshing_strategy(cad_file, output_file)
+        
+        if success:
+            # Extract quality metrics for return
+            # We can reuse the logic from generate_tetrahedral_mesh or rely on what's in the file
+            # For now, we'll reload and extract basic stats
             
-            # Cleanup temp STL
-            if chunk_stl.exists():
-                chunk_stl.unlink()
-
-        # Step 4: Merge Successful Chunks
-        if not successful_chunks:
-            return {'success': False, 'message': 'All chunks failed to mesh'}
+            import gmsh as gmsh_reload
+            gmsh_reload.initialize()
+            gmsh_reload.option.setNumber("General.Terminal", 0)
+            gmsh_reload.merge(output_file)
             
-        print(f"[HEX-DOM] Step 4: Merging {len(successful_chunks)} successful chunks...")
-        
-        gmsh.initialize()
-        gmsh.model.add("merged_hex_mesh")
-        
-        for msh_file in successful_chunks:
-            gmsh.merge(msh_file)
-            # Cleanup temp msh
-            Path(msh_file).unlink()
+            # Count elements
+            element_counts = {}
+            element_types = gmsh_reload.model.mesh.getElementTypes()
+            for etype in element_types:
+                elem_name = gmsh_reload.model.mesh.getElementProperties(etype)[0]
+                elem_tags, _ = gmsh_reload.model.mesh.getElementsByType(etype)
+                element_counts[elem_name] = len(elem_tags)
             
-        # Write final output
-        gmsh.write(output_file)
-        
-        # Count elements (same as before)
-        element_types = gmsh.model.mesh.getElementTypes()
-        element_counts = {}
-        for etype in element_types:
-            elem_name = gmsh.model.mesh.getElementProperties(etype)[0]
-            elem_tags, _ = gmsh.model.mesh.getElementsByType(etype)
-            element_counts[elem_name] = len(elem_tags)
-        
-        num_hexes = element_counts.get("8-node hexahedron", 0) + element_counts.get("Hexahedron 8", 0)
-        num_tets = element_counts.get("4-node tetrahedron", 0) + element_counts.get("Tetrahedron 4", 0)
-        total_3d = num_hexes + num_tets
-        
-        # Count nodes
-        node_tags, _, _ = gmsh.model.mesh.getNodes()
-        total_nodes = len(node_tags)
-        
-        # Extract per-element quality (simplified for merged mesh)
-        per_element_quality = {}
-        # ... (rest of quality extraction logic can remain similar, 
-        # but we need to re-implement it since we replaced the whole block)
-        
-        # Re-implement quality extraction
-        per_element_gamma = {}
-        per_element_skewness = {}
-        per_element_aspect_ratio = {}
-        volume_qualities = []
-        
-        try:
-            def _as_list(seq):
-                if hasattr(seq, "tolist"):
-                    return seq.tolist()
-                return list(seq)
+            num_hexes = element_counts.get("8-node hexahedron", 0) + element_counts.get("Hexahedron 8", 0)
+            num_tets = element_counts.get("4-node tetrahedron", 0) + element_counts.get("Tetrahedron 4", 0)
+            total_3d = num_hexes + num_tets
             
-            # Surface elements
-            surf_types, surf_tags, _ = gmsh.model.mesh.getElements(2)
-            for elem_type, tags in zip(surf_types, surf_tags):
-                if elem_type in (2, 3, 9, 10):
-                    tag_list = _as_list(tags)
-                    sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
-                    for tag, sicn in zip(tag_list, sicn_vals):
-                        per_element_quality[int(tag)] = float(sicn)
+            # Count nodes
+            node_tags, _, _ = gmsh_reload.model.mesh.getNodes()
+            total_nodes = len(node_tags)
             
-            # Volume elements
-            vol_types, vol_tags, _ = gmsh.model.mesh.getElements(3)
-            for elem_type, tags in zip(vol_types, vol_tags):
-                if elem_type in (4, 5, 11, 12):
-                    tag_list = _as_list(tags)
-                    sicn_vals = gmsh.model.mesh.getElementQualities(tag_list, "minSICN")
-                    for tag, sicn in zip(tag_list, sicn_vals):
-                        val = float(sicn)
-                        per_element_quality[int(tag)] = val
-                        volume_qualities.append(val)
-                        
-        except Exception as e:
-            print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
+            gmsh_reload.finalize()
             
-        # Summary metrics
-        sicn_avg = sum(volume_qualities) / len(volume_qualities) if volume_qualities else 0.0
-        
-        gmsh.finalize()
-        
-        msg = f'Hex-dominant mesh: {num_hexes} hexes'
-        if failed_chunks:
-            msg += f' ({len(failed_chunks)} chunks failed/skipped)'
-            
-        return {
-            'success': True,
-            'output_file': str(Path(output_file).absolute()),
-            'strategy': 'hex_dominant_subdivision',
-            'message': msg,
-            'total_elements': total_3d,
-            'total_nodes': total_nodes,
-            'per_element_quality': per_element_quality,
-            'metrics': {
-                'num_hexes': num_hexes,
-                'num_parts': len(parts),
-                'failed_parts': len(failed_chunks)
-            },
-            'quality_metrics': {
-                'sicn_avg': sicn_avg
+            return {
+                'success': True,
+                'output_file': str(Path(output_file).absolute()),
+                'strategy': 'hex_dominant_hxt',
+                'message': f'HXT Hex-Dominant mesh generated: {num_hexes} hexes, {num_tets} tets',
+                'total_elements': total_3d,
+                'total_nodes': total_nodes,
+                'metrics': {
+                    'num_hexes': num_hexes,
+                    'num_tets': num_tets
+                }
             }
-        }
-        
+        else:
+            return {
+                'success': False,
+                'message': 'HXT meshing failed'
+            }
+            
     except Exception as e:
         import traceback
         traceback.print_exc()

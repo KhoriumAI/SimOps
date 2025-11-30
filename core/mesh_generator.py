@@ -165,13 +165,40 @@ class BaseMeshGenerator(ABC):
 
         return True
 
-    def initialize_gmsh(self):
-        """Initialize Gmsh"""
+    def initialize_gmsh(self, thread_count=None):
+        """
+        Initialize Gmsh with configurable multi-threading
+        
+        Args:
+            thread_count: Number of threads to use. If None, uses all cores.
+                         Set to 1 when running multiple workers in parallel.
+        """
         if not self.gmsh_initialized:
+            import multiprocessing
+            
             gmsh.initialize()
             gmsh.model.add(self.__class__.__name__)
+            
+            # Determine thread count
+            if thread_count is None:
+                # Scenario B: Single worker, use all cores (Speed Demon)
+                num_cores = multiprocessing.cpu_count()
+                thread_count = num_cores
+            else:
+                # Scenario A: Multiple workers, use specified count
+                num_cores = thread_count
+            
+            # Configure threading
+            gmsh.option.setNumber("General.NumThreads", thread_count)
+            gmsh.option.setNumber("Mesh.MaxNumThreads1D", thread_count)
+            gmsh.option.setNumber("Mesh.MaxNumThreads2D", thread_count)
+            gmsh.option.setNumber("Mesh.MaxNumThreads3D", thread_count)
+            
+            # Reduce terminal spam to prevent pipe buffer issues
+            gmsh.option.setNumber("General.Terminal", 1)  # Errors only
+            
             self.gmsh_initialized = True
-            self.log_message("Gmsh initialized")
+            self.log_message(f"Gmsh initialized with {thread_count} threads")
 
     def finalize_gmsh(self):
         """Finalize Gmsh"""
@@ -189,6 +216,17 @@ class BaseMeshGenerator(ABC):
         self.log_message(f"Loading CAD file: {os.path.basename(filename)}")
 
         try:
+            # CRITICAL: Set GUI options BEFORE loading file
+            # These settings from the GUI's .opt file enable successful meshing
+            # They must be applied before merge() so OCC cleans geometry during import
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 1)      # Auto-fix micro-gaps
+            gmsh.option.setNumber("Geometry.AutoCoherence", 1)   # Auto-merge touching vertices
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-08)   # Tight tolerance (GUI default)
+            
+            # Disable destructive operations that the GUI doesn't use
+            gmsh.option.setNumber("Geometry.OCCSewFaces", 0)     # Don't force sewing
+            gmsh.option.setNumber("Geometry.OCCMakeSolids", 0)   # Don't force solid creation
+            
             # Import based on file type
             ext = os.path.splitext(filename)[1].lower()
             if ext in ['.step', '.stp']:
@@ -201,20 +239,21 @@ class BaseMeshGenerator(ABC):
             gmsh.model.occ.synchronize()
             self.log_message("[OK] CAD file imported successfully")
 
-            # Heal geometry
-            try:
-                gmsh.model.occ.healShapes()
-                gmsh.model.occ.synchronize()
-                self.log_message("[OK] Geometry healed successfully")
-            except Exception as e:
-                self.log_message(f"[!] Geometry healing warning: {e}")
-
+            # CRITICAL: Do NOT call healShapes() here!
+            # The GUI doesn't call it during import - it relies on OCCAutoFix + AutoCoherence
+            # healShapes() triggers internal fragment operations that cause BOPAlgo errors
+            # The geometry is already cleaned by the import settings above
+            
             # Get geometry info and analyze features
             self._extract_geometry_info()
             self._analyze_geometry_features()
 
             # Apply geometry-aware mesh settings
             self._apply_geometry_aware_settings()
+            
+            # CRITICAL: Assign Physical Groups to volumes
+            # Without this, if ANY surface group is defined, volumes won't export!
+            self._ensure_volume_physical_groups()
 
             self.model_loaded = True
 
@@ -280,141 +319,116 @@ class BaseMeshGenerator(ABC):
 
         return math.sqrt(dx**2 + dy**2 + dz**2)
 
+    def _ensure_volume_physical_groups(self):
+        """
+        Ensure all volumes are assigned to Physical Groups
+        
+        CRITICAL FIX: Gmsh enters "Exclusive Mode" when ANY Physical Group exists.
+        If you define surface groups but forget volume groups, all tets generate
+        but silently disappear during export. This prevents that.
+        """
+        volumes = gmsh.model.getEntities(dim=3)
+        
+        if not volumes:
+            self.log_message("[!] No volumes to assign Physical Groups")
+            return
+        
+        # Check if any physical groups already exist
+        existing_groups = gmsh.model.getPhysicalGroups()
+        has_volume_groups = any(dim == 3 for dim, _ in existing_groups)
+        
+        if not has_volume_groups:
+            # Assign all volumes to a single Physical Group
+            vol_tags = [v[1] for v in volumes]
+            p_vol = gmsh.model.addPhysicalGroup(3, vol_tags)
+            gmsh.model.setPhysicalName(3, p_vol, "Volume")
+            self.log_message(f"[OK] Assigned {len(vol_tags)} volume(s) to Physical Group 'Volume'")
+        else:
+            self.log_message(f"[OK] Volume Physical Groups already exist")
+
     def _attempt_shell_to_solid_repair(self) -> List:
         """
         Attempt to repair shells (hollow surfaces) into solids
-
-        This handles CAD files where geometry healing detects shells but
-        "Could not make solid" - often due to tiny gaps or topology issues
-
+        
+        CRITICAL FIX: For assemblies, we cannot blindly sew all surfaces together.
+        This creates self-intersecting geometry. Instead, we use healShapes ONCE,
+        then use OCC sewing to intelligently identify separate components.
+        
         Returns:
             List of volume entities if successful, empty list otherwise
         """
         try:
-            # Get all shells (2D closed surfaces)
-            shells = gmsh.model.getEntities(dim=2)
-
-            if not shells:
-                self.log_message("  [X] No shells found to repair")
-                return []
-
-            self.log_message(f"  Attempting to convert {len(shells)} surfaces to solid...")
-
-            # Strategy 1: Increase geometry tolerance and re-heal
-            self.log_message("  Strategy 1: Increasing geometry tolerance...")
-            original_tolerance = gmsh.option.getNumber("Geometry.Tolerance")
-
-            # Try progressively larger tolerances
-            tolerances_to_try = [1e-7, 1e-6, 1e-5, 1e-4]
-
-            for tol in tolerances_to_try:
-                try:
-                    self.log_message(f"    Trying tolerance: {tol}")
-                    gmsh.option.setNumber("Geometry.Tolerance", tol)
-                    gmsh.model.occ.synchronize()
-
-                    # Force re-healing with new tolerance
-                    gmsh.model.occ.healShapes()
-                    gmsh.model.occ.synchronize()
-
-                    # Check if we now have volumes
-                    volumes = gmsh.model.getEntities(dim=3)
-                    if volumes:
-                        self.log_message(f"  [OK] Success! Created {len(volumes)} volumes with tolerance={tol}")
-                        self.geometry_info['volumes'] = len(volumes)
-                        self.geometry_info['surfaces'] = len(gmsh.model.getEntities(dim=2))
-                        self.geometry_info['curves'] = len(gmsh.model.getEntities(dim=1))
-                        return volumes
-
-                except Exception as e:
-                    self.log_message(f"    Failed at tolerance {tol}: {e}")
-                    continue
-
-            # Restore original tolerance
-            gmsh.option.setNumber("Geometry.Tolerance", original_tolerance)
-
-            # Strategy 2: Try to manually sew and make volume from shell
-            self.log_message("  Strategy 2: Attempting manual shell sewing...")
-            try:
-                # Get all surface tags
-                surface_tags = [tag for dim, tag in shells]
-
-                # Try to create a surface loop and volume
-                # This works if the surfaces form a closed shell
-                surface_loop_tag = gmsh.model.occ.addSurfaceLoop(surface_tags)
-                volume_tag = gmsh.model.occ.addVolume([surface_loop_tag])
-                gmsh.model.occ.synchronize()
-
-                volumes = gmsh.model.getEntities(dim=3)
-                if volumes:
-                    self.log_message(f"  [OK] Success! Created volume from surface loop")
-
-                    # CRITICAL: Verify the volume is valid for meshing
-                    self.log_message(f"  Verifying volume is meshable...")
+            self.log_message("  Attempting intelligent shell-to-solid conversion...")
+            
+            # CRITICAL: Only call healShapes ONCE to avoid 5x slowdown
+            # The GUI doesn't heal at all unless you click "Heal"
+            self.log_message("  Using OCC healShapes (single pass)...")
+            gmsh.model.occ.healShapes()
+            gmsh.model.occ.synchronize()
+            
+            volumes = gmsh.model.getEntities(dim=3)
+            
+            if volumes:
+                self.log_message(f"  [OK] healShapes created {len(volumes)} volume(s)")
+                
+                # If we have multiple volumes (assembly), fragment them
+                # This creates conformal interfaces where parts touch/overlap
+                if len(volumes) > 1:
+                    self.log_message(f"  Fragmenting {len(volumes)} volumes for conformality...")
                     try:
-                        # Try to get volume properties
-                        for dim, tag in volumes:
-                            mass = gmsh.model.occ.getMass(dim, tag)
-                            if mass <= 0:
-                                self.log_message(f"    [!] Warning: Volume {tag} has zero or negative mass ({mass})")
-                                self.log_message(f"    This usually means surfaces have wrong orientation")
-                            else:
-                                self.log_message(f"    [OK] Volume {tag} is valid (mass={mass:.2e})")
-                    except Exception as check_error:
-                        self.log_message(f"    [!] Could not verify volume properties: {check_error}")
-
-                    self.geometry_info['volumes'] = len(volumes)
-                    return volumes
-
-            except Exception as e:
-                self.log_message(f"    Surface loop creation failed: {e}")
-
-            # Strategy 3: Try remesh-then-heal approach
-            self.log_message("  Strategy 3: Surface remesh + re-heal...")
-            try:
-                # Generate 2D mesh on the shells
-                gmsh.model.mesh.generate(2)
-
-                # Classify the 2D mesh
-                gmsh.model.mesh.classifySurfaces(math.pi, True, True)
-                gmsh.model.mesh.createGeometry()
-                gmsh.model.occ.synchronize()
-
-                # Try healing again
-                gmsh.model.occ.healShapes()
-                gmsh.model.occ.synchronize()
-
-                volumes = gmsh.model.getEntities(dim=3)
-                if volumes:
-                    self.log_message(f"  [OK] Success! Created {len(volumes)} volumes via remeshing")
-                    # Clear the 2D mesh we created
-                    gmsh.model.mesh.clear()
-                    self.geometry_info['volumes'] = len(volumes)
-                    return volumes
-
-            except Exception as e:
-                self.log_message(f"    Remesh approach failed: {e}")
-                # Clear any partial mesh
-                try:
-                    gmsh.model.mesh.clear()
-                except:
-                    pass
-
-            self.log_message("  [X] All shell-to-solid repair strategies failed")
-            self.log_message("  💡 Tip: The CAD file may have:")
-            self.log_message("     - Tiny gaps preventing closure")
-            self.log_message("     - Self-intersecting surfaces")
-            self.log_message("     - Non-manifold edges")
-            self.log_message("     - Duplicate/overlapping surfaces")
-            self.log_message("  💡 Try repairing the CAD file in your CAD software:")
-            self.log_message("     - Use 'Check Geometry' or 'Repair' tools")
-            self.log_message("     - Simplify or rebuild the model")
-            self.log_message("     - Export with stricter tolerance settings")
-
+                        # Fragment all volumes against each other
+                        gmsh.model.occ.fragment(volumes, volumes)
+                        gmsh.model.occ.synchronize()
+                        
+                        # Remove any duplicate entities created by fragmentation
+                        gmsh.model.occ.removeAllDuplicates()
+                        gmsh.model.occ.synchronize()
+                        
+                        # Get updated volume list
+                        volumes = gmsh.model.getEntities(dim=3)
+                        self.log_message(f"  [OK] Fragmentation complete: {len(volumes)} volume(s)")
+                    except Exception as e:
+                        self.log_message(f"  [!] Fragmentation warning: {e}")
+                        # Continue anyway - fragmentation is optional
+                
+                return volumes
+            
+            # MINIMAL APPROACH: Just use coherence and let the mesher handle it
+            # Don't try to fix geometry - that causes BOPAlgo errors
+            # The GUI doesn't repair assemblies, it just meshes them
+            self.log_message("  [!] healShapes failed - using minimal coherence...")
+            
+            # Just glue touching vertices - that's it
+            gmsh.model.occ.removeAllDuplicates()
+            gmsh.model.occ.synchronize()
+            
+            # Don't call healShapes again - it already failed
+            # Don't try to create surface loops - that causes BOPAlgo errors
+            # Just let the mesher (HXT) handle whatever topology exists
+            
+            self.log_message("  [!] Coherence applied - proceeding to mesh with existing topology")
+            self.log_message("  TIP: Using HXT algorithm which tolerates imperfect geometry")
+            
+            # Return empty - the mesher will work with whatever volumes exist
+            # or mesh the surfaces directly if no volumes
             return []
-
+            
         except Exception as e:
-            self.log_message(f"  [X] Shell repair error: {e}")
+            self.log_message(f"  [X] Repair failed: {e}")
+            return []
+            
+            # All repair strategies failed
+            self.log_message("  [X] All repair strategies failed")
+            self.log_message("  TIP: The CAD file may have:")
+            self.log_message("     - Open surfaces (not watertight)")
+            self.log_message("     - Self-intersecting geometry")
+            self.log_message("     - Non-manifold edges")
+            self.log_message("  TIP: Try repairing in your CAD software before meshing")
+            
+            return []
+            
+        except Exception as e:
+            self.log_message(f"  [X] Shell-to-solid repair failed: {e}")
             return []
 
     def _analyze_geometry_features(self):

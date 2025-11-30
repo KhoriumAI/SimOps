@@ -851,6 +851,16 @@ class VTK3DViewer(QFrame):
             self.current_actor.GetProperty().SetColor(0.7, 0.8, 0.9)
             self.current_actor.GetProperty().SetOpacity(1.0)
             
+            # CRITICAL: Disable back-face culling for polyhedral meshes
+            # Boundary polyhedra may have outward-facing polygons that get culled
+            self.current_actor.GetProperty().BackfaceCullingOff()
+            self.current_actor.GetProperty().FrontfaceCullingOff()
+            
+            # Improve lighting for better visibility
+            self.current_actor.GetProperty().SetAmbient(0.3)
+            self.current_actor.GetProperty().SetDiffuse(0.7)
+            self.current_actor.GetProperty().SetSpecular(0.2)
+            
             self.renderer.AddActor(self.current_actor)
             self.current_volumetric_grid = ugrid
             self.current_poly_data = None
@@ -1823,6 +1833,80 @@ except Exception as e:
                         print(f"[DEBUG] [OK][OK]Quality threshold: {result['quality_metrics']['sicn_10_percentile']:.3f}")
                     except Exception as e:
                         print(f"[DEBUG] [X][X]Could not load quality data: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    # Compute quality from mesh file using Gmsh
+                    print(f"[DEBUG] No quality file found, computing quality from mesh using Gmsh...")
+                    try:
+                        import gmsh
+                        gmsh.initialize()
+                        gmsh.option.setNumber("General.Terminal", 0)
+                        gmsh.merge(str(filepath))
+                        
+                        per_element_quality = {}
+                        per_element_gamma = {}
+                        per_element_skewness = {}
+                        per_element_aspect_ratio = {}
+                        
+                        # Get surface elements (triangles)
+                        tri_types, tri_tags, tri_nodes = gmsh.model.mesh.getElements(2)
+                        all_qualities = []
+                        
+                        for elem_type, tags in zip(tri_types, tri_tags):
+                            if elem_type in [2, 9]:  # Linear & Quadratic Triangles
+                                try:
+                                    # Extract SICN quality for surface triangles
+                                    sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                                    gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                                    
+                                    for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                        tag_int = int(tag)
+                                        per_element_quality[tag_int] = float(sicn)
+                                        per_element_gamma[tag_int] = float(gamma)
+                                        per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                        per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                        all_qualities.append(sicn)
+                                    
+                                    print(f"[DEBUG] Computed quality for {len(tags)} surface triangles (type {elem_type})")
+                                except Exception as e:
+                                    print(f"[DEBUG] Error computing surface triangle qualities: {e}")
+                        
+                        gmsh.finalize()
+                        
+                        if per_element_quality:
+                            # Calculate statistics
+                            sorted_q = sorted(all_qualities)
+                            idx_10 = max(0, int(len(sorted_q) * 0.10))
+                            
+                            avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma) if per_element_gamma else 0
+                            avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness) if per_element_skewness else 0
+                            avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio) if per_element_aspect_ratio else 1.0
+                            
+                            if not result:
+                                result = {}
+                            result['per_element_quality'] = per_element_quality
+                            result['per_element_gamma'] = per_element_gamma
+                            result['per_element_skewness'] = per_element_skewness
+                            result['per_element_aspect_ratio'] = per_element_aspect_ratio
+                            result['quality_metrics'] = {
+                                'sicn_min': min(all_qualities),
+                                'sicn_avg': sum(all_qualities) / len(all_qualities),
+                                'sicn_max': max(all_qualities),
+                                'sicn_10_percentile': sorted_q[idx_10],
+                                'gamma_avg': avg_gamma,
+                                'avg_skewness': avg_skewness,
+                                'avg_aspect_ratio': avg_aspect_ratio,
+                            }
+                            
+                            self.current_quality_data = result
+                            
+                            print(f"[DEBUG] [OK][OK] Computed quality for {len(per_element_quality)} surface elements")
+                            print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
+                            print(f"[DEBUG] Gamma avg: {avg_gamma:.3f}, Skew avg: {avg_skewness:.3f}, AR avg: {avg_aspect_ratio:.2f}")
+                        
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to compute quality from mesh: {e}")
                         import traceback
                         traceback.print_exc()
             else:
