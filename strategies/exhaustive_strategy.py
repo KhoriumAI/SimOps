@@ -221,7 +221,33 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             # Remove existing file if it exists
             if os.path.exists(output_file):
                 os.remove(output_file)
-            os.rename(best_mesh, output_file)
+            
+            # CRITICAL: Ensure Physical Groups and SaveAll are present for visibility
+            # This logic must be applied to the FINAL mesh before saving
+            gmsh.clear()
+            gmsh.merge(best_mesh)
+            
+            # 1. Create Physical Volume (if 3D)
+            volumes = gmsh.model.getEntities(3)
+            if volumes:
+                phys_vols = gmsh.model.getPhysicalGroups(3)
+                if not phys_vols:
+                    p_tag = gmsh.model.addPhysicalGroup(3, [v[1] for v in volumes])
+                    gmsh.model.setPhysicalName(3, p_tag, "Volume")
+            
+            # 2. Create Physical Surface (if 2D or 3D)
+            surfaces = gmsh.model.getEntities(2)
+            if surfaces:
+                phys_surfs = gmsh.model.getPhysicalGroups(2)
+                if not phys_surfs:
+                    p_tag = gmsh.model.addPhysicalGroup(2, [s[1] for s in surfaces])
+                    gmsh.model.setPhysicalName(2, p_tag, "Surface")
+            
+            # 3. Force SaveAll for compatibility
+            gmsh.option.setNumber("Mesh.SaveAll", 1)
+            
+            # Save final file
+            gmsh.write(output_file)
 
             # Clean up other temp files
             for attempt in self.all_attempts:

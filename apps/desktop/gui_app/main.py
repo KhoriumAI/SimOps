@@ -1343,7 +1343,7 @@ class ModernMeshGenGUI(QMainWindow):
             self.worker.stop()
             self.add_log("[OK] Previous mesh generation stopped")
 
-        # Reset progress bars to initial state
+        # Reset UI state (progress bars, completed stages, etc.)
         self.reset_progress_bars()
 
         # Clear cached iteration data

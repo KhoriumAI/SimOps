@@ -1935,24 +1935,79 @@ except Exception as e:
 
             # CRITICAL: Only visualize SURFACE TRIANGLES, not volume tetrahedra!
             # Include quadrilateral surfaces for hex meshes.
-            for element in elements:
-                if element['type'] == 'triangle':
-                    tri = vtk.vtkTriangle()
-                    for i, node_id in enumerate(element['nodes']):
-                        tri.GetPointIds().SetId(i, node_map[node_id])
-                    cells.InsertNextCell(tri)
-                elif element['type'] == 'quadrilateral':
-                    quad = vtk.vtkQuad()
-                    for i, node_id in enumerate(element['nodes']):
-                        quad.GetPointIds().SetId(i, node_map[node_id])
-                    cells.InsertNextCell(quad)
+            
+            # Check if we have surface elements
+            has_surface_elements = (tri_count > 0 or quad_count > 0)
+            
+            if has_surface_elements:
+                print(f"[DEBUG] Found explicit surface elements ({tri_count} tris, {quad_count} quads)")
+                for element in elements:
+                    if element['type'] == 'triangle':
+                        tri = vtk.vtkTriangle()
+                        for i, node_id in enumerate(element['nodes']):
+                            tri.GetPointIds().SetId(i, node_map[node_id])
+                        cells.InsertNextCell(tri)
+                    elif element['type'] == 'quadrilateral':
+                        quad = vtk.vtkQuad()
+                        for i, node_id in enumerate(element['nodes']):
+                            quad.GetPointIds().SetId(i, node_map[node_id])
+                        cells.InsertNextCell(quad)
+            else:
+                print(f"[DEBUG] No explicit surface elements found. Extracting surface from volume...")
+                
+                # CRITICAL: Extract tetrahedra list FIRST so we can map surface cells back to them
+                temp_tetrahedra = [e for e in elements if e['type'] == 'tetrahedron']
+                temp_hexahedra = [e for e in elements if e['type'] == 'hexahedron']
+                
+                # Fallback: Extract surface from volume elements
+                vol_grid = vtk.vtkUnstructuredGrid()
+                vol_grid.SetPoints(points)
+                
+                # Add volume cells to grid
+                for element in elements:
+                    if element['type'] == 'tetrahedron':
+                        tet = vtk.vtkTetra()
+                        for i, node_id in enumerate(element['nodes']):
+                            tet.GetPointIds().SetId(i, node_map[node_id])
+                        vol_grid.InsertNextCell(tet.GetCellType(), tet.GetPointIds())
+                    elif element['type'] == 'hexahedron':
+                        hex_elem = vtk.vtkHexahedron()
+                        for i, node_id in enumerate(element['nodes']):
+                            hex_elem.GetPointIds().SetId(i, node_map[node_id])
+                        vol_grid.InsertNextCell(hex_elem.GetCellType(), hex_elem.GetPointIds())
+                
+                # Use DataSetSurfaceFilter to extract ONLY the outer boundary surface
+                surf_filter = vtk.vtkDataSetSurfaceFilter()
+                surf_filter.SetInputData(vol_grid)
+                surf_filter.PassThroughCellIdsOn()  # CRITICAL: Pass through original cell IDs
+                surf_filter.Update()
+                
+                # Get the complete surface PolyData (points + cells)
+                poly_data = surf_filter.GetOutput()
+                print(f"[DEBUG] Extracted {poly_data.GetNumberOfCells()} surface cells from volume")
+                print(f"[DEBUG] Surface has {poly_data.GetNumberOfPoints()} points")
+                
+                # Create mapping from surface cell ID to original volume cell ID for quality lookup
+                original_ids = poly_data.GetCellData().GetArray("vtkOriginalCellIds")
+                self.surface_to_volume_map = {}
+                if original_ids:
+                    for surf_id in range(poly_data.GetNumberOfCells()):
+                        vol_id = int(original_ids.GetValue(surf_id))
+                        # Map to element ID (1-indexed) - use temp list we created above
+                        if vol_id < len(temp_tetrahedra):
+                            elem_id = temp_tetrahedra[vol_id]['id']
+                            self.surface_to_volume_map[surf_id] = str(elem_id)
+                    print(f"[DEBUG] Created surface->volume mapping for {len(self.surface_to_volume_map)} cells")
+                else:
+                    print(f"[DEBUG] WARNING: No original cell IDs found in extracted surface")
 
-            print(f"[DEBUG] Rendering {cells.GetNumberOfCells()} surface facets (triangles/quads only)")
+            print(f"[DEBUG] Rendering {poly_data.GetNumberOfCells() if 'poly_data' in locals() else cells.GetNumberOfCells()} surface facets")
 
-            # Create PolyData directly from triangles (no geometry filter needed)
-            poly_data = vtk.vtkPolyData()
-            poly_data.SetPoints(points)
-            poly_data.SetPolys(cells)
+            # Create PolyData from explicit surface elements if we took that path
+            if has_surface_elements:
+                poly_data = vtk.vtkPolyData()
+                poly_data.SetPoints(points)
+                poly_data.SetPolys(cells)
 
             # Store for cross-section clipping and hex visualization
             self.current_poly_data = poly_data
@@ -2023,14 +2078,13 @@ except Exception as e:
                     print(f"[DEBUG] Number of elements to iterate: {len(elements)}")
                     print(f"[DEBUG] Element types: {set(e['type'] for e in elements)}")
                     
-                    surface_elements = [e for e in elements if e['type'] in ('triangle', 'quadrilateral')]
-                    
-                    # Show sample of quality keys vs element IDs
-                    quality_keys_sample = list(per_elem_quality.keys())[:10]
-                    element_ids_sample = [e['id'] for e in surface_elements][:10]
-                    print(f"[DEBUG] Sample quality keys: {quality_keys_sample}")
-                    print(f"[DEBUG] Sample surface IDs: {element_ids_sample}")
-                    print(f"[DEBUG] Sample quality values: {[per_elem_quality.get(k, 'MISSING') for k in element_ids_sample[:5]]}")
+                    # For extracted surfaces, use the surface->volume mapping
+                    has_extracted_surface = hasattr(self, 'surface_to_volume_map')
+                    if has_extracted_surface:
+                        print(f"[DEBUG] Using surface->volume mapping for quality coloring")
+                        print(f"[DEBUG] Mapping has {len(self.surface_to_volume_map)} entries")
+                    else:
+                        print(f"[DEBUG] Using direct surface element IDs")
 
                     # Calculate global quality range for color mapping
                     all_qualities = [q for q in per_elem_quality.values() if q is not None]
@@ -2068,13 +2122,25 @@ except Exception as e:
                         
                         return int(r * 255), int(g * 255), int(b * 255)
 
-                    # Color each surface cell with smooth gradient
-                    for element in surface_elements:
-                        elem_id = element['id']
-                        quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
+                    # Color each surface cell based on its quality
+                    colored_count = 0
+                    for i in range(poly_data.GetNumberOfCells()):
+                        # Get element ID - either from mapping (extracted surface) or direct (explicit surface)
+                        elem_id = None
+                        if has_extracted_surface:
+                            # Use surface->volume mapping
+                            elem_id = self.surface_to_volume_map.get(i)
+                        else:
+                            # Direct: use surface elements list
+                            surface_elements = [e for e in elements if e['type'] in ('triangle', 'quadrilateral')]
+                            if i < len(surface_elements):
+                                elem_id = str(surface_elements[i]['id'])
+                        
+                        # Look up quality
+                        quality = per_elem_quality.get(elem_id) if elem_id else None
 
                         if quality is None:
-                            colors.InsertNextTuple3(150, 150, 150)
+                            colors.InsertNextTuple3(150, 150, 150)  # Gray for unknown
                         else:
                             quality_range = global_max - global_min
                             if quality_range > 0.0001:
@@ -2083,14 +2149,15 @@ except Exception as e:
                                 normalized = 1.0
                             
                             normalized = max(0.0, min(1.0, normalized))
-                            hue = normalized * 0.33
+                            hue = normalized * 0.33  # 0 (red) to 0.33 (green)
                             r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
                             colors.InsertNextTuple3(r, g, b)
+                            colored_count += 1
 
                     poly_data.GetCellData().SetScalars(colors)
                     print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
                     print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
-                    print(f"[DEBUG] [OK][OK]Total colored surface cells: {len(surface_elements)}")
+                    print(f"[DEBUG] [OK][OK]Total colored surface cells: {colored_count}/{poly_data.GetNumberOfCells()}")
 
                     # Verify scalars were set
                     check_scalars = poly_data.GetCellData().GetScalars()
@@ -2197,14 +2264,14 @@ except Exception as e:
                     info_lines.append(f"<span style='color: {gamma_color};'>γ: {gamma:.3f}</span><br>")
 
                 # Skewness - use AVERAGE not max
-                if 'avg_skewness' in metrics:
-                    skew = metrics['avg_skewness']
+                if 'skewness_avg' in metrics:
+                    skew = metrics['skewness_avg']
                     skew_color = "#198754" if skew <= 0.3 else "#ffc107" if skew <= 0.5 else "#dc3545"
                     info_lines.append(f"<span style='color: {skew_color};'>Skew: {skew:.3f}</span> ")
 
                 # Aspect Ratio - use AVERAGE not max
-                if 'avg_aspect_ratio' in metrics:
-                    ar = metrics['avg_aspect_ratio']
+                if 'aspect_ratio_avg' in metrics:
+                    ar = metrics['aspect_ratio_avg']
                     ar_color = "#198754" if ar <= 2.0 else "#ffc107" if ar <= 3.0 else "#dc3545"
                     info_lines.append(f"<span style='color: {ar_color};'>AR: {ar:.2f}</span>")
 

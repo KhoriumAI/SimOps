@@ -274,7 +274,7 @@ class GeometryCleanup:
                 else:
                     print(f"  [!] Could not fillet any edges (geometry may not support it)")
             else:
-                print(f"  ℹ No sharp edges detected that need smoothing")
+                print(f"  [INFO] No sharp edges detected that need smoothing")
 
         except Exception as e:
             print(f"  Warning: Sharp feature smoothing failed: {e}")
