@@ -862,15 +862,9 @@ class BaseMeshGenerator(ABC):
         """
         Calculate overall quality score (lower is better)
 
-        CRITICAL: Quality > Element Count
-        Uses logarithmic element penalty so 50k good elements beats 2k garbage.
-        
-        Scoring Philosophy:
-        - SICN < 0: Immediate disqualification (inverted elements)
-        - SICN 0.2-0.3: Acceptable (score ~70)
-        - SICN 0.5-0.7: Good (score ~40-50)
-        - SICN > 0.7: Excellent (score ~25-30)
-        - Element count: Log penalty (50k → +4.7, 2k → +3.3)
+        NOW USES GMSH'S ACCURATE METRICS (SICN, Gamma)
+        Combines multiple metrics into single score for comparison.
+        Used by strategies to compare meshes and track best result.
 
         Args:
             metrics: Quality metrics dictionary
@@ -878,8 +872,6 @@ class BaseMeshGenerator(ABC):
         Returns:
             Quality score (lower is better)
         """
-        import math
-        
         score = 0.0
         targets = self.config.quality_targets
 
@@ -887,54 +879,46 @@ class BaseMeshGenerator(ABC):
         # SICN: 0-1, higher is better. We invert it for scoring (lower score = better)
         if metrics.get('gmsh_sicn'):
             sicn_min = metrics['gmsh_sicn']['min']
-            sicn_avg = metrics['gmsh_sicn']['avg']
-            
-            # CRITICAL: Immediate disqualification for inverted elements
-            if sicn_min < 0:
-                return 10000.0  # Make this mesh lose to anything
-            
-            # CRITICAL: Heavily penalize low SICN (poor quality)
-            # Scale: SICN 0.1 → 90, SICN 0.3 → 70, SICN 0.5 → 50, SICN 0.7 → 30
-            sicn_penalty = (1.0 - sicn_avg) * 100.0  # 0-100 scale
-            score += sicn_penalty
-            
-            # Extra penalty for minimum SICN (worst element)
-            if sicn_min < 0.2:
-                score += 20.0  # Bad worst element
-            elif sicn_min < 0.3:
-                score += 10.0  # Marginal worst element
+            # Target SICN > 0.3 for acceptable, > 0.5 for good
+            # Score heavily penalizes low SICN
+            if sicn_min < 0.3:
+                sicn_penalty = (0.3 - sicn_min) / 0.3  # 0-1 penalty
+                score += 5.0 * sicn_penalty  # Heavy weight
+            else:
+                sicn_score = (1.0 - sicn_min)  # Small penalty for less-than-perfect
+                score += 1.0 * sicn_score
 
         # SECONDARY: Use Gmsh's Gamma (inscribed/circumscribed radius ratio)
         # Gamma: 0-1, higher is better
         elif metrics.get('gmsh_gamma'):  # Fallback if SICN not available
             gamma_min = metrics['gmsh_gamma']['min']
-            gamma_avg = metrics['gmsh_gamma']['avg']
-            
-            # Similar scaling as SICN
-            gamma_penalty = (1.0 - gamma_avg) * 100.0
-            score += gamma_penalty
-            
-            if gamma_min < 0.15:
-                score += 20.0
-            elif gamma_min < 0.2:
-                score += 10.0
+            # Target Gamma > 0.2 for acceptable, > 0.4 for good
+            if gamma_min < 0.2:
+                gamma_penalty = (0.2 - gamma_min) / 0.2
+                score += 5.0 * gamma_penalty
+            else:
+                gamma_score = (1.0 - gamma_min)
+                score += 1.0 * gamma_score
 
         # LEGACY FALLBACK: Use converted skewness/aspect ratio if Gmsh metrics unavailable
         elif metrics.get('skewness'):
-            skew_max = metrics['skewness']['max']
-            # Skewness: 0-1, lower is better
-            # Scale: 0.3 → 30, 0.7 → 70, 0.9 → 90
-            score += skew_max * 100.0
+            skew_ratio = metrics['skewness']['max'] / targets.skewness_max
+            score += 2.0 * skew_ratio
 
-        # Element count penalty: LOGARITHMIC, not linear!
-        # This is the KEY FIX: Prefer 50k good over 2k garbage
-        # log10(2000) ≈ 3.3, log10(50000) ≈ 4.7, log10(500000) ≈ 5.7
-        # Difference between good and garbage: ~70 points from quality
-        # Difference from element count: ~1.4 points → Quality wins!
+        if metrics.get('aspect_ratio') and not metrics.get('gmsh_gamma'):
+            aspect_ratio = metrics['aspect_ratio']['max'] / targets.aspect_ratio_max
+            score += 1.0 * aspect_ratio
+
+        # Min angle contribution (weight: 0.5)
+        if metrics.get('min_angle'):
+            if metrics['min_angle']['min'] < targets.min_angle_min:
+                angle_penalty = targets.min_angle_min / max(metrics['min_angle']['min'], 0.1)
+                score += 0.5 * angle_penalty
+
+        # Element count penalty (prefer fewer elements for same quality)
         if metrics.get('total_elements'):
-            element_count = max(metrics['total_elements'], 1)  # Avoid log(0)
-            log_penalty = math.log10(element_count) * 2.0  # Weight 2.0
-            score += log_penalty
+            # Normalize by 10,000 elements
+            element_factor = metrics['total_elements'] / 10000.0
+            score += 0.1 * element_factor
 
         return score
-

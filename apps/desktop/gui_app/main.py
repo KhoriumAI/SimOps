@@ -32,7 +32,7 @@ PAINTBRUSH_AVAILABLE = False
 try:
     # Add project root to path
     current_dir = Path(__file__).parent
-    project_root = current_dir.parent.parent
+    project_root = current_dir.parent.parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
