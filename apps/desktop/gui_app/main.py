@@ -466,6 +466,21 @@ class ModernMeshGenGUI(QMainWindow):
         self.save_stl.setChecked(False)  # Default off
         quality_layout.addWidget(self.save_stl)
 
+        # ANSYS Export mode selector
+        ansys_layout = QHBoxLayout()
+        ansys_label = QLabel("ANSYS Export:")
+        ansys_label.setStyleSheet("color: black; font-size: 11px; font-weight: bold;")
+        self.ansys_mode = QComboBox()
+        self.ansys_mode.addItems(["None", "CFD (Fluent)", "FEA (Mechanical)"])
+        self.ansys_mode.setStyleSheet("color: black; font-size: 11px;")
+        self.ansys_mode.setToolTip(
+            "CFD: Linear elements (Tet4), .msh v2.2 for Fluent\n"
+            "FEA: Quadratic elements (Tet10), .bdf for Mechanical"
+        )
+        ansys_layout.addWidget(ansys_label)
+        ansys_layout.addWidget(self.ansys_mode, 1)
+        quality_layout.addLayout(ansys_layout)
+
         quality_group.setLayout(quality_layout)
         layout.addWidget(quality_group)
 
@@ -1532,7 +1547,8 @@ class ModernMeshGenGUI(QMainWindow):
             "max_size_mm": self.max_size.value(),
             "curvature_adaptive": self.curvature_adaptive.isChecked(),
             "mesh_strategy": self.mesh_strategy.currentText(),
-            "save_stl": self.save_stl.isChecked()  # Export intermediate STL files
+            "save_stl": self.save_stl.isChecked(),  # Export intermediate STL files
+            "ansys_mode": self.ansys_mode.currentText()  # ANSYS export mode: None, CFD, or FEA
         }
 
         # Add painted regions if any exist

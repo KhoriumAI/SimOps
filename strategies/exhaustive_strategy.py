@@ -33,7 +33,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.mesh_generator import BaseMeshGenerator
 from core.config import Config
+from core.config import Config
 from core.geometry_cleanup import GeometryCleanup
+from core.winding_resurface import resurface_coacd_output
 import gmsh
 import json
 from datetime import datetime
@@ -184,7 +186,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             "linear_tet_delaunay",
             "linear_tet_frontal",
             "subdivide_and_mesh",
+            "subdivide_and_mesh",
             "automatic_gmsh_default",
+            "resurfacing_reconstruction",
         ]
 
         if TETGEN_AVAILABLE:
@@ -434,6 +438,77 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             self.log_message(f"[!] Failed to apply painted refinement: {e}")
             import traceback
             self.log_message(f"[!] Traceback: {traceback.format_exc()}")
+
+    def _try_resurfacing_reconstruction(self) -> Tuple[bool, Optional[Dict]]:
+        """
+        Winding Number Resurfacing Strategy
+        
+        Uses CoACD decomposition followed by Barnes-Hut winding number field
+        and Marching Cubes to reconstruct a watertight surface, then meshes it.
+        Ideal for dirty geometry with gaps, overlaps, or self-intersections.
+        """
+        self.log_message("Resurfacing Reconstruction (Winding Number)...")
+        
+        try:
+            # 1. Run resurfacing pipeline
+            # This creates a new watertight STL file
+            resurfaced_stl = str(Path(self.temp_dir) / "resurfaced_watertight.stl")
+            
+            # We need an input mesh. If we have a CAD file, we might need to convert it first.
+            # But resurface_coacd_output handles conversion if needed? No, it expects a mesh path.
+            # For now, we'll try to use the input file directly if it's a mesh, or convert if it's STEP.
+            
+            input_file = self.current_mesh_params.get('input_file') # Wait, where is input_file stored?
+            # It's passed to run_meshing_strategy but not stored in self.
+            # However, run_strategy_wrapper passes it to the worker.
+            # But inside the worker, we are in _try_... methods which don't take args.
+            
+            # We need to access the input file.
+            # BaseMeshGenerator.load_cad_file stores self.model_loaded but not the filename?
+            # Let's check BaseMeshGenerator.
+            
+            # Actually, we can just use the loaded model in Gmsh to export an STL for resurfacing.
+            temp_input_stl = str(Path(self.temp_dir) / "temp_input_for_resurface.stl")
+            gmsh.write(temp_input_stl)
+            
+            success = resurface_coacd_output(
+                input_mesh_path=temp_input_stl,
+                output_mesh_path=resurfaced_stl,
+                resolution=64, # Medium resolution for speed
+                threshold=0.5
+            )
+            
+            if not success:
+                self.log_message("Resurfacing failed to generate watertight mesh")
+                return False, None
+                
+            # 2. Mesh the resurfaced STL
+            # Clear current model and load the new STL
+            gmsh.clear()
+            gmsh.merge(resurfaced_stl)
+            
+            # 3. Classify surfaces to recover sharp features
+            gmsh.model.mesh.classifySurfaces(40 * 3.14159 / 180, True, True)
+            gmsh.model.mesh.createGeometry()
+            
+            # 4. Generate Volume
+            s = gmsh.model.getEntities(2)
+            l = gmsh.model.geo.addSurfaceLoop([e[1] for e in s])
+            gmsh.model.geo.addVolume([l])
+            gmsh.model.geo.synchronize()
+            
+            # 5. Mesh 3D
+            gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT
+            gmsh.model.mesh.generate(3)
+            
+            # 6. Optimize
+            gmsh.model.mesh.optimize("Netgen")
+            
+            return True, self.analyze_current_mesh()
+            
+        except Exception as e:
+            self.log_message(f"Resurfacing strategy failed: {e}")
+            return False, None
 
     def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
         """

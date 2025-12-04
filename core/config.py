@@ -32,6 +32,7 @@ class MeshParameters:
     high_order_optimize: int = 2
     refinement_levels: int = 3
     max_iterations: int = 5
+    ansys_mode: str = "None"  # ANSYS export mode: "None", "CFD (Fluent)", or "FEA (Mechanical)"
 
 
 @dataclass

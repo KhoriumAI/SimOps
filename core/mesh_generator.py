@@ -123,6 +123,118 @@ class BaseMeshGenerator(ABC):
                     result.quality_metrics = self.quality_history[-1]['metrics']
 
                 result.message = "Mesh generation completed successfully"
+
+                # ANSYS Export (CFD/FEA)
+                ansys_mode = getattr(self.config.mesh_params, 'ansys_mode', 'None')
+                if ansys_mode and ansys_mode != "None":
+                    self.log_message(f"[ANSYS] Starting {ansys_mode} export...")
+                    try:
+                        # CRITICAL: ExhaustiveMeshGenerator finalizes Gmsh, so we must re-init and reload
+                        if not gmsh.isInitialized():
+                            self.log_message("[ANSYS] Re-initializing Gmsh...")
+                            gmsh.initialize()
+                        
+                        self.log_message(f"[ANSYS] Loading mesh from: {output_file}")
+                        gmsh.clear()
+                        gmsh.merge(output_file)
+
+                        # Clean topology
+                        self.log_message("[ANSYS] Cleaning topology...")
+                        gmsh.model.mesh.removeDuplicateNodes()
+
+                        if "CFD" in ansys_mode:
+                            # CFD MODE: Linear elements, .msh v2.2 for Fluent
+                            self.log_message("[ANSYS] Converting to linear elements (Tet4)...")
+                            gmsh.model.mesh.setOrder(1)  # Convert to linear
+                            
+                            # CRITICAL: Generate 2D surface mesh explicitly
+                            # Without this, only volume tets exist, causing "Empty Ghost"
+                            self.log_message("[ANSYS] Generating 2D surface mesh...")
+                            try:
+                                # Check if 2D mesh already exists
+                                existing_2d = gmsh.model.mesh.getElements(2)
+                                if not existing_2d[0]:  # No 2D elements
+                                    self.log_message("[ANSYS] No 2D mesh found, generating from volume boundaries...")
+                                    gmsh.model.mesh.generate(2)  # Generate surface mesh
+                            except:
+                                pass  # If it fails, physical groups will still help
+                            
+                            self.log_message("[ANSYS] Creating Face Zones...")
+                            self._create_ansys_physical_groups(mode="CFD")
+                            
+                            # Fluent requires ALL elements including surface triangles
+                            # CRITICAL: SaveAll=1 prevents "Empty Ghost" / Null Domain error
+                            gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+                            gmsh.option.setNumber("Mesh.Binary", 0)
+                            gmsh.option.setNumber("Mesh.SaveAll", 1)  # Force save surface triangles!
+                            
+                            # First write Gmsh format
+                            gmsh_temp = str(Path(output_file).with_suffix('')) + "_gmsh_temp.msh"
+                            self.log_message(f"[ANSYS] Writing Gmsh intermediate: {gmsh_temp}")
+                            gmsh.write(gmsh_temp)
+                            
+                            # Convert to native Fluent format using custom writer
+                            try:
+                                from core.write_fluent_mesh import write_fluent_msh
+                                import meshio
+                                
+                                ansys_file = str(Path(output_file).with_suffix('')) + "_fluent.msh"
+                                self.log_message(f"[ANSYS] Converting to native Fluent format (custom writer)...")
+                                
+                                # Read with meshio, write with custom writer
+                                mesh = meshio.read(gmsh_temp)
+                                success = write_fluent_msh(ansys_file, mesh.points, mesh.cells)
+                                
+                                if success:
+                                    self.log_message(f"[ANSYS] ✓ Native Fluent export: {ansys_file}")
+                                    # Clean up temp file
+                                    try:
+                                        os.remove(gmsh_temp)
+                                    except:
+                                        pass
+                                else:
+                                    self.log_message("[ANSYS] Custom writer failed, keeping Gmsh format", level="WARNING")
+                                    ansys_file = gmsh_temp
+                                    
+                            except ImportError as e:
+                                import traceback
+                                self.log_message(f"[ANSYS] Import error: {e}", level="ERROR")
+                                self.log_message(f"[ANSYS] Traceback:\n{traceback.format_exc()}", level="ERROR")
+                                self.log_message("[ANSYS] Install with: pip install meshio", level="WARNING")
+                                ansys_file = gmsh_temp  # Fallback to Gmsh format
+                            except Exception as e:
+                                import traceback
+                                self.log_message(f"[ANSYS] Conversion failed: {e}", level="ERROR")
+                                self.log_message(f"[ANSYS] Full traceback:\n{traceback.format_exc()}", level="ERROR")
+                                ansys_file = gmsh_temp
+                            
+                        elif "FEA" in ansys_mode:
+                            # FEA MODE: Quadratic elements, .bdf for Mechanical
+                            self.log_message("[ANSYS] Converting to quadratic elements (Tet10)...")
+                            gmsh.model.mesh.setOrder(2)  # Convert to quadratic
+                            
+                            self.log_message("[ANSYS] Creating Named Selections...")
+                            self._create_ansys_physical_groups(mode="FEA")
+                            
+                            # ANSYS Mechanical prefers Nastran BDF
+                            gmsh.option.setNumber("Mesh.BdfFieldFormat", 1)
+                            gmsh.option.setNumber("Mesh.SaveAll", 1)  # Save all for FEA too
+                            
+                            ansys_file = str(Path(output_file).with_suffix('')) + "_structural.bdf"
+                        
+                        if "FEA" in ansys_mode:  # Only write for FEA (CFD already written via meshio)
+                            self.log_message(f"[ANSYS] Writing to: {ansys_file}")
+                            gmsh.write(ansys_file)
+                        
+                        self.log_message(f"[ANSYS] ✓ Successfully exported: {ansys_file}")
+                        
+                    except Exception as e:
+                        import traceback
+                        self.log_message(f"[ANSYS] ✗ Failed to export ANSYS mesh: {e}", level="ERROR")
+                        self.log_message(f"[ANSYS] Traceback: {traceback.format_exc()}", level="ERROR")
+
+
+
             else:
                 result.message = "Meshing strategy failed"
 
@@ -937,4 +1049,37 @@ class BaseMeshGenerator(ABC):
             score += log_penalty
 
         return score
+
+    def _create_ansys_physical_groups(self, mode="CFD"):
+        """
+        Create Physical Groups for ANSYS export.
+        
+        Args:
+            mode: "CFD" or "FEA" - determines naming convention
+        """
+        self.log_message(f"Creating Physical Groups for {mode}...")
+        
+        # Clear existing physical groups to avoid conflicts
+        gmsh.model.removePhysicalGroups()
+        
+        # 1. Physical Volume (The Interior)
+        volumes = gmsh.model.getEntities(3)
+        if volumes:
+            p_tag = gmsh.model.addPhysicalGroup(3, [v[1] for v in volumes])
+            if mode == "CFD":
+                gmsh.model.setPhysicalName(3, p_tag, "FLUID_DOMAIN")
+            else:  # FEA
+                gmsh.model.setPhysicalName(3, p_tag, "INTERNAL_VOLUME")
+            self.log_message(f"Created Physical Volume (Tag {p_tag})")
+
+        # 2. Physical Surfaces (The Boundaries)
+        surfaces = gmsh.model.getEntities(2)
+        if surfaces:
+            p_tag = gmsh.model.addPhysicalGroup(2, [s[1] for s in surfaces])
+            if mode == "CFD":
+                gmsh.model.setPhysicalName(2, p_tag, "WALL_BOUNDARIES")
+            else:  # FEA
+                gmsh.model.setPhysicalName(2, p_tag, "SURFACE_BOUNDARIES")
+            self.log_message(f"Created Physical Surface (Tag {p_tag})")
+
 

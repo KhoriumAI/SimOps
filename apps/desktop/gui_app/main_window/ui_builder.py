@@ -297,6 +297,11 @@ class UIBuilder:
         self.window.save_stl.setStyleSheet("color: black; font-size: 11px;")
         group_layout.addWidget(self.window.save_stl)
 
+        self.window.export_ansys = QCheckBox("Export for ANSYS Fluent (.cgns)")
+        self.window.export_ansys.setStyleSheet("color: black; font-size: 11px;")
+        self.window.export_ansys.setToolTip("Exports .cgns file with Physical Groups for boundary conditions")
+        group_layout.addWidget(self.window.export_ansys)
+
         group.setLayout(group_layout)
         layout.addWidget(group)
 

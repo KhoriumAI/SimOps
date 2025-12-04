@@ -671,6 +671,9 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             if 'target_elements' in quality_params:
                 config.target_elements = quality_params['target_elements']
 
+            if 'ansys_mode' in quality_params:
+                config.mesh_params.ansys_mode = quality_params['ansys_mode']
+
         generator = ExhaustiveMeshGenerator(config)
 
         # Determine output folders (organized structure)
