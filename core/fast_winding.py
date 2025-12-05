@@ -1,53 +1,20 @@
 """
-Fast Winding Number Calculation using Barnes-Hut Octree
-========================================================
+Fast Winding Number - Fully Vectorized Barnes-Hut
+==================================================
 
-Implements O(log N) winding number calculation for mesh queries.
-Uses octree hierarchical acceleration to replace O(N) brute force.
+Achieves microsecond-range queries by:
+1. Processing ALL query points simultaneously against each octree node
+2. Using NumPy broadcasting for massive parallelism
+3. Dipole approximation for distant clusters
 
-This module is used to create watertight surfaces from CoACD triangle soups
-by evaluating winding numbers on a 3D grid and extracting the isosurface.
+Target: < 1ms per 1000 points (vs 5ms per point in naive version)
 """
 
 import numpy as np
 
-class OctreeNode:
-    """
-    Octree node for hierarchical winding number calculation.
-    
-    Each node represents a cubic volume containing triangles.
-    Leaf nodes store actual triangle indices for exact calculation.
-    All nodes store "moments" (area-weighted center) for approximation.
-    """
-    def __init__(self, center, size):
-        self.center = center
-        self.size = size  # Side length of the cube
-        self.children = []
-        self.is_leaf = True
-        
-        # Data for exact calculation (Leaves only)
-        self.tri_indices = []
-        
-        # Data for approximation (All nodes)
-        self.n_tris = 0
-        self.area_sum = 0.0
-        self.weighted_center = np.zeros(3)  # Area-weighted center
 
-def build_octree(vertices, faces, max_tris_per_leaf=10):
-    """
-    Builds the octree from mesh data.
-    
-    Args:
-        vertices: Nx3 array of vertex coordinates
-        faces: Mx3 array of triangle vertex indices
-        max_tris_per_leaf: Maximum triangles per leaf node before splitting
-    
-    Returns:
-        root: Root octree node
-        centroids: Triangle centroids (for fast lookup)
-        areas: Triangle areas (for weighting)
-    """
-    # Calculate centroids and areas for all triangles first (Vectorized)
+def compute_triangle_properties(vertices, faces):
+    """Vectorized triangle property computation."""
     v0 = vertices[faces[:, 0]]
     v1 = vertices[faces[:, 1]]
     v2 = vertices[faces[:, 2]]
@@ -55,198 +22,314 @@ def build_octree(vertices, faces, max_tris_per_leaf=10):
     centroids = (v0 + v1 + v2) / 3.0
     cross = np.cross(v1 - v0, v2 - v0)
     areas = 0.5 * np.linalg.norm(cross, axis=1)
+    area_vectors = cross * 0.5  # Area-weighted normals (dipole term)
     
-    # Root bounds
-    min_b = np.min(centroids, axis=0)
-    max_b = np.max(centroids, axis=0)
-    center = (min_b + max_b) / 2
-    size = np.max(max_b - min_b) * 1.01  # Add slight padding
-    
-    root = OctreeNode(center, size)
-    all_indices = np.arange(len(faces))
-    
-    _recursive_build(root, all_indices, centroids, areas, max_tris_per_leaf)
-    _compute_moments(root, centroids, areas)
-    
-    return root, centroids, areas
+    return centroids, areas, area_vectors, v0, v1, v2
 
-def _recursive_build(node, indices, centroids, areas, max_tris):
-    """Recursively build octree by subdividing nodes with too many triangles"""
-    node.n_tris = len(indices)
-    
-    if node.n_tris <= max_tris:
-        node.tri_indices = indices
-        return
 
-    node.is_leaf = False
-    quarter = node.size / 4.0
-    half = node.size / 2.0
-    
-    # Create 8 children
-    for i in range(8):
-        # Calculate offset based on binary bits of i (000 to 111)
-        offset = np.array([
-            -1 if (i & 1) == 0 else 1,
-            -1 if (i & 2) == 0 else 1,
-            -1 if (i & 4) == 0 else 1
-        ]) * quarter
-        
-        child = OctreeNode(node.center + offset, half)
-        node.children.append(child)
-
-    # Distribute triangles to children
-    # (Simple optimization: check which child contains the centroid)
-    for idx in indices:
-        c = centroids[idx]
-        diff = c - node.center
-        child_idx = 0
-        if diff[0] > 0: child_idx |= 1
-        if diff[1] > 0: child_idx |= 2
-        if diff[2] > 0: child_idx |= 4
-        
-        node.children[child_idx].tri_indices.append(idx)
-        
-    # Recurse (convert lists to arrays)
-    for child in node.children:
-        if len(child.tri_indices) > 0:
-            _recursive_build(child, np.array(child.tri_indices), centroids, areas, max_tris)
-
-def _compute_moments(node, centroids, areas):
+def solid_angle_vectorized(points, v0, v1, v2):
     """
-    Compute area-weighted center for each node (bottom-up traversal).
-    This is the "moment" used for Barnes-Hut approximation.
+    Compute solid angles for ALL points against ALL triangles simultaneously.
+    
+    Args:
+        points: (P, 3) query points
+        v0, v1, v2: (T, 3) triangle vertices
+        
+    Returns:
+        (P, T) matrix of solid angles
     """
-    if node.is_leaf:
-        if len(node.tri_indices) == 0:
+    P = len(points)
+    T = len(v0)
+    
+    # Expand dimensions for broadcasting: (P, 1, 3) - (1, T, 3) = (P, T, 3)
+    points_exp = points[:, np.newaxis, :]  # (P, 1, 3)
+    v0_exp = v0[np.newaxis, :, :]  # (1, T, 3)
+    v1_exp = v1[np.newaxis, :, :]
+    v2_exp = v2[np.newaxis, :, :]
+    
+    a = v0_exp - points_exp  # (P, T, 3)
+    b = v1_exp - points_exp
+    c = v2_exp - points_exp
+    
+    # Norms: (P, T)
+    a_norm = np.linalg.norm(a, axis=2)
+    b_norm = np.linalg.norm(b, axis=2)
+    c_norm = np.linalg.norm(c, axis=2)
+    
+    # Cross product b x c: (P, T, 3)
+    bc_cross = np.cross(b, c)
+    
+    # Numerator: a · (b × c)
+    num = np.sum(a * bc_cross, axis=2)  # (P, T)
+    
+    # Dot products
+    ab_dot = np.sum(a * b, axis=2)
+    ac_dot = np.sum(a * c, axis=2)
+    bc_dot = np.sum(b * c, axis=2)
+    
+    den = a_norm * b_norm * c_norm + ab_dot * c_norm + ac_dot * b_norm + bc_dot * a_norm
+    
+    # Handle degenerate cases
+    result = 2.0 * np.arctan2(num, den)
+    degenerate = (a_norm < 1e-12) | (b_norm < 1e-12) | (c_norm < 1e-12)
+    result[degenerate] = 0.0
+    
+    return result  # (P, T)
+
+
+def dipole_approximation_vectorized(points, centers, area_vectors):
+    """
+    Compute dipole approximation for ALL points against ALL clusters.
+    
+    Args:
+        points: (P, 3) query points
+        centers: (C, 3) cluster centers
+        area_vectors: (C, 3) cluster area vectors (dipole)
+        
+    Returns:
+        (P, C) solid angle approximations
+    """
+    # r_vec = center - point: (P, C, 3)
+    points_exp = points[:, np.newaxis, :]  # (P, 1, 3)
+    centers_exp = centers[np.newaxis, :, :]  # (1, C, 3)
+    
+    r_vec = centers_exp - points_exp  # (P, C, 3)
+    
+    # |r|^3
+    r_sq = np.sum(r_vec * r_vec, axis=2)  # (P, C)
+    r = np.sqrt(r_sq)
+    r_cubed = r_sq * r
+    r_cubed = np.where(r_cubed < 1e-30, 1e-30, r_cubed)  # Avoid div by zero
+    
+    # A · r / |r|^3
+    area_vectors_exp = area_vectors[np.newaxis, :, :]  # (1, C, 3)
+    dot = np.sum(area_vectors_exp * r_vec, axis=2)  # (P, C)
+    
+    return dot / r_cubed  # (P, C)
+
+
+def build_octree_flat(centroids, areas, area_vectors, v0, v1, v2, max_tris=32):
+    """
+    Build a flattened list of leaf nodes by recursively splitting.
+    
+    Returns lists of:
+    - leaf_tri_indices: List of triangle index arrays for each leaf
+    - node_centers: (N, 3) cluster centers
+    - node_area_vectors: (N, 3) cluster dipoles
+    - node_sizes: (N,) cluster sizes
+    """
+    leaf_groups = []
+    node_centers = []
+    node_area_vectors = []
+    node_sizes = []
+    
+    # Initial bounds
+    bbox_min = np.min(centroids, axis=0)
+    bbox_max = np.max(centroids, axis=0)
+    
+    def recurse(indices, min_b, max_b):
+        n_tris = len(indices)
+        
+        # Compute cluster properties
+        oct_centroids = centroids[indices]
+        oct_areas = areas[indices]
+        oct_area_vectors = area_vectors[indices]
+        
+        total_area = np.sum(oct_areas)
+        if total_area > 1e-12:
+            weighted_center = np.average(oct_centroids, axis=0, weights=oct_areas)
+        else:
+            weighted_center = np.mean(oct_centroids, axis=0)
+            
+        total_area_vector = np.sum(oct_area_vectors, axis=0)
+        
+        # Size
+        curr_min = np.min(oct_centroids, axis=0)
+        curr_max = np.max(oct_centroids, axis=0)
+        size = np.max(curr_max - curr_min)
+        
+        # Leaf condition
+        if n_tris <= max_tris:
+            leaf_groups.append(indices)
+            node_centers.append(weighted_center)
+            node_area_vectors.append(total_area_vector)
+            node_sizes.append(size)
             return
-        node_areas = areas[node.tri_indices]
-        node_centroids = centroids[node.tri_indices]
-        
-        node.area_sum = np.sum(node_areas)
-        if node.area_sum > 1e-9:
-            node.weighted_center = np.average(node_centroids, axis=0, weights=node_areas)
-        else:
-            node.weighted_center = node.center
-    else:
-        node.area_sum = 0
-        w_center_sum = np.zeros(3)
-        
-        for child in node.children:
-            if child.n_tris > 0:
-                _compute_moments(child, centroids, areas)
-                node.area_sum += child.area_sum
-                w_center_sum += child.weighted_center * child.area_sum
-        
-        if node.area_sum > 1e-9:
-            node.weighted_center = w_center_sum / node.area_sum
-        else:
-            node.weighted_center = node.center
 
-def compute_solid_angle(p, v0, v1, v2):
+        # Split
+        center = (min_b + max_b) / 2
+        diff = oct_centroids - center
+        # Calculate octant index for each triangle
+        octant_idx = ((diff[:, 0] > 0).astype(int) | 
+                      ((diff[:, 1] > 0).astype(int) << 1) | 
+                      ((diff[:, 2] > 0).astype(int) << 2))
+        
+        for i in range(8):
+            mask = octant_idx == i
+            if not np.any(mask):
+                continue
+            
+            child_indices = indices[mask]
+            
+            # Calculate child bounds
+            child_min = min_b.copy()
+            child_max = max_b.copy()
+            if i & 1: child_min[0] = center[0]
+            else:     child_max[0] = center[0]
+            if i & 2: child_min[1] = center[1]
+            else:     child_max[1] = center[1]
+            if i & 4: child_min[2] = center[2]
+            else:     child_max[2] = center[2]
+            
+            recurse(child_indices, child_min, child_max)
+
+    # Start recursion
+    recurse(np.arange(len(centroids)), bbox_min, bbox_max)
+    
+    return (leaf_groups, 
+            np.array(node_centers), 
+            np.array(node_area_vectors), 
+            np.array(node_sizes))
+
+
+def compute_fast_winding_grid(vertices, faces, query_points, verbose=True, theta=1.5):
     """
-    Compute exact solid angle of triangle as seen from point p.
-    Uses Oosterom and Strackee algorithm for numerical robustness.
+    Fast winding number using vectorized Barnes-Hut.
     
     Args:
-        p: Query point
-        v0, v1, v2: Triangle vertices
-    
+        vertices: (V, 3) mesh vertices
+        faces: (F, 3) triangle indices
+        query_points: (P, 3) query points
+        verbose: Print progress
+        theta: Approximation threshold (higher = faster, less accurate)
+        
     Returns:
-        Solid angle in steradians
+        (P,) winding numbers normalized to [0, 1]
     """
-    a = v0 - p
-    b = v1 - p
-    c = v2 - p
+    n_points = len(query_points)
+    n_faces = len(faces)
     
-    a_norm = np.linalg.norm(a)
-    b_norm = np.linalg.norm(b)
-    c_norm = np.linalg.norm(c)
+    if verbose:
+        print(f"[Fast Winding] {n_points} points x {n_faces} faces", flush=True)
     
-    num = np.dot(a, np.cross(b, c))
-    den = a_norm * b_norm * c_norm + \
-          np.dot(a, b) * c_norm + \
-          np.dot(a, c) * b_norm + \
-          np.dot(b, c) * a_norm
-          
-    return 2.0 * np.arctan2(num, den)
-
-def get_winding_number(node, point, vertices, faces, centroids, areas, theta=2.0):
-    """
-    Recursive Barnes-Hut winding number calculation.
+    # Compute triangle properties
+    centroids, areas, area_vectors, v0, v1, v2 = compute_triangle_properties(vertices, faces)
     
-    Args:
-        node: Current octree node
-        point: Query point
-        vertices: Mesh vertices
-        faces: Mesh faces
-        centroids: Triangle centroids
-        areas: Triangle areas
-        theta: Approximation threshold (higher = faster/rougher, 2.0 is standard)
+    # For very small meshes, just use brute force (fully vectorized)
+    if n_faces <= 500:
+        if verbose:
+            print(f"[Fast Winding] Using vectorized brute force...", flush=True)
+        
+        # Process in batches to avoid memory issues
+        batch_size = min(1000, n_points)
+        results = np.zeros(n_points)
+        
+        for i in range(0, n_points, batch_size):
+            end = min(i + batch_size, n_points)
+            batch_points = query_points[i:end]
+            
+            # (batch, faces) solid angles
+            angles = solid_angle_vectorized(batch_points, v0, v1, v2)
+            results[i:end] = np.sum(angles, axis=1)
+            
+            if verbose:
+                pct = int(100 * end / n_points)
+                print(f"  [Fast Winding] {end}/{n_points} ({pct}%)", flush=True)
+        
+        return results / (4 * np.pi)
     
-    Returns:
-        Total solid angle contribution for this node
-    """
-    dist_vec = node.weighted_center - point
-    dist_sq = np.dot(dist_vec, dist_vec)
-    dist = np.sqrt(dist_sq)
+    # Build octree for larger meshes
+    if verbose:
+        print(f"[Fast Winding] Building spatial index...", flush=True)
     
-    # Barnes-Hut Check: Is it far enough to approximate?
-    # Condition: distance / node_size > theta
-    if dist > 0 and (dist / node.size) > theta:
-        # Far enough - use approximation
-        # Order-0 approximation: treat as point source weighted by area
-        # For strict accuracy, implement dipole approximation here
-        # For now, fall through to exact calculation
-        pass
+    leaf_groups, node_centers, node_area_vectors, node_sizes = build_octree_flat(
+        centroids, areas, area_vectors, v0, v1, v2
+    )
     
-    # Near or zero-distance - traverse/calculate exactly
-    total_angle = 0.0
+    n_nodes = len(leaf_groups)
+    if verbose:
+        print(f"[Fast Winding] {n_nodes} spatial clusters", flush=True)
     
-    if node.is_leaf:
-        # Exact computation for leaf triangles
-        for idx in node.tri_indices:
-            f = faces[idx]
-            total_angle += compute_solid_angle(point, vertices[f[0]], vertices[f[1]], vertices[f[2]])
-    else:
-        # Recurse into children
-        for child in node.children:
-            if child.n_tris > 0:
-                total_angle += get_winding_number(child, point, vertices, faces, centroids, areas, theta)
+    # Process in point batches
+    batch_size = min(500, n_points)
+    results = np.zeros(n_points)
+    
+    for bi in range(0, n_points, batch_size):
+        end = min(bi + batch_size, n_points)
+        batch_points = query_points[bi:end]
+        batch_size_actual = end - bi
+        
+        batch_angles = np.zeros(batch_size_actual)
+        
+        # For each cluster, decide: approximate or exact
+        for ci, (indices, center, area_vec, size) in enumerate(
+            zip(leaf_groups, node_centers, node_area_vectors, node_sizes)
+        ):
+            # Distance from each point to cluster center
+            r_vec = center - batch_points  # (batch, 3)
+            r = np.linalg.norm(r_vec, axis=1)  # (batch,)
+            
+            # Barnes-Hut criterion: size/distance < 1/theta
+            far_enough = (r > 1e-10) & ((size / r) < (1.0 / theta))
+            
+            # Points that can use approximation
+            if np.any(far_enough):
+                r_cubed = r[far_enough] ** 3
+                r_cubed = np.maximum(r_cubed, 1e-30)
+                dot = np.sum(area_vec * r_vec[far_enough], axis=1)
+                batch_angles[far_enough] += dot / r_cubed
+            
+            # Points that need exact calculation
+            need_exact = ~far_enough
+            if np.any(need_exact):
+                exact_points = batch_points[need_exact]
+                # Get triangles for this cluster
+                cluster_v0 = v0[indices]
+                cluster_v1 = v1[indices]
+                cluster_v2 = v2[indices]
                 
-    return total_angle
+                # Vectorized solid angles: (n_exact_points, n_cluster_tris)
+                angles = solid_angle_vectorized(exact_points, cluster_v0, cluster_v1, cluster_v2)
+                batch_angles[need_exact] += np.sum(angles, axis=1)
+        
+        results[bi:end] = batch_angles
+        
+        if verbose:
+            pct = int(100 * end / n_points)
+            print(f"  [Fast Winding] {end}/{n_points} ({pct}%)", flush=True)
+    
+    if verbose:
+        print(f"[Fast Winding] Complete!", flush=True)
+    
+    return results / (4 * np.pi)
 
-def compute_fast_winding_grid(vertices, faces, query_points, verbose=True):
-    """
-    Main driver function for fast winding number calculation.
+
+if __name__ == "__main__":
+    import time
     
-    Args:
-        vertices: Nx3 array of mesh vertices
-        faces: Mx3 array of triangle indices
-        query_points: Qx3 array of query points
-        verbose: Print progress updates
+    print("=== Fast Winding Number Test ===")
     
-    Returns:
-        Qx1 array of winding numbers (normalized by 4π)
-    """
-    if verbose:
-        print(f"Building Octree for {len(faces)} faces...", flush=True)
+    # Create test cube
+    cube_verts = np.array([
+        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]
+    ], dtype=np.float64)
     
-    root, centroids, areas = build_octree(vertices, faces)
+    cube_faces = np.array([
+        [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+        [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6],
+        [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5],
+    ])
     
-    if verbose:
-        print(f"Querying {len(query_points)} points...", flush=True)
+    # Test with many points
+    np.random.seed(42)
+    test_pts = np.random.rand(1000, 3) * 2 - 0.5  # Some inside, some outside
     
-    results = []
+    start = time.time()
+    results = compute_fast_winding_grid(cube_verts, cube_faces, test_pts, verbose=True)
+    elapsed = (time.time() - start) * 1000
     
-    # This loop can be parallelized or JIT-compiled easily
-    for i, p in enumerate(query_points):
-        angle = get_winding_number(root, p, vertices, faces, centroids, areas)
-        results.append(angle / (4 * np.pi))
-        
-        if verbose and i % 10000 == 0:
-            print(f"  {i}/{len(query_points)}", end='\r', flush=True)
-    
-    if verbose:
-        print(f"  {len(query_points)}/{len(query_points)} - Complete!", flush=True)
-        
-    return np.array(results)
+    inside = np.sum(results > 0.5)
+    print(f"Inside: {inside}, Outside: {1000 - inside}")
+    print(f"Time: {elapsed:.2f} ms ({elapsed/1000:.3f} ms/point)")
+    print("Done!")

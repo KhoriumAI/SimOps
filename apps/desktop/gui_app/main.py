@@ -430,15 +430,18 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy = QComboBox()
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
+            "Tetrahedral (GPU Delaunay)",
             "Hex Dominant (Subdivision)",
             "Hex Dominant Testing",
             "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
         self.mesh_strategy.setToolTip(
-            "Tetrahedral (Delaunay): Robust conformal tet mesh\n"
-            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision (4x elements)\n"
-            "Hex Dominant Testing: Visualize CoACD components with unique colors for debugging"
+            "Tetrahedral (Delaunay): Robust conformal tet mesh (CPU)\n"
+            "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
+            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
+            "Hex Dominant Testing: Visualize CoACD components\n"
+            "Polyhedral (Dual): Polyhedral cells from tet dual"
         )
         self.mesh_strategy.setStyleSheet("""
             QComboBox {

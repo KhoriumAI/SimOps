@@ -309,29 +309,6 @@ class MeshWorker:
             print(f"[GUI-WORKER] Found JSON result line: {line[:100]}...")
             try:
                 result = json.loads(line)
-                
-                # Check if it's a progress update (intermediate)
-                if result.get('type') == 'progress' and result.get('phase') == 'coacd_preview':
-                    # CoACD component preview - show components immediately
-                    print(f"[GUI-WORKER] CoACD Preview: {result.get('num_components')} components")
-                    self.signals.log.emit(f"CoACD Decomposition: {result.get('num_components')} components (Volume error: {result.get('volume_error_pct', 0):.2f}%)")
-                    
-                    # Create preview result dict
-                    preview_result = {
-                        'success': True,
-                        'strategy': 'coacd_preview',
-                        'message': f"CoACD Preview: {result.get('num_components')} components",
-                        'component_files': result.get('component_files', []),
-                        'num_components': result.get('num_components', 0),
-                        'volume_error_pct': result.get('volume_error_pct', 0),
-                        'visualization_mode': 'components'
-                    }
-                    
-                    # Emit as a finished signal (GUI will display it)
-                    self.signals.finished.emit(True, preview_result)
-                    return  # Continue reading for final result
-                
-                # Check if it's the final result
                 print(f"[GUI-WORKER] Parsed result, success={result.get('success')}")
                 if result.get('success'):
                     # Mark all active phases as complete
@@ -537,15 +514,13 @@ class VTK3DViewer(QFrame):
         self.current_mesh_elements = None  # Store all elements list
         self.current_node_map = None  # Store node_id -> vtk_index mapping
         self.current_tetrahedra = None  # Store tetrahedra separately for cross-section
-        self.current_hexahedra = None  # Store hexahedra for volume visualization
         self.current_volumetric_grid = None  # Store full volumetric grid for 3D clipping
         self.clipping_enabled = False
         self.clip_plane = None
         self.clip_axis = 'x'
         self.clip_offset = 0.0  # -50 to +50 percentage
         self.cross_section_actor = None  # Actor for cross-section visualization
-        self.cross_section_mode = "layered"  # Always use layered mode (show complete volume cells)
-        self.cross_section_element_mode = "auto"  # Auto-switch between tet/hex slicing
+        self.cross_section_mode = "layered"  # Always use layered mode (show complete tets)
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -672,23 +647,9 @@ class VTK3DViewer(QFrame):
         self.vtk_widget.GetRenderWindow().Render()
 
     def clear_view(self):
-        # Remove ALL 3D actors from renderer
-        actors = self.renderer.GetActors()
-        actors.InitTraversal()
-        for i in range(actors.GetNumberOfItems()):
-            actor = actors.GetNextActor()
-            if actor:
-                self.renderer.RemoveActor(actor)
-        
-        # Remove ALL 2D actors (scalar bars, text, etc.)
-        actors2d = self.renderer.GetActors2D()
-        actors2d.InitTraversal()
-        for i in range(actors2d.GetNumberOfItems()):
-            actor = actors2d.GetNextActor2D()
-            if actor:
-                self.renderer.RemoveActor2D(actor)
-        
-        self.current_actor = None
+        if self.current_actor:
+            self.renderer.RemoveActor(self.current_actor)
+            self.current_actor = None
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
 
@@ -944,7 +905,7 @@ class VTK3DViewer(QFrame):
         Set cross-section visualization mode.
         
         Args:
-            mode: Either "perfect" for geometric slice or "layered" for complete volume cells
+            mode: Either "perfect" for geometric slice or "layered" for complete tetrahedra
         """
         if mode not in ["perfect", "layered"]:
             print(f"[WARNING] Invalid cross-section mode '{mode}', using 'perfect'")
@@ -954,19 +915,6 @@ class VTK3DViewer(QFrame):
         print(f"[DEBUG] Cross-section mode set to: {mode}")
         
         # Re-apply clipping if currently enabled
-        if self.clipping_enabled and self.current_poly_data:
-            self._apply_clipping()
-    
-    def set_cross_section_element_mode(self, mode: str):
-        """
-        Choose which volume elements to display in the slice
-        mode: 'auto', 'tetrahedra', or 'hexahedra'
-        """
-        mode = mode.lower()
-        if mode not in ("auto", "tetrahedra", "hexahedra"):
-            mode = "auto"
-        self.cross_section_element_mode = mode
-        print(f"[DEBUG] Cross-section element mode set to: {mode}")
         if self.clipping_enabled and self.current_poly_data:
             self._apply_clipping()
     
@@ -980,55 +928,40 @@ class VTK3DViewer(QFrame):
         diff = np.array(point) - np.array(plane_origin)
         return np.dot(diff, plane_normal)
     
-    def _iter_volume_elements(self):
-        """Yield stored volume cells for cross-section operations, respecting mode."""
-        if not self.current_mesh_nodes:
-            return
-        
-        mode = getattr(self, 'cross_section_element_mode', 'auto')
-        tets = self.current_tetrahedra or []
-        hexes = self.current_hexahedra or []
-        
-        if mode == "auto":
-            if hexes and (len(hexes) >= len(tets)):
-                mode = "hexahedra"
-            elif tets:
-                mode = "tetrahedra"
-            elif hexes:
-                mode = "hexahedra"
-            else:
-                mode = "tetrahedra"
-        
-        if mode == "tetrahedra" and tets:
-            for tet in tets:
-                yield tet
-        elif mode == "hexahedra" and hexes:
-            for hexa in hexes:
-                yield hexa
-        else:
-            # Fallback: yield whatever is available
-            for tet in tets:
-                yield tet
-            for hexa in hexes:
-                yield hexa
-    
-    def _get_volume_elements_intersecting_plane(self, plane_origin, plane_normal):
+    def _get_tets_intersecting_plane(self, plane_origin, plane_normal):
         """
-        Find all stored volume elements (tets/hexes) that intersect the plane.
+        Find all tetrahedra that intersect with the given plane.
+        A tet intersects if its vertices are on opposite sides of the plane.
+        
+        Returns:
+            List of tet elements that intersect the plane
         """
-        intersecting = []
-        for element in self._iter_volume_elements() or []:
-            node_ids = element['nodes']
+        if not self.current_tetrahedra or not self.current_mesh_nodes:
+            return []
+        
+        intersecting_tets = []
+        
+        for tet in self.current_tetrahedra:
+            # Get the 4 vertices of this tet
+            node_ids = tet['nodes']
             vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
-            distances = [self._signed_distance_to_plane(v, plane_origin, plane_normal)
-                         for v in vertices]
+            
+            # Compute signed distance for each vertex
+            distances = [self._signed_distance_to_plane(v, plane_origin, plane_normal) 
+                        for v in vertices]
+            
+            # Check if vertices are on opposite sides
+            # (i.e., distances have different signs)
             has_positive = any(d > 1e-10 for d in distances)
             has_negative = any(d < -1e-10 for d in distances)
+            
             if has_positive and has_negative:
-                intersecting.append(element)
-        return intersecting
+                # Tet crosses the plane
+                intersecting_tets.append(tet)
+        
+        return intersecting_tets
     
-    def _intersect_edge_with_plane(self, v1, v2, plane_origin, plane_normal):
+    def _intersect_tet_edge_with_plane(self, v1, v2, plane_origin, plane_normal):
         """
         Find the intersection point of a line segment (v1-v2) with a plane.
         Returns None if no intersection, otherwise returns the intersection point.
@@ -1053,32 +986,28 @@ class VTK3DViewer(QFrame):
         
         return intersection.tolist()
     
-    def _intersect_element_with_plane(self, element, plane_origin, plane_normal):
+    def _intersect_tet_with_plane(self, tet, plane_origin, plane_normal):
         """
-        Compute the intersection polygon of a volume element (tet or hex) with a plane.
+        Compute the intersection polygon of a tetrahedron with a plane.
+        
+        Returns:
+            List of 3D points forming the intersection polygon (typically 3 or 4 points),
+            ordered counterclockwise when viewed along the plane normal
         """
         import numpy as np
         
-        node_ids = element['nodes']
+        node_ids = tet['nodes']
         vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
         
-        if element['type'] == 'tetrahedron':
-            edges = [
-                (0, 1), (0, 2), (0, 3),
-                (1, 2), (1, 3), (2, 3)
-            ]
-        elif element['type'] == 'hexahedron':
-            edges = [
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7)
-            ]
-        else:
-            return []
+        # A tetrahedron has 6 edges: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+        edges = [
+            (0, 1), (0, 2), (0, 3),
+            (1, 2), (1, 3), (2, 3)
+        ]
         
         intersection_points = []
         for i, j in edges:
-            point = self._intersect_edge_with_plane(
+            point = self._intersect_tet_edge_with_plane(
                 vertices[i], vertices[j], plane_origin, plane_normal
             )
             if point is not None:
@@ -1102,6 +1031,7 @@ class VTK3DViewer(QFrame):
             return unique_points
         
         # Order points by angle around centroid for correct winding
+        # This ensures triangulation doesn't create self-intersecting polygons
         centroid = np.mean(unique_points, axis=0)
         
         # Create two orthogonal vectors in the plane for 2D projection
@@ -1133,16 +1063,16 @@ class VTK3DViewer(QFrame):
     
     def _generate_cross_section_mesh(self, plane_origin, plane_normal):
         """
-        Generate VTK PolyData for the cross-section by intersecting all volume elements with the plane.
+        Generate VTK PolyData for the cross-section by intersecting all tets with the plane.
         
         Returns:
             vtk.vtkPolyData containing the cross-section geometry
         """
         import numpy as np
         
-        intersecting_elements = self._get_volume_elements_intersecting_plane(plane_origin, plane_normal)
+        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
         
-        if not intersecting_elements:
+        if not intersecting_tets:
             # No intersection, return empty polydata
             return vtk.vtkPolyData()
         
@@ -1153,8 +1083,8 @@ class VTK3DViewer(QFrame):
         
         skipped_degenerate = 0
         
-        for element in intersecting_elements:
-            polygon_points = self._intersect_element_with_plane(element, plane_origin, plane_normal)
+        for tet in intersecting_tets:
+            polygon_points = self._intersect_tet_with_plane(tet, plane_origin, plane_normal)
             
             if len(polygon_points) < 3:
                 skipped_degenerate += 1
@@ -1199,40 +1129,37 @@ class VTK3DViewer(QFrame):
         poly_data.SetPoints(points)
         poly_data.SetPolys(triangles)
         
-        print(f"[DEBUG] Cross-section: {len(intersecting_elements)} intersecting volume cells -> {len(all_triangles)} triangles, {len(all_points)} points")
+        print(f"[DEBUG] Cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} triangles, {len(all_points)} points")
         
         return poly_data
     
     def _generate_layered_cross_section(self, plane_origin, plane_normal):
         """
-        Generate VTK PolyData for layered cross-section showing complete volume elements.
+        Generate VTK PolyData for layered cross-section showing complete tetrahedra.
         
-        Instead of slicing geometrically, this shows the complete faces for all
-        tets/hexes that intersect the plane (ANSYS-style coarse visualization).
+        Instead of slicing tets geometrically, this shows the complete tetrahedral faces
+        for all tets that intersect the plane (ANSYS-style coarse visualization).
         
         Returns:
-            vtk.vtkPolyData containing complete faces with quality colors if available
+            vtk.vtkPolyData containing complete tet faces with quality colors if available
         """
         import numpy as np
         
-        intersecting_elements = self._get_volume_elements_intersecting_plane(plane_origin, plane_normal)
+        intersecting_tets = self._get_tets_intersecting_plane(plane_origin, plane_normal)
         
-        if not intersecting_elements:
+        if not intersecting_tets:
             return vtk.vtkPolyData()
         
+        # Each tetrahedron has 4 triangular faces
+        # Face 0: nodes (0,1,2)
+        # Face 1: nodes (0,1,3)
+        # Face 2: nodes (0,2,3)
+        # Face 3: nodes (1,2,3)
         tet_faces = [
             (0, 1, 2),
             (0, 1, 3),
             (0, 2, 3),
             (1, 2, 3)
-        ]
-        hex_faces = [
-            (0, 1, 2, 3),
-            (4, 5, 6, 7),
-            (0, 1, 5, 4),
-            (1, 2, 6, 5),
-            (2, 3, 7, 6),
-            (3, 0, 4, 7)
         ]
         
         all_points = []
@@ -1240,29 +1167,22 @@ class VTK3DViewer(QFrame):
         point_offset = 0
         
         # Track tet IDs for quality coloring
-        face_to_element_id = []  # Maps each output triangle to its source element ID
+        face_to_tet_id = []  # Maps each face to its source tet ID
         
-        for element in intersecting_elements:
-            node_ids = element['nodes']
+        for tet in intersecting_tets:
+            node_ids = tet['nodes']
             vertices = [self.current_mesh_nodes[nid] for nid in node_ids]
             
-            local_offset = point_offset
+            # Add all 4 vertices of this tet
             all_points.extend(vertices)
             
-            if element['type'] == 'tetrahedron':
-                for face_indices in tet_faces:
-                    tri_indices = [local_offset + i for i in face_indices]
-                    all_triangles.append(tri_indices)
-                    face_to_element_id.append(element['id'])
-            elif element['type'] == 'hexahedron':
-                for quad in hex_faces:
-                    a, b, c, d = quad
-                    all_triangles.append([local_offset + a, local_offset + b, local_offset + c])
-                    face_to_element_id.append(element['id'])
-                    all_triangles.append([local_offset + a, local_offset + c, local_offset + d])
-                    face_to_element_id.append(element['id'])
+            # Add all 4 triangular faces
+            for face_indices in tet_faces:
+                tri_indices = [point_offset + i for i in face_indices]
+                all_triangles.append(tri_indices)
+                face_to_tet_id.append(tet['id'])  # Track which tet this face belongs to
             
-            point_offset += len(vertices)
+            point_offset += 4  # 4 vertices per tet
         
         # Create VTK PolyData
         points = vtk.vtkPoints()
@@ -1311,9 +1231,9 @@ class VTK3DViewer(QFrame):
             colors.SetName("Colors")
             
             colored_faces = 0
-            for face_idx, elem_id in enumerate(face_to_element_id):
-                elem_id_str = str(elem_id)
-                quality = per_elem_quality.get(elem_id_str)
+            for face_idx, tet_id in enumerate(face_to_tet_id):
+                tet_id_str = str(tet_id)
+                quality = per_elem_quality.get(tet_id_str)
                 
                 if quality is not None:
                     # Map quality [0, 1] to hue [0° (red), 120° (green)]
@@ -1330,7 +1250,7 @@ class VTK3DViewer(QFrame):
                 poly_data.GetCellData().SetScalars(colors)
                 print(f"[DEBUG] Applied quality colors to {colored_faces}/{len(all_triangles)} layered faces")
         
-        print(f"[DEBUG] Layered cross-section: {len(intersecting_elements)} intersecting volume cells -> {len(all_triangles)} faces")
+        print(f"[DEBUG] Layered cross-section: {len(intersecting_tets)} intersecting tets -> {len(all_triangles)} faces")
         
         return poly_data
     
@@ -2050,27 +1970,21 @@ except Exception as e:
 
             # Count elements for display
             tet_count = sum(1 for e in elements if e['type'] == 'tetrahedron')
-            hex_count = sum(1 for e in elements if e['type'] == 'hexahedron')
             tri_count = sum(1 for e in elements if e['type'] == 'triangle')
-            quad_count = sum(1 for e in elements if e['type'] == 'quadrilateral')
 
-            print(f"[DEBUG] Element counts: {tet_count} tets, {hex_count} hexes, {tri_count} triangles, {quad_count} quads")
+            print(f"[DEBUG] Element counts: {tet_count} tets, {tri_count} triangles")
 
             # CRITICAL: Only visualize SURFACE TRIANGLES, not volume tetrahedra!
-            # Include quadrilateral surfaces for hex meshes.
+            # The triangles define the outer surface AND internal hole surfaces.
+            # Including tetrahedra creates a "web" through holes/cavities.
             for element in elements:
                 if element['type'] == 'triangle':
                     tri = vtk.vtkTriangle()
                     for i, node_id in enumerate(element['nodes']):
                         tri.GetPointIds().SetId(i, node_map[node_id])
                     cells.InsertNextCell(tri)
-                elif element['type'] == 'quadrilateral':
-                    quad = vtk.vtkQuad()
-                    for i, node_id in enumerate(element['nodes']):
-                        quad.GetPointIds().SetId(i, node_map[node_id])
-                    cells.InsertNextCell(quad)
 
-            print(f"[DEBUG] Rendering {cells.GetNumberOfCells()} surface facets (triangles/quads only)")
+            print(f"[DEBUG] Rendering {cells.GetNumberOfCells()} surface triangles (tets excluded)")
 
             # Create PolyData directly from triangles (no geometry filter needed)
             poly_data = vtk.vtkPolyData()
@@ -2085,49 +1999,26 @@ except Exception as e:
             
             # Separate tetrahedra for cross-section computation
             self.current_tetrahedra = [e for e in elements if e['type'] == 'tetrahedron']
-            self.current_hexahedra = [e for e in elements if e['type'] == 'hexahedron']
             
             # Build volumetric grid for 3D clipping
-            if self.current_tetrahedra or self.current_hexahedra:
+            if self.current_tetrahedra:
                 self.current_volumetric_grid = vtk.vtkUnstructuredGrid()
                 self.current_volumetric_grid.SetPoints(points)
                 
-                total_cells = 0
+                tet_cells = vtk.vtkCellArray()
                 for tet in self.current_tetrahedra:
                     vtk_tet = vtk.vtkTetra()
                     for i, nid in enumerate(tet['nodes']):
                         vtk_tet.GetPointIds().SetId(i, node_map[nid])
-                    self.current_volumetric_grid.InsertNextCell(vtk_tet.GetCellType(), vtk_tet.GetPointIds())
-                    total_cells += 1
+                    tet_cells.InsertNextCell(vtk_tet)
                 
-                for hex_elem in self.current_hexahedra:
-                    vtk_hex = vtk.vtkHexahedron()
-                    for i, nid in enumerate(hex_elem['nodes']):
-                        vtk_hex.GetPointIds().SetId(i, node_map[nid])
-                    self.current_volumetric_grid.InsertNextCell(vtk_hex.GetCellType(), vtk_hex.GetPointIds())
-                    total_cells += 1
-                
-                print(f"[DEBUG] Built volumetric grid with {total_cells} volume cells")
+                self.current_volumetric_grid.SetCells(vtk.VTK_TETRA, tet_cells)
+                print(f"[DEBUG] Built volumetric grid with {self.current_volumetric_grid.GetNumberOfCells()} tetrahedra")
             else:
                 self.current_volumetric_grid = None
             
             print(f"[DEBUG] PolyData created with {poly_data.GetNumberOfCells()} cells")
-            print(f"[DEBUG] Stored {len(self.current_tetrahedra)} tetrahedra and {len(self.current_hexahedra)} hexahedra for cross-section visualization")
-            
-            # Reset cross-section element mode combo availability
-            if hasattr(self, 'crosssection_cell_combo') and self.crosssection_cell_combo:
-                model = self.crosssection_cell_combo.model()
-                if model and hasattr(model, "item"):
-                    # Index 0 = Auto, 1 = Tetrahedra, 2 = Hexahedra
-                    if model.rowCount() >= 3:
-                        model.item(1).setEnabled(bool(tet_count))
-                        model.item(2).setEnabled(bool(hex_count))
-                self.crosssection_cell_combo.blockSignals(True)
-                self.crosssection_cell_combo.setCurrentText("Auto")
-                self.crosssection_cell_combo.blockSignals(False)
-            
-            if hasattr(self, 'viewer') and self.viewer:
-                self.viewer.set_cross_section_element_mode("auto")
+            print(f"[DEBUG] Stored {len(self.current_tetrahedra)} tetrahedra for cross-section visualization")
 
             # Add per-cell colors based on quality (if available)
             print(f"[DEBUG] About to check quality coloring conditions...")
@@ -2146,13 +2037,11 @@ except Exception as e:
                     print(f"[DEBUG] Number of elements to iterate: {len(elements)}")
                     print(f"[DEBUG] Element types: {set(e['type'] for e in elements)}")
                     
-                    surface_elements = [e for e in elements if e['type'] in ('triangle', 'quadrilateral')]
-                    
                     # Show sample of quality keys vs element IDs
                     quality_keys_sample = list(per_elem_quality.keys())[:10]
-                    element_ids_sample = [e['id'] for e in surface_elements][:10]
+                    element_ids_sample = [e['id'] for e in elements if e['type'] == 'triangle'][:10]
                     print(f"[DEBUG] Sample quality keys: {quality_keys_sample}")
-                    print(f"[DEBUG] Sample surface IDs: {element_ids_sample}")
+                    print(f"[DEBUG] Sample triangle IDs: {element_ids_sample}")
                     print(f"[DEBUG] Sample quality values: {[per_elem_quality.get(k, 'MISSING') for k in element_ids_sample[:5]]}")
 
                     # Calculate global quality range for color mapping
@@ -2191,29 +2080,37 @@ except Exception as e:
                         
                         return int(r * 255), int(g * 255), int(b * 255)
 
-                    # Color each surface cell with smooth gradient
-                    for element in surface_elements:
-                        elem_id = element['id']
-                        quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
+                    # Color each triangle with smooth gradient
+                    for element in elements:
+                        if element['type'] == 'triangle':
+                            elem_id = element['id']
+                            quality = per_elem_quality.get(elem_id, per_elem_quality.get(str(elem_id), None))
 
-                        if quality is None:
-                            colors.InsertNextTuple3(150, 150, 150)
-                        else:
-                            quality_range = global_max - global_min
-                            if quality_range > 0.0001:
-                                normalized = (quality - global_min) / quality_range
+                            if quality is None:
+                                # No quality data - use neutral gray
+                                colors.InsertNextTuple3(150, 150, 150)
                             else:
-                                normalized = 1.0
-                            
-                            normalized = max(0.0, min(1.0, normalized))
-                            hue = normalized * 0.33
-                            r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                            colors.InsertNextTuple3(r, g, b)
+                                # Normalize quality to 0-1 range based on actual min/max
+                                quality_range = global_max - global_min
+                                if quality_range > 0.0001:
+                                    normalized = (quality - global_min) / quality_range
+                                else:
+                                    normalized = 1.0  # All same quality
+                                
+                                normalized = max(0.0, min(1.0, normalized))  # Clamp to [0,1]
+                                
+                                # Map to hue: 0 (red) for low quality → 0.33 (green) for high quality
+                                # Invert so low quality = red, high quality = green
+                                hue = normalized * 0.33  # 0.33 = green in HSL
+                                
+                                # Convert HSL to RGB
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
 
                     poly_data.GetCellData().SetScalars(colors)
                     print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
                     print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
-                    print(f"[DEBUG] [OK][OK]Total colored surface cells: {len(surface_elements)}")
+                    print(f"[DEBUG] [OK][OK]Total colored triangles: {len(elements)}")
 
                     # Verify scalars were set
                     check_scalars = poly_data.GetCellData().GetScalars()
@@ -2347,186 +2244,6 @@ except Exception as e:
             self.info_label.setText(error_msg)
             return f"ERROR: {e}"
 
-    def load_component_visualization(self, result: dict):
-        """Load and display CoACD components with PyVista"""
-        print("="*80)
-        print("[COMPONENT-VIZ] *** FUNCTION CALLED *** IN GUI_FINAL.PY")
-        print("="*80)
-        try:
-            import pyvista as pv
-            import numpy as np
-            
-            component_files = result.get('component_files', [])
-            if not component_files:
-                print("[ERROR] No component files in result")
-                self.info_label.setText("Error: No components found")
-                return "FAILED"
-            
-            print(f"[COMPONENT-VIZ] Loading {len(component_files)} components...")
-            self.clear_view()
-            
-            # Load and merge all components
-            merged_mesh = None
-            for i, comp_file in enumerate(component_files):
-                if not Path(comp_file).exists():
-                    print(f"[WARNING] Component file not found: {comp_file}")
-                    continue
-                
-                # Load with PyVista
-                comp_mesh = pv.read(comp_file)
-                
-                print(f"[COMPONENT-VIZ] Component {i}: {comp_mesh.n_cells} cells, type={comp_mesh.GetCellType(0) if comp_mesh.n_cells > 0 else 'N/A'}")
-                print(f"[COMPONENT-VIZ] Component {i} cell data keys: {list(comp_mesh.cell_data.keys())}")
-                
-                # Ensure Component_ID scalar exists
-                if "Component_ID" not in comp_mesh.array_names:
-                    comp_mesh["Component_ID"] = np.full(comp_mesh.n_cells, i, dtype=int)
-                
-                # Merge into single mesh
-                if merged_mesh is None:
-                    merged_mesh = comp_mesh
-                else:
-                    merged_mesh = merged_mesh.merge(comp_mesh)
-                
-                print(f"[COMPONENT-VIZ] Loaded component {i}: {comp_mesh.n_cells} cells")
-            
-            if merged_mesh is None:
-                print("[ERROR] No components loaded")
-                self.info_label.setText("Error: Failed to load components")
-                return "FAILED"
-            
-            # Always extract surface for display, but check if we have volume data
-            ugrid = merged_mesh.cast_to_unstructured_grid()
-            
-            # Check if original mesh had volume elements (hex/tet)
-            ugrid = merged_mesh.cast_to_unstructured_grid()
-            
-            print(f"[COMPONENT-VIZ] Merged ugrid: {ugrid.n_cells} cells")
-            if ugrid.n_cells > 0:
-                cell_type = ugrid.GetCellType(0)
-                print(f"[COMPONENT-VIZ] First cell type: {cell_type} (VTK_HEXAHEDRON=12, VTK_TETRA=10, VTK_TRIANGLE=5)")
-                has_volume_cells = cell_type in [vtk.VTK_HEXAHEDRON, vtk.VTK_TETRA]
-                print(f"[COMPONENT-VIZ] has_volume_cells = {has_volume_cells}")
-            else:
-                has_volume_cells = False
-                print("[COMPONENT-VIZ] No cells in ugrid!")
-            
-            # Extract surface
-            import pyvista as pv
-            # Use PassCellData=True to ensure cell scalars transfer
-            surface_filter = ugrid.extract_surface()
-            polydata = surface_filter
-            
-            # PyVista's extract_surface should transfer cell data, but sometimes it doesn't
-            # for volume->surface extraction. Let's check and manually transfer if needed.
-            if "Component_ID" in ugrid.cell_data.keys():
-                if "Component_ID" not in polydata.cell_data.keys():
-                    print("[COMPONENT-VIZ] Component_ID not on surface cells, using volume cell mapping")
-                    # Get the original cell IDs that generated each surface face
-                    # This is complex, so for now just assign based on proximity or use a simpler method
-                    # Fallback: assign Component 0 to all surface cells
-                    import numpy as np
-                    # Better approach: use the first component ID we find
-                    first_comp_id = int(ugrid.cell_data["Component_ID"][0]) if ugrid.n_cells > 0 else 0
-                    polydata.cell_data["Component_ID"] = np.full(polydata.n_cells, first_comp_id, dtype=int)
-                    print(f"[COMPONENT-VIZ] Warning: Assigned Component_ID={first_comp_id} to all surface cells (fallback)")
-                else:
-                    print(f"[COMPONENT-VIZ] Component_ID successfully transferred to {polydata.n_cells} surface cells")
-            
-            # Ensure Component_ID is on surface cells (not just volume cells)
-            # PyVista's extract_surface should transfer cell data automatically, but verify
-            if "Component_ID" not in polydata.array_names and "Component_ID" in ugrid.array_names:
-                print("[COMPONENT-VIZ] Warning: Component_ID not transferred to surface, attempting manual transfer")
-                # Manually transfer Component_ID from volume to surface
-                # This is a fallback - extract_surface should handle this
-                import numpy as np
-                polydata["Component_ID"] = np.zeros(polydata.n_cells, dtype=int)
-            
-            print(f"[COMPONENT-VIZ] Displaying surface with {polydata.GetNumberOfCells()} faces (from {ugrid.n_cells} volume cells, edges={'ON' if has_volume_cells else 'OFF'})" if has_volume_cells else f"[COMPONENT-VIZ] Displaying surface mesh")
-            
-            # Create mapper with categorical colors
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(polydata)
-            mapper.SetScalarModeToUseCellData()
-            mapper.SetScalarRange(0, result.get('num_components', 10))
-            mapper.ScalarVisibilityOn()
-            
-            # Create categorical color lookup table
-            lut = vtk.vtkLookupTable()
-            num_colors = max(10, result.get('num_components', 10))
-            lut.SetNumberOfTableValues(num_colors)
-            lut.Build()
-            
-            # Use distinct colors (tab20 colormap approximation)
-            colors = [
-                (0.12, 0.47, 0.71), (1.0, 0.50, 0.05), (0.17, 0.63, 0.17),
-                (0.84, 0.15, 0.16), (0.58, 0.40, 0.74), (0.55, 0.34, 0.29),
-                (0.89, 0.47, 0.76), (0.50, 0.50, 0.50), (0.74, 0.74, 0.13),
-                (0.09, 0.75, 0.81), (0.68, 0.78, 0.91), (1.0, 0.73, 0.47),
-                (0.60, 0.87, 0.54), (1.0, 0.60, 0.60), (0.79, 0.70, 0.84),
-                (0.78, 0.70, 0.65), (0.98, 0.75, 0.83), (0.78, 0.78, 0.78),
-                (0.86, 0.86, 0.55), (0.62, 0.85, 0.88)
-            ]
-            for i in range(num_colors):
-                color = colors[i % len(colors)]
-                lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
-            
-            mapper.SetLookupTable(lut)
-            
-            # Create actor
-            self.current_actor = vtk.vtkActor()
-            self.current_actor.SetMapper(mapper)
-            
-            # Set initial opacity from parent opacity slider if available
-            current_opacity = self.parent().viz_opacity_spin.value() if hasattr(self.parent(), 'viz_opacity_spin') else 1.0
-            self.current_actor.GetProperty().SetOpacity(current_opacity)
-            
-            # Increase ambient lighting to reduce dark shadows
-            self.current_actor.GetProperty().SetAmbient(0.6)  # High ambient for visibility
-            self.current_actor.GetProperty().SetDiffuse(0.6)
-            self.current_actor.GetProperty().SetSpecular(0.2)
-            
-            # Enable edge visibility to show hex mesh structure
-            if has_volume_cells:
-                self.current_actor.GetProperty().SetEdgeVisibility(True)
-                self.current_actor.GetProperty().SetEdgeColor(0.2, 0.2, 0.2)  # Dark gray edges
-                self.current_actor.GetProperty().SetLineWidth(1.0)
-            
-            # Add to renderer
-            self.renderer.AddActor(self.current_actor)
-            
-            # Create scalar bar for component IDs
-            scalar_bar = vtk.vtkScalarBarActor()
-            scalar_bar.SetLookupTable(lut)
-            scalar_bar.SetTitle("Component ID")
-            scalar_bar.SetNumberOfLabels(min(num_colors, 10))
-            scalar_bar.SetPosition(0.85, 0.1)
-            scalar_bar.SetWidth(0.12)
-            scalar_bar.SetHeight(0.8)
-            self.renderer.AddActor2D(scalar_bar)
-            
-            # Reset camera and render
-            self.renderer.ResetCamera()
-            self.vtk_widget.GetRenderWindow().Render()
-            
-            # Update info
-            self.info_label.setText(f"Components: {result.get('num_components', 0)} | "
-                                   f"Volume Error: {result.get('volume_error_pct', 0):.2f}%")
-            
-            print(f"[COMPONENT-VIZ] Displayed {result.get('num_components')} components successfully")
-            return "SUCCESS"
-            
-        except ImportError:
-            self.info_label.setText("Error: PyVista not installed (pip install pyvista)")
-            print("[ERROR] PyVista not available")
-            return "FAILED"
-        except Exception as e:
-            self.info_label.setText(f"Error loading components: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return "FAILED"
-
-
     def _parse_msh_file(self, filepath: str):
         nodes = {}
         elements = []
@@ -2587,28 +2304,6 @@ except Exception as e:
                                         "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
                                     })
                                 i += 1
-                        # Handle linear hexahedra (8-node)
-                        elif element_type == 5:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        # Handle quadratic hexahedra (20-node) - use first 8 corner nodes
-                        elif element_type == 12:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 13:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
                         # Handle linear triangles (3-node)
                         elif element_type == 2:
                             for _ in range(num_elements):
@@ -2629,28 +2324,6 @@ except Exception as e:
                                         "id": int(data[0]),
                                         "type": "triangle",
                                         "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        # Handle linear quads (4-node)
-                        elif element_type == 3:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
-                                i += 1
-                        # Handle quadratic quads (8-node) - use first 4 corners
-                        elif element_type == 10:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
                                     })
                                 i += 1
                         else:
@@ -2678,13 +2351,6 @@ class ModernMeshGenGUI(QMainWindow):
         self.phase_base_names = {}
         self.active_phase = None
         self.dot_count = 0
-        
-        # Master progress tracking
-        self.phase_weights = {}  # {phase_name: percentage_weight}
-        self.completed_phases = []  # [phase_name, ...]
-        self.phase_completion_times = {}  # {phase_name: seconds}
-        self.mesh_start_time = None
-        self.master_progress = 0.0  # 0-100
 
         # AI chatbox
         self.chatbox = None
@@ -3050,14 +2716,18 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy = QComboBox()
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
+            "Tetrahedral (GPU Delaunay)",
             "Hex Dominant (Subdivision)",
-            "Hex Dominant Testing"
+            "Hex Dominant Testing",
+            "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
         self.mesh_strategy.setToolTip(
-            "Tetrahedral (Delaunay): Robust conformal tet mesh\n"
-            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision (4x elements)\n"
-            "Hex Dominant Testing: Visualize CoACD components with unique colors for debugging"
+            "Tetrahedral (Delaunay): Robust conformal tet mesh (CPU)\n"
+            "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
+            "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
+            "Hex Dominant Testing: Visualize CoACD components\n"
+            "Polyhedral (Dual): Polyhedral cells from tet dual"
         )
         self.mesh_strategy.setStyleSheet("""
             QComboBox {
@@ -3145,34 +2815,6 @@ class ModernMeshGenGUI(QMainWindow):
         self.clip_axis_combo.currentTextChanged.connect(self.on_clip_axis_changed)
         axis_layout.addWidget(self.clip_axis_combo, 1)
         crosssection_layout.addLayout(axis_layout)
-        
-        # Cell type selector
-        cell_mode_layout = QHBoxLayout()
-        cell_mode_label = QLabel("Slice Cells:")
-        cell_mode_label.setStyleSheet("font-size: 11px; color: #495057;")
-        cell_mode_layout.addWidget(cell_mode_label)
-        
-        self.crosssection_cell_combo = QComboBox()
-        self.crosssection_cell_combo.addItems(["Auto", "Tetrahedra", "Hexahedra"])
-        self.crosssection_cell_combo.setCurrentText("Auto")
-        self.crosssection_cell_combo.setEnabled(False)
-        self.crosssection_cell_combo.setStyleSheet("""
-            QComboBox {
-                padding: 4px;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                background-color: white;
-                color: #212529;
-                font-size: 11px;
-            }
-            QComboBox:disabled {
-                background-color: #e9ecef;
-                color: #6c757d;
-            }
-        """)
-        self.crosssection_cell_combo.currentTextChanged.connect(self.on_crosssection_element_mode_changed)
-        cell_mode_layout.addWidget(self.crosssection_cell_combo, 1)
-        crosssection_layout.addLayout(cell_mode_layout)
 
         # Offset slider
         offset_layout = QVBoxLayout()
@@ -3435,92 +3077,50 @@ class ModernMeshGenGUI(QMainWindow):
             }
         """)
         progress_layout = QVBoxLayout()
-        progress_layout.setSpacing(8)
-        
-        # === MASTER PROGRESS BAR ===
-        master_label = QLabel("Overall Progress")
-        master_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-bottom: 2px;")
-        progress_layout.addWidget(master_label)
-        
-        self.master_bar = QProgressBar()
-        self.master_bar.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #0d6efd;
-                border-radius: 4px;
-                text-align: center;
-                background-color: #e7f1ff;
-                height: 24px;
-                font-size: 11px;
-                font-weight: bold;
-                color: #212529;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #0d6efd, stop:1 #0a58ca);
-                border-radius: 2px;
-            }
-        """)
-        self.master_bar.setMaximum(100)
-        self.master_bar.setValue(0)
-        self.master_bar.setFormat("0% - Ready")
-        progress_layout.addWidget(self.master_bar)
-        
-        # === CURRENT PROCESS BAR ===
-        current_label = QLabel("Current Stage")
-        current_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-top: 8px; margin-bottom: 2px;")
-        progress_layout.addWidget(current_label)
-        
-        self.current_process_label = QLabel("Waiting to start...")
-        self.current_process_label.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic; margin-bottom: 2px;")
-        progress_layout.addWidget(self.current_process_label)
-        
-        self.current_process_bar = QProgressBar()
-        self.current_process_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #6c757d;
-                border-radius: 3px;
-                text-align: center;
-                background-color: #f8f9fa;
-                height: 18px;
-                font-size: 9px;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background-color: #6c757d;
-                border-radius: 2px;
-            }
-        """)
-        self.current_process_bar.setMaximum(100)
-        self.current_process_bar.setValue(0)
-        self.current_process_bar.setFormat("%p%")
-        progress_layout.addWidget(self.current_process_bar)
-        
-        # === COMPLETED STAGES LIST ===
-        completed_label = QLabel("Completed Stages")
-        completed_label.setStyleSheet("font-size: 10px; color: #495057; font-weight: 600; margin-top: 8px; margin-bottom: 2px;")
-        progress_layout.addWidget(completed_label)
-        
-        # Scroll area for completed stages
-        self.completed_stages_scroll = QScrollArea()
-        self.completed_stages_scroll.setWidgetResizable(True)
-        self.completed_stages_scroll.setMaximumHeight(120)
-        self.completed_stages_scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #dee2e6;
-                border-radius: 3px;
-                background-color: #f8f9fa;
-            }
-        """)
-        
-        # Widget to hold completed stages
-        self.completed_stages_widget = QWidget()
-        self.completed_stages_layout = QVBoxLayout(self.completed_stages_widget)
-        self.completed_stages_layout.setSpacing(2)
-        self.completed_stages_layout.setContentsMargins(5, 5, 5, 5)
-        self.completed_stages_layout.addStretch()  # Push items to top
-        
-        self.completed_stages_scroll.setWidget(self.completed_stages_widget)
-        progress_layout.addWidget(self.completed_stages_scroll)
+        progress_layout.setSpacing(3)  # More compact spacing
+
+        phases = [
+            ("strategy", "Strategy"),
+            ("1d", "1D"),
+            ("2d", "2D"),
+            ("3d", "3D"),
+            ("opt", "Optimize"),
+            ("netgen", "Netgen"),
+            ("order2", "Order 2"),
+            ("quality", "Quality")
+        ]
+
+        for phase_id, phase_name in phases:
+            phase_label = QLabel(phase_name)
+            phase_label.setStyleSheet("font-size: 8px; color: #495057; font-weight: 600;")
+            progress_layout.addWidget(phase_label)
+
+            # Store label reference and base name for animation
+            self.phase_labels[phase_id] = phase_label
+            self.phase_base_names[phase_id] = phase_name
+
+            phase_bar = QProgressBar()
+            phase_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #dee2e6;
+                    border-radius: 2px;
+                    text-align: center;
+                    background-color: #f8f9fa;
+                    height: 14px;
+                    font-size: 8px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background-color: #0d6efd;
+                    border-radius: 1px;
+                }
+            """)
+            phase_bar.setMaximum(100)
+            phase_bar.setValue(0)
+            phase_bar.setFormat("%p%")  # Only show percentage
+            progress_layout.addWidget(phase_bar)
+
+            self.phase_bars[phase_id] = phase_bar
 
         progress_group.setLayout(progress_layout)
         layout.addWidget(progress_group)
@@ -3732,8 +3332,6 @@ class ModernMeshGenGUI(QMainWindow):
         enabled = bool(state)
         self.clip_axis_combo.setEnabled(enabled)
         self.clip_offset_slider.setEnabled(enabled)
-        if hasattr(self, 'crosssection_cell_combo'):
-            self.crosssection_cell_combo.setEnabled(enabled)
         
         self.viewer.set_clipping(
             enabled=enabled,
@@ -3757,18 +3355,6 @@ class ModernMeshGenGUI(QMainWindow):
             axis=self.clip_axis_combo.currentText(),
             offset=value
         )
-    
-    def on_crosssection_element_mode_changed(self, text: str):
-        """Handle cell type selector for cross-section slices"""
-        if not hasattr(self, 'viewer') or not self.viewer:
-            return
-        mode_map = {
-            "Auto": "auto",
-            "Tetrahedra": "tetrahedra",
-            "Hexahedra": "hexahedra"
-        }
-        mode = mode_map.get(text, "auto")
-        self.viewer.set_cross_section_element_mode(mode)
     def on_ghost_visibility_toggled(self, state):
         """Handle ghost visibility toggle"""
         if hasattr(self, 'above_cut_actor') and self.above_cut_actor:
@@ -3943,79 +3529,6 @@ class ModernMeshGenGUI(QMainWindow):
             else:
                 self.add_log("[!] Could not calculate geometry volume - using default element counts")
 
-
-    def calculate_phase_weights(self, element_target, quality_preset):
-        """
-        Calculate relative time weights for each phase based on element count and quality.
-        
-        Args:
-            element_target: Target number of elements
-            quality_preset: "Draft", "Standard", or "High Fidelity"
-            
-        Returns:
-            dict {phase_name: weight_percentage}
-        """
-        # Base weights (for 10k elements, Standard quality)
-        base_weights = {
-            'cad': 5,
-            'surf': 20,
-            'refine': 15,
-            '3d': 35,
-            'opt': 20,
-            'quality': 5
-        }
-        
-        # Complexity multiplier based on element count
-        if element_target < 5000:
-            complexity = 0.7  # Simpler, faster
-        elif element_target < 50000:
-            complexity = 1.0  # Standard
-        else:
-            complexity = 1.5  # Complex, slower
-        
-        # Quality multipliers
-        quality_mult = {
-            'Draft': 0.6,
-            'Standard': 1.0,
-            'High Fidelity': 1.8
-        }.get(quality_preset, 1.0)
-        
-        # Adjust weights
-        adjusted = base_weights.copy()
-        adjusted['opt'] *= quality_mult  # Optimization scales with quality
-        adjusted['refine'] *= quality_mult  # Refinement scales with quality
-        adjusted['3d'] *= complexity  # 3D meshing scales with element count
-        
-        # Normalize to 100%
-        total = sum(adjusted.values())
-        return {k: (v/total)*100 for k, v in adjusted.items()}
-    
-    def update_eta(self, current_progress):
-        """Update ETA display on master progress bar"""
-        if not self.mesh_start_time or current_progress < 5:
-            return  # Wait for meaningful data
-        
-        import time
-        elapsed = time.time() - self.mesh_start_time
-        
-        if current_progress > 5:
-            estimated_total = elapsed / (current_progress / 100)
-            remaining = estimated_total - elapsed
-            
-            # Format as "Xm Ys" or "Xs"
-            if remaining < 0:
-                eta_text = "Finishing..."
-            elif remaining < 60:
-                eta_text = f"{int(remaining)}s"
-            else:
-                mins = int(remaining // 60)
-                secs = int(remaining % 60)
-                eta_text = f"{mins}m {secs}s"
-            
-            # Update master bar format
-            if hasattr(self, 'master_bar'):
-                self.master_bar.setFormat(f"{int(current_progress)}% - ETA: {eta_text}")
-
     def start_mesh_generation(self):
         if not self.cad_file:
             return
@@ -4027,30 +3540,6 @@ class ModernMeshGenGUI(QMainWindow):
         for bar in self.phase_bars.values():
             bar.setValue(0)
             bar.setStyleSheet(bar.styleSheet().replace("background-color: #198754", "background-color: #0d6efd"))
-        
-        # Initialize master progress tracking
-        import time
-        self.mesh_start_time = time.time()
-        self.completed_phases = []
-        self.phase_completion_times = {}
-        self.master_progress = 0.0
-        
-        # Calculate phase weights based on target elements and quality preset
-        element_target = self.target_elements.value()
-        quality_preset = self.quality_preset.currentText()
-        self.phase_weights = self.calculate_phase_weights(element_target, quality_preset)
-        
-        self.add_log(f"[DEBUG] Phase weights calculated: {self.phase_weights}")
-        self.add_log(f"[DEBUG] Target elements: {element_target}, Quality: {quality_preset}")
-        
-        # Reset master bar if it exists
-        if hasattr(self, 'master_bar'):
-            self.master_bar.setValue(0)
-            self.master_bar.setFormat("0% - Starting...")
-        if hasattr(self, 'current_process_bar'):
-            self.current_process_bar.setValue(0)
-        if hasattr(self, 'current_process_label'):
-            self.current_process_label.setText("Initializing...")
 
         # Collect quality parameters from GUI
         quality_params = {
@@ -4251,152 +3740,17 @@ class ModernMeshGenGUI(QMainWindow):
         self.add_log("Console output copied to clipboard!")
 
     def update_progress(self, phase: str, percentage: int):
-        """Update progress bars and track master progress"""
-        import time
-        
-        # Map phase names to standardized names (map all possible phase IDs)
-        phase_map = {
-            'strategy': 'cad', 'CAD': 'cad', 'cad_preprocessing': 'cad', 'cad': 'cad',
-            '1d': 'surf', '2d': 'surf', 'surface_meshing': 'surf', 'surf': 'surf',
-            'refine': 'refine', 'refinement': 'refine',
-            '3d': '3d', 'meshing_3d': '3d',
-            'opt': 'opt', 'netgen': 'opt', 'optimization': 'opt',
-            'order2': 'quality', 'quality': 'quality', 'quality_assessment': 'quality',
-            # Additional mappings for complete coverage
-            'complete': 'quality',  # Final phase
-            'error': 'quality'  # Map errors to last phase
-        }
-        
-        normalized_phase = phase_map.get(phase, phase)
-        
-        # Update current process bar and color
-        self.current_process_bar.setValue(percentage)
-        
-        # Turn current bar green when complete
-        if percentage >= 100:
-            self.current_process_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #198754;
-                    border-radius: 3px;
-                    text-align: center;
-                    background-color: #d1e7dd;
-                    height: 18px;
-                    font-size: 9px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: #198754;
-                    border-radius: 2px;
-                }
-            """)
-        else:
-            # Reset to gray if not complete
-            self.current_process_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #6c757d;
-                    border-radius: 3px;
-                    text-align: center;
-                    background-color: #f8f9fa;
-                    height: 18px;
-                    font-size: 9px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: #6c757d;
-                    border-radius: 2px;
-                }
-            """)
-        
-        # Update current process label
-        phase_display_names = {
-            'cad': 'CAD Preprocessing',
-            'surf': 'Surface Meshing',
-            'refine': 'Refinement',
-            '3d': '3D Meshing',
-            'opt': 'Optimization',
-            'quality': 'Quality Assessment'
-        }
-        display_name = phase_display_names.get(normalized_phase, phase.upper())
-        self.current_process_label.setText(f"{display_name}")
-        
-        # Calculate master progress
-        if self.phase_weights and normalized_phase in self.phase_weights:
-            phase_weight = self.phase_weights[normalized_phase]
-            phase_contribution = (percentage / 100.0) * phase_weight
-            
-            # Sum completed phases
-            completed_weight = sum(
-                self.phase_weights.get(p, 0) for p in self.completed_phases 
-                if p != normalized_phase
-            )
-            
-            # Master progress = completed + current phase contribution
-            self.master_progress = completed_weight + phase_contribution
-            self.master_bar.setValue(int(self.master_progress))
-            
-            # Update ETA
-            self.update_eta(self.master_progress)
-        
-        # Force master bar to 100% if we receive a 'complete' phase
-        if phase == 'complete' or (percentage >= 100 and normalized_phase == 'quality'):
-            self.master_progress = 100.0
-            self.master_bar.setValue(100)
-            self.master_bar.setFormat("100% - Complete!")
-        
-        # Mark phase complete if 100%
-        if percentage >= 100 and normalized_phase not in self.completed_phases:
-            self.completed_phases.append(normalized_phase)
-            
-            # Calculate time taken for this phase
-            if self.mesh_start_time:
-                phase_time = time.time() - self.mesh_start_time
-                # Estimate time for this phase based on weight
-                if normalized_phase in self.phase_weights and self.master_progress > 0:
-                    phase_weight = self.phase_weights[normalized_phase]
-                    phase_duration = (phase_weight / 100.0) * (phase_time / (self.master_progress / 100.0))
-                else:
-                    phase_duration = 0
-                
-                self.phase_completion_times[normalized_phase] = phase_duration
-                self.add_completed_stage_to_ui(display_name, phase_duration)
-        
-        # Update old phase bars if they exist (backwards compatibility)
+        """Update progress bar and animate phase label"""
         if phase in self.phase_bars:
             bar = self.phase_bars[phase]
             bar.setValue(percentage)
-            
+
             # Start animation if this is a new active phase
             if self.active_phase != phase:
                 self.active_phase = phase
                 self.dot_count = 0
                 if not self.animation_timer.isActive():
                     self.animation_timer.start()
-    
-    def add_completed_stage_to_ui(self, stage_name: str, duration: float):
-        """Add a completed stage to the UI list"""
-        # Format duration
-        if duration < 1:
-            time_str = "< 1s"
-        elif duration < 60:
-            time_str = f"{int(duration)}s"
-        else:
-            mins = int(duration // 60)
-            secs = int(duration % 60)
-            time_str = f"{mins}m {secs}s"
-        
-        # Create stage label with checkmark
-        stage_label = QLabel(f"✓ {stage_name} ({time_str})")
-        stage_label.setStyleSheet("""
-            QLabel {
-                font-size: 9px;
-                color: #198754;
-                font-weight: 600;
-                padding: 2px;
-            }
-        """)
-        
-        # Insert at the top (before the stretch)
-        self.completed_stages_layout.insertWidget(0, stage_label)
 
     def mark_phase_complete(self, phase: str):
         """Turn bar green when complete and reset label"""
@@ -4487,15 +3841,6 @@ class ModernMeshGenGUI(QMainWindow):
                 self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
                 load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
                 self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
-            
-            # Check for hex testing component visualization
-            elif result.get('visualization_mode') == 'components' and result.get('component_files'):
-                # Switch to quality visualization for the final result
-                result['visualization_mode'] = 'quality'
-                self.add_log(f"[DEBUG] Loading component visualization with {result.get('num_components')} parts (Quality Mode)...")
-                load_result = self.viewer.load_component_visualization(result)
-                self.add_log(f"[DEBUG] Component visualization loaded")
-
 
                 # Check if colors were applied
                 if self.viewer.current_actor and result.get('per_element_quality'):
@@ -4529,9 +3874,8 @@ class ModernMeshGenGUI(QMainWindow):
 
                 # Update chatbox with mesh data, CAD file, and config
                 if self.chatbox:
-                    mesh_name = Path(self.mesh_file).name if self.mesh_file else "Component Visualization"
                     mesh_data = {
-                        'file_name': mesh_name,
+                        'file_name': Path(self.mesh_file).name,
                         'total_elements': result.get('total_elements', 0),
                         'total_nodes': result.get('total_nodes', 0),
                         **metrics

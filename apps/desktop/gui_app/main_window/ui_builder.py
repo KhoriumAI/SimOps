@@ -280,8 +280,11 @@ class UIBuilder:
         h.addWidget(self._create_label("Mesh Strategy:"))
         self.window.mesh_strategy = QComboBox()
         self.window.mesh_strategy.addItems([
-            "Tetrahedral (Delaunay)", "Hex Dominant (Subdivision)", 
-            "Hex Dominant Testing", "Polyhedral (Dual)"
+            "Tetrahedral (Delaunay)", 
+            "Tetrahedral (GPU Delaunay)", 
+            "Hex Dominant (Subdivision)", 
+            "Hex Dominant Testing", 
+            "Polyhedral (Dual)"
         ])
         self.window.mesh_strategy.setCurrentIndex(0)
         self.window.mesh_strategy.setStyleSheet(self._get_combo_style())
