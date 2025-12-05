@@ -475,6 +475,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             # Update target elements if present (could be used by generator)
             if 'target_elements' in quality_params:
                 config.target_elements = quality_params['target_elements']
+            
+            # Update ansys_mode for CFD/FEA export
+            if 'ansys_mode' in quality_params:
+                config.mesh_params.ansys_mode = quality_params['ansys_mode']
+                print(f"[DEBUG] Set ansys_mode to: {quality_params['ansys_mode']}")
 
         generator = ExhaustiveMeshGenerator(config)
 

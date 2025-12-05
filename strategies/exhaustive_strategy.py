@@ -195,14 +195,49 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             strategy_names.append("tetgen")
         if PYMESH_AVAILABLE:
             strategy_names.append("pymesh")
+        
+        # ANSYS FLUENT COMPATIBILITY: Filter out hex/poly strategies
+        # Fluent export only supports tetrahedral meshes
+        ansys_mode = getattr(self.config.mesh_params, 'ansys_mode', 'None')
+        if ansys_mode and ansys_mode != "None":
+            # List of strategies that produce non-tetrahedral elements
+            hex_poly_strategies = [
+                "hybrid_hex_tet",
+                "recombined_to_hex",
+                "transfinite_structured",
+                "subdivide_and_mesh",  # Produces hex elements
+                "resurfacing_reconstruction",  # Might produce non-tet
+            ]
+            
+            original_count = len(strategy_names)
+            strategy_names = [s for s in strategy_names if s not in hex_poly_strategies]
+            filtered_count = original_count - len(strategy_names)
+            
+            if filtered_count > 0:
+                self.log_message(f"[ANSYS] Filtered out {filtered_count} hex/poly strategies (Fluent requires tets)")
+                self.log_message(f"[ANSYS] Remaining strategies: {len(strategy_names)}")
 
         # Determine number of workers
-        # CRITICAL: Cap at 4 workers to prevent RAM exhaustion and "Out of Memory" crashes
-        # Running 14+ instances of Gmsh concurrently is unstable on Windows
+        # Use up to 65% of available cores for parallel meshing
+        # Cap at 6 workers to prevent Windows pool shutdown hangs
+        # (8 workers caused deadlocks during graceful termination)
         total_cores = multiprocessing.cpu_count()
-        num_workers = max(1, min(total_cores - 2, 4))
+        max_workers = max(1, min(int(total_cores * 0.65), 6))
         
-        self.log_message(f"Starting parallel pool with {num_workers} workers (Capped at 4 for stability)")
+        # Allow override via environment variable for advanced tuning
+        if 'MESH_MAX_WORKERS' in os.environ:
+            try:
+                override = int(os.environ['MESH_MAX_WORKERS'])
+                if 1 <= override <= total_cores:
+                    max_workers = override
+                    self.log_message(f"Using MESH_MAX_WORKERS override: {max_workers}")
+            except ValueError:
+                pass
+        
+        num_workers = max_workers
+        
+        self.log_message(f"Starting parallel pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
+        self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
         best_mesh_path = None
         best_score = float('inf')

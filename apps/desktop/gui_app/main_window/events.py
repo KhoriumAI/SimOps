@@ -175,6 +175,10 @@ class EventHandler:
         clipboard.setText(self.window.console.toPlainText())
         self.window.add_log("[INFO] Console output copied to clipboard")
 
+    def on_worker_count_changed(self, value):
+        """Handle worker count slider change"""
+        self.window.worker_value_label.setText(f"{value} workers")
+    
     def toggle_hex_visualization(self):
         # Placeholder for secret hex mode
         pass

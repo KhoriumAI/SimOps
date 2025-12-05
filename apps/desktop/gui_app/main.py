@@ -484,6 +484,58 @@ class ModernMeshGenGUI(QMainWindow):
         ansys_layout.addWidget(self.ansys_mode, 1)
         quality_layout.addLayout(ansys_layout)
 
+        # Worker Count Slider
+        from multiprocessing import cpu_count
+        total_cores = cpu_count()
+        default_workers = max(1, min(int(total_cores * 0.65), 6))
+        
+        worker_sublayout = QVBoxLayout()
+        worker_sublayout.setSpacing(5)
+        
+        worker_header = QHBoxLayout()
+        worker_label = QLabel("Parallel Workers:")
+        worker_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        worker_header.addWidget(worker_label)
+        
+        self.worker_value_label = QLabel(f"{default_workers} workers")
+        self.worker_value_label.setStyleSheet("font-size: 11px; color: #0d6efd; font-weight: bold;")
+        worker_header.addStretch()
+        worker_header.addWidget(self.worker_value_label)
+        worker_sublayout.addLayout(worker_header)
+        
+        self.worker_count_slider = QSlider(Qt.Horizontal)
+        self.worker_count_slider.setRange(1, min(total_cores, 32))
+        self.worker_count_slider.setValue(default_workers)
+        self.worker_count_slider.setTickPosition(QSlider.TicksBelow)
+        self.worker_count_slider.setTickInterval(2)
+        self.worker_count_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #dee2e6;
+                height: 6px;
+                background: #e9ecef;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #0d6efd;
+                border: 1px solid #0b5ed7;
+                width: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #0b5ed7;
+            }
+        """)
+        self.worker_count_slider.valueChanged.connect(self.on_worker_count_changed)
+        worker_sublayout.addWidget(self.worker_count_slider)
+        
+        worker_info = QLabel(f"1 worker (serial) ← → {min(total_cores, 32)} workers (max parallel)")
+        worker_info.setStyleSheet("font-size: 9px; color: #6c757d;")
+        worker_info.setAlignment(Qt.AlignCenter)
+        worker_sublayout.addWidget(worker_info)
+        
+        quality_layout.addLayout(worker_sublayout)
+
         quality_group.setLayout(quality_layout)
         layout.addWidget(quality_group)
 
@@ -1210,6 +1262,10 @@ class ModernMeshGenGUI(QMainWindow):
             self.target_elements.setValue(values["target"])
             self.max_size.setValue(values["max"])
 
+    def on_worker_count_changed(self, value):
+        """Handle worker count slider change"""
+        self.worker_value_label.setText(f"{value} workers")
+
     def on_crosssection_toggled(self, state):
         """Handle cross-section checkbox toggle"""
         enabled = bool(state)
@@ -1551,7 +1607,8 @@ class ModernMeshGenGUI(QMainWindow):
             "curvature_adaptive": self.curvature_adaptive.isChecked(),
             "mesh_strategy": self.mesh_strategy.currentText(),
             "save_stl": self.save_stl.isChecked(),  # Export intermediate STL files
-            "ansys_mode": self.ansys_mode.currentText()  # ANSYS export mode: None, CFD, or FEA
+            "ansys_mode": self.ansys_mode.currentText(),  # ANSYS export mode
+            "worker_count": self.worker_count_slider.value()  # User-selected worker count
         }
 
         # Add painted regions if any exist

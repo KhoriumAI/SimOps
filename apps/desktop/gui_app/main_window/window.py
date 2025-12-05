@@ -109,6 +109,7 @@ class ModernMeshGenGUI(QMainWindow):
     def on_viz_metric_changed(self, t): self.events.on_viz_metric_changed(t)
     def on_viz_opacity_changed(self, v): self.events.on_viz_opacity_changed(v)
     def copy_console_to_clipboard(self): self.events.copy_console_to_clipboard()
+    def on_worker_count_changed(self, v): self.events.on_worker_count_changed(v)
     def toggle_hex_visualization(self): self.events.toggle_hex_visualization()
 
     def add_log(self, message):

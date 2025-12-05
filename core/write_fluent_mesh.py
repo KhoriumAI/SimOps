@@ -103,38 +103,39 @@ def write_fluent_msh(filename, points, cells):
         f.write("(2 3)\n")
         
         # Section 10: Nodes
-        f.write(f"(10 (0 1 {n_points:x} 0 3))\n") # Declaration
-        f.write(f"(10 (1 1 {n_points:x} 1 3)(\n") # Data
+        # CRITICAL FIX: Use decimal formatting (no :x) for Fluent compatibility
+        f.write(f"(10 (0 1 {n_points} 0 3))\n") # Declaration
+        f.write(f"(10 (1 1 {n_points} 1 3)(\n") # Data
         for p in points:
             f.write(f"{p[0]:.10f} {p[1]:.10f} {p[2]:.10f}\n")
         f.write("))\n")
         
         # Section 12: Cells (Zone 2 = Fluid)
         # Element Type 2 = TETRAHEDRON (Fixed from 4)
-        f.write(f"(12 (0 1 {n_tets:x} 0 0))\n") # Declaration
-        f.write(f"(12 (2 1 {n_tets:x} 1 2))\n") # Data (Mixed/Tet=2)
+        f.write(f"(12 (0 1 {n_tets} 0 0))\n") # Declaration
+        f.write(f"(12 (2 1 {n_tets} 1 2))\n") # Data (Mixed/Tet=2)
 
         # Section 13: Faces
-        f.write(f"(13 (0 1 {n_total_faces:x} 0 0))\n") # Declaration
+        f.write(f"(13 (0 1 {n_total_faces} 0 0))\n") # Declaration
 
         # Zone 3: Interior Faces (Type 2 = Linear Triangle)
         if n_interior > 0:
             start = 1
             end = n_interior
-            f.write(f"(13 (3 {start:x} {end:x} 2 2)(\n")
+            f.write(f"(13 (3 {start} {end} 2 2)(\n")
             for nodes, c0, c1 in interior_faces:
                 n0, n1, n2 = [n+1 for n in nodes]
-                f.write(f"{n0:x} {n1:x} {n2:x} {c0:x} {c1:x}\n")
+                f.write(f"{n0} {n1} {n2} {c0} {c1}\n")
             f.write("))\n")
         
         # Zone 4: Boundary Faces (Type 3 = Wall)
         if n_boundary > 0:
             start = n_interior + 1
             end = n_total_faces
-            f.write(f"(13 (4 {start:x} {end:x} 3 2)(\n")
+            f.write(f"(13 (4 {start} {end} 3 2)(\n")
             for nodes, c0, c1 in boundary_faces:
                 n0, n1, n2 = [n+1 for n in nodes]
-                f.write(f"{n0:x} {n1:x} {n2:x} {c0:x} {c1:x}\n")
+                f.write(f"{n0} {n1} {n2} {c0} {c1}\n")
             f.write("))\n")
 
     print(f"[FluentWriter] Success! Saved {filename}")

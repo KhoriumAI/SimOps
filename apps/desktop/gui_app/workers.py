@@ -232,12 +232,29 @@ class MeshWorker:
             # Start subprocess with PIPE
             self.signals.log.emit("[DEBUG] Starting subprocess with PIPE...")
             
+            # CRITICAL FIX: Pass PYTHONPATH to subprocess
+            # macOS/Linux spawn method needs explicit path to find modules
+            env = os.environ.copy()
+            python_path = env.get("PYTHONPATH", "")
+            if python_path:
+                env["PYTHONPATH"] = f"{project_root}{os.pathsep}{python_path}"
+            else:
+                env["PYTHONPATH"] = str(project_root)
+                
+            # Set worker count from GUI slider
+            if quality_params and "worker_count" in quality_params:
+                env["MESH_MAX_WORKERS"] = str(quality_params["worker_count"])
+                self.signals.log.emit(f"[DEBUG] Set MESH_MAX_WORKERS={quality_params['worker_count']}")
+                
+            self.signals.log.emit(f"[DEBUG] PYTHONPATH set to: {env['PYTHONPATH']}")
+
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1  # Line buffered
+                bufsize=1,  # Line buffered
+                env=env     # Pass environment with PYTHONPATH
             )
             self.signals.log.emit(f"[DEBUG] Subprocess started with PID: {self.process.pid}")
 
