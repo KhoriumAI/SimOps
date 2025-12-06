@@ -24,9 +24,213 @@ from strategies.hex_dominant_strategy import (
     HighFidelityDiscretization,
     ConvexDecomposition
 )
+from strategies.conformal_hex_glue import generate_conformal_hex_mesh
 from core.config import Config
 import tempfile
 import gmsh
+
+
+def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Generate conformal hex mesh using topology-first gluing approach.
+    
+    Pipeline:
+    1. Convert STEP to STL
+    2. CoACD decomposition
+    3. Build adjacency graph
+    4. Generate conformal hex mesh
+    5. Validate and save
+    """
+    print("[CONFORMAL-HEX] Starting conformal hex mesh generation...")
+    
+    try:
+        import trimesh
+        
+        # Step 1: Convert STEP to STL
+        print("[CONFORMAL-HEX] Step 1: Converting STEP to STL...")
+        discretizer = HighFidelityDiscretization(verbose=True)
+        
+        temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
+        success = discretizer.convert_step_to_stl(
+            cad_file, temp_stl,
+            deviation=0.01,
+            min_size=0.5,
+            max_size=10.0
+        )
+        
+        if not success:
+            return {'success': False, 'message': 'Failed to convert STEP to STL'}
+        
+        # Step 2: CoACD decomposition
+        print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...")
+        decomposer = ConvexDecomposition(verbose=True)
+        threshold = quality_params.get('coacd_threshold', 0.05) if quality_params else 0.05
+        parts, stats = decomposer.decompose_mesh(temp_stl, threshold=threshold)
+        
+        if len(parts) == 0:
+            return {'success': False, 'message': 'CoACD produced no parts'}
+        
+        print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)))
+        
+        # Step 3: Generate conformal hex mesh
+        print("[CONFORMAL-HEX] Step 3: Generating conformal hex mesh...")
+        divisions = quality_params.get('hex_divisions', 4) if quality_params else 4
+        epsilon = quality_params.get('interface_epsilon', 0.5) if quality_params else 0.5
+        
+        result = generate_conformal_hex_mesh(
+            parts, 
+            divisions=divisions,
+            epsilon=epsilon,
+            reference_stl=temp_stl,
+            verbose=True
+        )
+        
+        if not result['success']:
+            return {'success': False, 'message': result.get('error', 'Hex generation failed')}
+        
+        vertices = result['vertices']
+        hexes = result['hexes']
+        
+        print("[CONFORMAL-HEX] Generated {} hexes with {} vertices".format(
+            len(hexes), len(vertices)))
+        
+        # Step 4: Save mesh (Gmsh 2.2 ASCII format for GUI compatibility)
+        print("[CONFORMAL-HEX] Step 4: Saving mesh...")
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        output_file = str(mesh_folder / "{}_conformal_hex.msh".format(mesh_name))
+        
+        # Extract boundary faces for visualization (GUI renders surface elements)
+        # Verify watertightness function already computes face counts
+        # We need to extract faces with count == 1
+        
+        # Define hex faces (local indices)
+        hex_face_indices = [
+            (0, 1, 2, 3), (4, 7, 6, 5), # Bottom, Top
+            (0, 4, 5, 1), (1, 5, 6, 2), # Front, Right
+            (2, 6, 7, 3), (3, 7, 4, 0)  # Back, Left
+        ]
+        
+        face_counts = {}
+        # Store (hex_idx, local_face_idx) for each face to retrieve it later
+        # Also store parent hex index for quality mapping
+        face_to_elem = {} 
+        face_to_hex_idx = {}
+        
+        for h_idx, hex_ids in enumerate(hexes):
+            for lf_idx, local_face in enumerate(hex_face_indices):
+                face_nodes = tuple(sorted([hex_ids[i] for i in local_face]))
+                if face_nodes in face_counts:
+                    face_counts[face_nodes] += 1
+                else:
+                    face_counts[face_nodes] = 1
+                    # Store indices to reconstruct ordered face later
+                    face_to_elem[face_nodes] = [hex_ids[i] for i in local_face]
+                    face_to_hex_idx[face_nodes] = h_idx
+
+        boundary_faces = []
+        boundary_face_parents = []
+        for face_nodes, count in face_counts.items():
+            if count == 1:
+                boundary_faces.append(face_to_elem[face_nodes])
+                boundary_face_parents.append(face_to_hex_idx[face_nodes])
+        
+        print("[CONFORMAL-HEX] Extracted {} boundary quads for visualization".format(len(boundary_faces)))
+
+        with open(output_file, 'w') as f:
+            f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
+            f.write("$Nodes\n")
+            f.write("{}\n".format(len(vertices)))
+            for i, v in enumerate(vertices):
+                f.write("{} {} {} {}\n".format(i + 1, v[0], v[1], v[2]))
+            f.write("$EndNodes\n")
+            
+            f.write("$Elements\n")
+            # Total elements = hexes + boundary quads
+            f.write("{}\n".format(len(hexes) + len(boundary_faces)))
+            
+            elem_id = 1
+            
+            # Write Hexes (Type 5)
+            for h in hexes:
+                nodes = [n + 1 for n in h]
+                f.write("{} 5 2 1 1 {} {} {} {} {} {} {} {}\n".format(
+                    elem_id, *nodes))
+                elem_id += 1
+                
+            # Write Boundary Quads (Type 3)
+            # Store start ID for quads to map quality later
+            quad_start_id = elem_id
+            for q in boundary_faces:
+                nodes = [n + 1 for n in q]
+                f.write("{} 3 2 2 2 {} {} {} {}\n".format(
+                    elem_id, *nodes))
+                elem_id += 1
+                
+            f.write("$EndElements\n")
+        
+        print("[CONFORMAL-HEX] Saved to {}".format(output_file))
+        
+        # Build response
+        validation = result['validation']
+        
+        # Map quality to element IDs
+        per_element_quality = {}
+        if 'per_element_quality' in validation['jacobian']:
+            qualities = validation['jacobian']['per_element_quality']
+            
+            # 1. Map for Hexes (IDs 1..N)
+            for i, q in enumerate(qualities):
+                elem_id = str(i + 1)
+                per_element_quality[elem_id] = float(q)
+                
+            # 2. Map for Boundary Quads (IDs N+1..M)
+            # Use parent hex quality
+            for i, p_idx in enumerate(boundary_face_parents):
+                elem_id = str(quad_start_id + i)
+                if p_idx < len(qualities):
+                    per_element_quality[elem_id] = float(qualities[p_idx])
+        
+        return {
+            'success': True,
+            'output_file': str(Path(output_file).absolute()),
+            'strategy': 'conformal_hex',
+            'message': 'Conformal Hex: {} hexes from {} parts'.format(len(hexes), len(parts)),
+            'total_elements': len(hexes),
+            'total_nodes': len(vertices),
+            'per_element_quality': per_element_quality,
+            'metrics': {
+                'num_hexes': len(hexes),
+                'num_parts': len(parts),
+                'num_interfaces': result['adjacency_stats'].get('num_interfaces', 0),
+                'volume_error_pct': stats.get('volume_error_pct', 0)
+            },
+            'quality_metrics': {
+                'min_quality': float(validation['jacobian'].get('min_jacobian', 0)),
+                'avg_quality': float(validation['jacobian'].get('mean_jacobian', 0)),
+                'jacobian_min': float(validation['jacobian'].get('min_jacobian', 0)),
+                'jacobian_avg': float(validation['jacobian'].get('mean_jacobian', 0))
+            },
+            'validation': {
+                'interface_pass': bool(validation['interface']['pass']),
+                'manifold_pass': bool(validation['manifold']['pass']),
+                'jacobian_pass': bool(validation['jacobian']['pass']),
+                'boundary_faces': int(validation['manifold'].get('boundary_faces', 0)),
+                'internal_faces': int(validation['manifold'].get('internal_faces', 0)),
+                'non_manifold_errors': int(validation['manifold'].get('non_manifold_errors', 0)),
+                'min_jacobian': float(validation['jacobian'].get('min_jacobian', 0)),
+                'mean_jacobian': float(validation['jacobian'].get('mean_jacobian', 0))
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'message': 'Conformal hex meshing failed: {}'.format(str(e))
+        }
 
 
 def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -444,10 +648,16 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         Dict with success status and results
     """
     try:
-        # Check if hex dominant strategy is requested
+        # Check mesh strategy - more specific checks first
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
+        # Hex Dominant Testing = Conformal hex with validation
+        if 'Hex Dominant Testing' in mesh_strategy:
+            print("[DEBUG] Hex Dominant Testing detected - using conformal hex pipeline")
+            return generate_conformal_hex_test(cad_file, output_dir, quality_params)
+        
+        # Regular Hex Dominant (subdivision approach)
         if 'Hex Dominant' in mesh_strategy:
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)

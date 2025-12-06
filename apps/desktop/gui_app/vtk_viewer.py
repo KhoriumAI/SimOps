@@ -2296,133 +2296,147 @@ except Exception as e:
         elements = []
 
         with open(filepath, 'r') as f:
-            lines = f.readlines()
+            lines = [l.strip() for l in f.readlines()]
+
+        # Detect version
+        version = 4.1 
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line == "$MeshFormat":
+                i += 1
+                if i < len(lines):
+                    parts = lines[i].split()
+                    if len(parts) >= 1:
+                        try:
+                            version = float(parts[0])
+                        except:
+                            pass
+                break
+            i += 1
+            
+        print(f"[MESH_LOADER DEBUG] Detected Gmsh version: {version}")
 
         i = 0
         while i < len(lines):
-            line = lines[i].strip()
+            line = lines[i]
 
             if line == "$Nodes":
-                i += 2
-                while lines[i].strip() != "$EndNodes":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        num_nodes = int(parts[3])
+                i += 1
+                if i >= len(lines): break
+                
+                if version < 3.0:
+                    # Gmsh 2.2
+                    try:
+                        num_nodes = int(lines[i])
                         i += 1
-                        node_tags = []
                         for _ in range(num_nodes):
-                            node_tags.append(int(lines[i].strip()))
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            if len(parts) >= 4:
+                                nid = int(parts[0])
+                                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                                nodes[nid] = [x, y, z]
                             i += 1
-                        for tag in node_tags:
-                            coords = lines[i].strip().split()
-                            nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                        if i < len(lines) and lines[i] == "$EndNodes":
                             i += 1
-                    else:
-                        i += 1
-
-            elif line == "$Elements":
-                i += 2
-                while lines[i].strip() != "$EndElements":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        element_type = int(parts[2])
-                        num_elements = int(parts[3])
-                        i += 1
-
-                        # Handle linear tetrahedra (4-node)
-                        if element_type == 4:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "tetrahedron",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                        continue
+                    except ValueError:
+                         i += 1
+                         continue
+                else:
+                    # Gmsh 4.1
+                    i += 1 
+                    while i < len(lines) and lines[i] != "$EndNodes":
+                        parts = lines[i].split()
+                        if len(parts) == 4:
+                            try:
+                                num_nodes_in_block = int(parts[3])
                                 i += 1
-                        # Handle quadratic tetrahedra (10-node) - use first 4 corner nodes
-                        elif element_type == 11:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 11:  # 10 nodes + element tag
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "tetrahedron",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
-                                i += 1
-                        # Handle linear hexahedra (8-node)
-                        elif element_type == 5:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        # Handle quadratic hexahedra (20-node) - use first 8 corner nodes
-                        elif element_type == 12:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 13:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        # Handle linear triangles (3-node)
-                        elif element_type == 2:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 4:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "triangle",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        # Handle quadratic triangles (6-node) - use first 3 corner nodes
-                        elif element_type == 9:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 7:  # 6 nodes + element tag
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "triangle",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        # Handle linear quads (4-node)
-                        elif element_type == 3:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
-                                i += 1
-                        # Handle quadratic quads (8-node) - use first 4 corners
-                        elif element_type == 10:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                                node_tags = []
+                                for _ in range(num_nodes_in_block):
+                                    node_tags.append(int(lines[i]))
+                                    i += 1
+                                for tag in node_tags:
+                                    coords = lines[i].split()
+                                    nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                                    i += 1
+                            except ValueError:
                                 i += 1
                         else:
-                            # Skip other element types (edges, points, etc.)
-                            for _ in range(num_elements):
-                                i += 1
-                    else:
+                            i += 1
+                    if i < len(lines) and lines[i] == "$EndNodes":
                         i += 1
+                    continue
+
+            elif line == "$Elements":
+                i += 1
+                if i >= len(lines): break
+                
+                if version < 3.0:
+                    # Gmsh 2.2
+                    try:
+                        num_elements = int(lines[i])
+                        i += 1
+                        for _ in range(num_elements):
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            if len(parts) >= 3:
+                                eid = int(parts[0])
+                                etype = int(parts[1])
+                                num_tags = int(parts[2])
+                                node_start_idx = 3 + num_tags
+                                node_ids = [int(n) for n in parts[node_start_idx:]]
+                                
+                                elem_data = None
+                                if etype == 2: elem_data = {"id": eid, "type": "triangle", "nodes": node_ids}
+                                elif etype == 3: elem_data = {"id": eid, "type": "quadrilateral", "nodes": node_ids}
+                                elif etype == 4: elem_data = {"id": eid, "type": "tetrahedron", "nodes": node_ids}
+                                elif etype == 5: elem_data = {"id": eid, "type": "hexahedron", "nodes": node_ids}
+                                
+                                if elem_data:
+                                    elements.append(elem_data)
+                            i += 1
+                        if i < len(lines) and lines[i] == "$EndElements":
+                             i += 1
+                        continue
+                    except ValueError:
+                         i += 1
+                         continue
+                else:
+                    # Gmsh 4.1
+                    i += 1 
+                    while i < len(lines) and lines[i] != "$EndElements":
+                        parts = lines[i].split()
+                        if len(parts) == 4:
+                            element_type = int(parts[2])
+                            num_elements_in_block = int(parts[3])
+                            i += 1
+                            
+                            type_str = None
+                            expected_nodes = 0
+                            if element_type == 2: type_str = "triangle"; expected_nodes = 3
+                            elif element_type == 3: type_str = "quadrilateral"; expected_nodes = 4
+                            elif element_type == 4: type_str = "tetrahedron"; expected_nodes = 4
+                            elif element_type == 5: type_str = "hexahedron"; expected_nodes = 8
+                            elif element_type == 11: type_str = "tetrahedron"; expected_nodes = 4
+                                
+                            if type_str:
+                                for _ in range(num_elements_in_block):
+                                    data = lines[i].split()
+                                    if len(data) >= 1 + expected_nodes:
+                                        eid = int(data[0])
+                                        enodes = [int(x) for x in data[1:1+expected_nodes]]
+                                        elements.append({"id": eid, "type": type_str, "nodes": enodes})
+                                    i += 1
+                            else:
+                                i += num_elements_in_block
+                        else:
+                            i += 1
+                    if i < len(lines) and lines[i] == "$EndElements":
+                        i += 1
+                    continue
+
             else:
                 i += 1
 

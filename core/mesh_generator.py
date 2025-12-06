@@ -173,40 +173,79 @@ class BaseMeshGenerator(ABC):
                             self.log_message(f"[ANSYS] Writing Gmsh intermediate: {gmsh_temp}")
                             gmsh.write(gmsh_temp)
                             
-                            # Convert to native Fluent format using custom writer
+                            # Convert to pure Fluent-compatible mesh
+                            # FIX: Fluent requires surface elements ("skin") to define the domain.
+                            # Pure volume meshes cause "Null Domain Pointer" crashes.
+                            # Convert to Fluent-compatible format
+                            # FIX: Fluent 2025 fails with standard .msh files ("Null Domain Pointer").
+                            # SOLUTION: Use Nastran (.bdf) format which works robustly.
+                            # Also use createTopology() to ensure graph connectivity is perfect.
+                            self.log_message("[ANSYS] Preparing Fluent-compatible mesh (Nastran BDF)...")
+                            
                             try:
-                                from core.write_fluent_mesh import write_fluent_msh
-                                import meshio
+                                # Save current model to temp file
+                                gmsh_temp = str(Path(output_file).with_suffix('')) + "_temp.msh"
+                                gmsh.write(gmsh_temp)
                                 
-                                ansys_file = str(Path(output_file).with_suffix('')) + "_fluent.msh"
-                                self.log_message(f"[ANSYS] Converting to native Fluent format (custom writer)...")
+                                # Use a fresh Gmsh session for clean topology rebuilding
+                                import gmsh as gmsh_export
+                                gmsh_export.initialize()
+                                gmsh_export.open(gmsh_temp)
                                 
-                                # Read with meshio, write with custom writer
-                                mesh = meshio.read(gmsh_temp)
-                                success = write_fluent_msh(ansys_file, mesh.points, mesh.cells)
+                                # 1. Clear Groups
+                                gmsh_export.model.removePhysicalGroups(gmsh_export.model.getPhysicalGroups())
                                 
-                                if success:
-                                    self.log_message(f"[ANSYS] ✓ Native Fluent export: {ansys_file}")
-                                    # Clean up temp file
-                                    try:
-                                        os.remove(gmsh_temp)
-                                    except:
-                                        pass
+                                # 2. Linearize (Tet10 -> Tet4)
+                                self.log_message("[ANSYS] Linearizing mesh elements...")
+                                gmsh_export.model.mesh.setOrder(1)
+                                
+                                # 3. Rebuild Topology (The Robust Fix)
+                                # This automatically handles skin extraction, node sharing, and connectivity
+                                self.log_message("[ANSYS] Rebuilding topology (createTopology)...")
+                                gmsh_export.model.mesh.createTopology()
+                                
+                                # 4. Assign Standard CFD Groups
+                                # Volume -> "fluid"
+                                vols = gmsh_export.model.getEntities(3)
+                                if vols:
+                                    p_vol = gmsh_export.model.addPhysicalGroup(3, [e[1] for e in vols])
+                                    gmsh_export.model.setPhysicalName(3, p_vol, "fluid")
+                                    self.log_message(f"[ANSYS] Assigned 'fluid' zone (Tags: {[e[1] for e in vols]})")
                                 else:
-                                    self.log_message("[ANSYS] Custom writer failed, keeping Gmsh format", level="WARNING")
-                                    ansys_file = gmsh_temp
-                                    
-                            except ImportError as e:
-                                import traceback
-                                self.log_message(f"[ANSYS] Import error: {e}", level="ERROR")
-                                self.log_message(f"[ANSYS] Traceback:\n{traceback.format_exc()}", level="ERROR")
-                                self.log_message("[ANSYS] Install with: pip install meshio", level="WARNING")
-                                ansys_file = gmsh_temp  # Fallback to Gmsh format
+                                    self.log_message("[ANSYS] WARNING: No volume entities found!", level="WARNING")
+
+                                # Surface -> "wall"
+                                surfs = gmsh_export.model.getEntities(2)
+                                if surfs:
+                                    p_surf = gmsh_export.model.addPhysicalGroup(2, [e[1] for e in surfs])
+                                    gmsh_export.model.setPhysicalName(2, p_surf, "wall")
+                                    self.log_message(f"[ANSYS] Assigned 'wall' zone (Tags: {[e[1] for e in surfs]})")
+                                else:
+                                    self.log_message("[ANSYS] WARNING: No surface entities found!", level="WARNING")
+                                
+                                # 5. Export to Nastran BDF
+                                # Fluent prefers this over .msh for 2025 R2
+                                ansys_file = str(Path(output_file).with_suffix('')) + ".bdf"
+                                
+                                gmsh_export.option.setNumber("Mesh.BdfFieldFormat", 1) # Standard BDF
+                                gmsh_export.option.setNumber("Mesh.SaveAll", 0)        # Only save Physical Groups
+                                gmsh_export.write(ansys_file)
+                                
+                                gmsh_export.finalize()
+                                
+                                self.log_message(f"[ANSYS] ✓ Successfully exported: {ansys_file}")
+                                
+                                # Clean up
+                                try:
+                                    os.remove(gmsh_temp)
+                                except:
+                                    pass
+
                             except Exception as e:
                                 import traceback
-                                self.log_message(f"[ANSYS] Conversion failed: {e}", level="ERROR")
-                                self.log_message(f"[ANSYS] Full traceback:\n{traceback.format_exc()}", level="ERROR")
-                                ansys_file = gmsh_temp
+                                self.log_message(f"[ANSYS] Export failed: {e}", level="ERROR")
+                                self.log_message(f"[ANSYS] Traceback:\n{traceback.format_exc()}", level="ERROR")
+                                ansys_file = output_file # Fallback
                             
                         elif "FEA" in ansys_mode:
                             # FEA MODE: Quadratic elements, .bdf for Mechanical
