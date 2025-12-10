@@ -421,7 +421,7 @@ class UIBuilder:
         h = QHBoxLayout()
         h.addWidget(self._create_label("Metric:"))
         self.window.viz_metric_combo = QComboBox()
-        self.window.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
+        self.window.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio", "Jacobian"])
         self.window.viz_metric_combo.setStyleSheet(self._get_combo_style())
         self.window.viz_metric_combo.currentTextChanged.connect(self.window.on_viz_metric_changed)
         h.addWidget(self.window.viz_metric_combo, 1)

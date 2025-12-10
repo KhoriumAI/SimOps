@@ -1,15 +1,19 @@
 === POLYHEDRAL LOAD DEBUG ===
-Function called at: C:\Users\Owner\Downloads\MeshPackageLean\apps\cli\generated_meshes\Cylinder_poly_dual.json
-Nodes: 614, Elements: 225
+Function called at: C:\Users\Owner\Downloads\MeshPackageLean\apps\cli\generated_meshes\Cylinder_poly.json
+Nodes: 1262, Elements: 225
 Cells created: 225, Skipped: 0
 UGrid cells: 225
-=== MANUAL SURFACE ===
-Faces extracted: 2110
-PolyData cells: 2110
+=== BOUNDARY FACE EXTRACTION ===
+Total face refs in JSON: 3406
+Unique signatures: 1703
+Face occurrence distribution:
+  1703 faces appear in 2 cells
+Boundary faces (appear 1x): 0
+PolyData cells: 0
 Actor created and added to renderer
 Renderer actor count: 1
-UGrid bounds: (-46.455753326416016, 46.98671340942383, -46.8265380859375, 46.8264045715332, 2.1987292766571045, 47.80095672607422)
-Center: [ 2.65480042e-01 -6.67572021e-05  2.49998430e+01]
-Size: [93.44246674 93.65294266 45.60222745]
-Max size: 93.6529426574707
+UGrid bounds: (-50.0, 50.0, -49.860740661621094, 49.86021423339844, 0.0, 50.0)
+Center: [ 0.00000000e+00 -2.63214111e-04  2.50000000e+01]
+Size: [100.         99.7209549  50.       ]
+Max size: 100.0
 === COMPLETE SUCCESS ===

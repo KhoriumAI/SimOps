@@ -84,7 +84,6 @@ class ModernMeshGenGUI(QMainWindow):
         self.worker.signals.log.connect(self.add_log)
         self.worker.signals.progress.connect(self.update_progress)
         self.worker.signals.phase_complete.connect(self.mark_phase_complete)
-        self.worker.signals.intermediate_update.connect(self.on_intermediate_update)
         self.worker.signals.finished.connect(self.on_mesh_finished)
 
         self.init_ui()
@@ -924,7 +923,7 @@ class ModernMeshGenGUI(QMainWindow):
         metric_layout.addWidget(metric_label)
 
         self.viz_metric_combo = QComboBox()
-        self.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio", "Jacobian"])
+        self.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
         self.viz_metric_combo.setCurrentIndex(0)
         self.viz_metric_combo.setStyleSheet("""
             QComboBox {
@@ -2022,44 +2021,6 @@ class ModernMeshGenGUI(QMainWindow):
             # Update ETA live
             if self.master_progress > 0:
                 self.update_eta(self.master_progress)
-
-    def on_intermediate_update(self, phase: str, path: str):
-        """Handle intermediate mesh updates from worker"""
-        try:
-            # We must normalize path
-            path = str(Path(path).absolute())
-            print(f"[GUI] Received intermediate update: {phase} -> {path}")
-            self.add_log(f"Displaying intermediate result: {phase}...")
-            
-            # Special handling per phase
-            if phase == 'surface':
-                success = self.vtk_viewer.load_mesh_file(path)
-                if success:
-                    self.current_process_label.setText(f"Visualizing Surface Mesh")
-                    # Disable cross section for surface mesh (it looks bad/empty inside)
-                    if self.crosssection_enabled.isChecked():
-                         self.crosssection_enabled.setChecked(False)
-                    self.crosssection_enabled.setEnabled(False)
-                    
-            elif phase == 'coacd':
-                success = self.vtk_viewer.load_mesh_file(path)
-                if success:
-                    self.current_process_label.setText(f"Visualizing Convex Decomposition")
-                    self.crosssection_enabled.setEnabled(True)
-                    
-            elif phase == 'unstructured':
-                success = self.vtk_viewer.load_mesh_file(path) 
-                if success:
-                    self.current_process_label.setText(f"Visualizing Unstructured Mesh")
-                    self.crosssection_enabled.setEnabled(True)
-            
-            else:
-                 # Generic fallback
-                 self.vtk_viewer.load_mesh_file(path)
-
-        except Exception as e:
-            print(f"[GUI] Error loading intermediate mesh: {e}")
-            self.add_log(f"Intermediate display error: {e}")
 
     def on_mesh_finished(self, success: bool, result: dict):
         self.add_log("[DEBUG] on_mesh_finished CALLBACK TRIGGERED!")

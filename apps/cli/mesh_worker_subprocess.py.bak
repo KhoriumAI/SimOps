@@ -6,7 +6,6 @@ Runs mesh generation in a separate process to avoid gmsh threading issues.
 Gmsh uses signals internally which only work in the main thread.
 """
 
-import sys
 import shutil
 import os
 import json
@@ -27,67 +26,9 @@ from strategies.hex_dominant_strategy import (
 )
 from strategies.conformal_hex_glue import generate_conformal_hex_mesh
 from strategies.polyhedral_strategy import PolyhedralMeshGenerator
-from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
 from core.config import Config
 import tempfile
 import gmsh
-
-
-def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
-    """
-    Wrapper for OpenFOAM cfMesh hex generation.
-    
-    Converts STEP to STL first, then runs cfMesh.
-    """
-    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
-    
-    try:
-        # Step 1: Convert STEP to STL
-        print("[OpenFOAM-HEX] Step 1: Converting STEP to STL...")
-        discretizer = HighFidelityDiscretization(verbose=True)
-        temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
-        
-        success = discretizer.convert_step_to_stl(
-            cad_file, temp_stl,
-            deviation=0.01,
-            min_size=0.5,
-            max_size=10.0
-        )
-        
-        if not success:
-            return {'success': False, 'message': 'Failed to convert STEP to STL'}
-        
-        # Step 2: Get cell size from quality params
-        cell_size = quality_params.get('max_element_size', 2.0) if quality_params else 2.0
-        
-        # Step 3: Determine output path
-        mesh_folder = Path(__file__).parent / "generated_meshes"
-        mesh_folder.mkdir(exist_ok=True)
-        mesh_name = Path(cad_file).stem
-        output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
-        
-        # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
-        result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
-        
-        if not result['success']:
-            return result
-        
-        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
-        
-        return {
-            'success': True,
-            'output_file': output_file,
-            'strategy': 'OpenFOAM cfMesh',
-            'message': 'Hex-dominant mesh generated via cfMesh',
-            'total_elements': 0,  # Will be populated by mesh loader
-            'total_nodes': 0
-        }
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {'success': False, 'message': f'OpenFOAM hex failed: {str(e)}'}
 
 
 def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -132,23 +73,15 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         
         print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)))
         
-        # Step 3: Generate ADAPTIVE conformal hex mesh (STRICT QUALITY MODE)
-        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...")
+        # Step 3: Generate conformal hex mesh
+        print("[CONFORMAL-HEX] Step 3: Generating conformal hex mesh...")
+        divisions = quality_params.get('hex_divisions', 4) if quality_params else 4
+        epsilon = quality_params.get('interface_epsilon', 0.5) if quality_params else 0.5
         
-        # Strict adaptive parameters for high-quality curved surface meshing
-        quality_target = quality_params.get('quality_target', 0.98) if quality_params else 0.98  # 98% valid!
-        max_elements = quality_params.get('max_elements', 5000) if quality_params else 5000  # Allow finer mesh
-        min_divisions = quality_params.get('min_divisions', 8) if quality_params else 8  # Start finer
-        max_divisions = quality_params.get('max_divisions', 20) if quality_params else 20  # Go very fine
-        
-        from strategies.conformal_hex_glue import generate_adaptive_hex_mesh
-        
-        result = generate_adaptive_hex_mesh(
-            parts,
-            quality_target=quality_target,
-            max_elements=max_elements,
-            min_divisions=min_divisions,
-            max_divisions=max_divisions,
+        result = generate_conformal_hex_mesh(
+            parts, 
+            divisions=divisions,
+            epsilon=epsilon,
             reference_stl=temp_stl,
             verbose=True
         )
@@ -271,7 +204,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
             'metrics': {
                 'num_hexes': len(hexes),
                 'num_parts': len(parts),
-                'num_interfaces': result.get('adjacency_stats', {}).get('num_interfaces', 0),
+                'num_interfaces': result['adjacency_stats'].get('num_interfaces', 0),
                 'volume_error_pct': stats.get('volume_error_pct', 0)
             },
             'quality_metrics': {
@@ -382,11 +315,6 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         print(f"[GPU Mesher] Surface mesh: {len(surface_verts)} vertices, {len(surface_faces)} triangles", flush=True)
         
-        # INTERMEDIATE UPDATE: Surface Mesh
-        surface_temp = str(mesh_folder / f"{mesh_name}_surface_temp.msh")
-        gmsh.write(surface_temp)
-        print(f"[DISPLAY_UPDATE] phase=surface file={surface_temp}", flush=True)
-
         gmsh.finalize()
         
         # Step 2: Run GPU Fill & Filter pipeline
@@ -794,11 +722,8 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
                 'strategy': 'polyhedral_dual',
                 'message': f'Polyhedral mesh generated: {num_cells} cells',
                 'total_elements': num_cells,
-                'visualization_mode': 'polyhedral',  # Tell GUI to use polyhedral loader
-                'polyhedral_data_file': json_file,  # Path to JSON data
                 'metrics': {
-                    'num_cells': num_cells,
-                    'num_polyhedra': num_cells  # For GUI display
+                    'num_cells': num_cells
                 }
             }
         else:
@@ -833,14 +758,10 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
-            # Try OpenFOAM (cfMesh or snappy) first
-            if check_any_openfoam_available():
-                print("[DEBUG] OpenFOAM available - using robust hex pipeline")
-                return generate_openfoam_hex_wrapper(cad_file, output_dir, quality_params)
-            else:
-                print("[DEBUG] OpenFOAM not available - falling back to experimental CoACD pipeline")
-                return generate_conformal_hex_test(cad_file, output_dir, quality_params)
+        # Hex Dominant Testing = Conformal hex with validation
+        if 'Hex Dominant Testing' in mesh_strategy:
+            print("[DEBUG] Hex Dominant Testing detected - using conformal hex pipeline")
+            return generate_conformal_hex_test(cad_file, output_dir, quality_params)
         
         # Regular Hex Dominant (subdivision approach)
         if 'Hex Dominant' in mesh_strategy:

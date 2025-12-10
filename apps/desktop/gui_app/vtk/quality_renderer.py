@@ -90,13 +90,14 @@ class QualityRenderer:
             else:
                 grade = "Critical"
                 grade_color = "#dc3545"
-        elif sicn_min is not None:
+        if sicn_min is not None:
             # Fallback to SICN if no geometric accuracy
+            # THRESHOLD UPDATE: < 0.2 is Critical
             if sicn_min < 0.0001:
                 grade = "Critical"
                 grade_color = "#dc3545"
-            elif sicn_min < 0.1:
-                grade = "Very Poor"
+            elif sicn_min < 0.2:
+                grade = "Critical" # Was Very Poor, now Critical per new threshold
                 grade_color = "#dc3545"
             elif sicn_min < 0.3:
                 grade = "Poor"
@@ -124,24 +125,35 @@ class QualityRenderer:
                 report_html += f"<div style='font-size: 10px; color: #6c757d;'>   (deviation: {mean_dev:.3f}mm)</div>"
 
         if sicn_min is not None:
-            icon = "[OK]" if sicn_min >= 0.3 else "[X]"
-            color = "#198754" if sicn_min >= 0.3 else "#dc3545"
+            # THRESHOLD: < 0.2 is Bad
+            icon = "[OK]" if sicn_min >= 0.2 else "[X]"
+            color = "#198754" if sicn_min >= 0.2 else "#dc3545"
             report_html += f"<div><b>SICN (min):</b> {sicn_min:.4f} <span style='color: {color};'>{icon}</span></div>"
 
         if gamma_min is not None:
+            # THRESHOLD: < 0.2 is Bad (same as SICN)
             icon = "[OK]" if gamma_min >= 0.2 else "[X]"
             color = "#198754" if gamma_min >= 0.2 else "#dc3545"
             report_html += f"<div><b>Gamma (min):</b> {gamma_min:.4f} <span style='color: {color};'>{icon}</span></div>"
 
         if max_skew is not None:
+            # THRESHOLD: > 0.7 is Bad
             icon = "[OK]" if max_skew <= 0.7 else "[X]"
             color = "#198754" if max_skew <= 0.7 else "#dc3545"
             report_html += f"<div><b>Max Skewness:</b> {max_skew:.4f} <span style='color: {color};'>{icon}</span></div>"
 
         if max_ar is not None:
-            icon = "[OK]" if max_ar <= 5.0 else "[X]"
-            color = "#198754" if max_ar <= 5.0 else "#dc3545"
+            # THRESHOLD: > 10.0 is Bad
+            icon = "[OK]" if max_ar <= 10.0 else "[X]"
+            color = "#198754" if max_ar <= 10.0 else "#dc3545"
             report_html += f"<div><b>Max Aspect Ratio:</b> {max_ar:.2f} <span style='color: {color};'>{icon}</span></div>"
+
+        # Check for Jacobian (hex meshes)
+        jacobian_min = metrics.get('jacobian_min')
+        if jacobian_min is not None:
+            icon = "[OK]" if jacobian_min >= 0.3 else "[X]"
+            color = "#198754" if jacobian_min >= 0.3 else "#dc3545"
+            report_html += f"<div><b>Jacobian (min):</b> {jacobian_min:.4f} <span style='color: {color};'>{icon}</span></div>"
 
         if badness is not None:
             # Badness: lower is better. <10 is good, >100 is bad

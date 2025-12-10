@@ -169,7 +169,54 @@ except Exception as e:
         self.viewer.info_label.setText("Loading mesh...")
 
         try:
-            nodes, elements = self._parse_msh_file(filepath)
+            # Parse mesh file
+            # If it's a Fluent .msh, _parse_msh_file (Gmsh) will return empty or error.
+            # We add a fallback to check for a sibling .vtk file.
+            
+            nodes, elements = {}, []
+            try:
+                nodes, elements = self._parse_msh_file(filepath)
+            except Exception:
+                pass # Fallback to VTK check
+                
+            if not nodes or not elements:
+                # Check for sibling .vtk file (e.g. model.vtk or model_fluent.vtk)
+                # If filepath is model.msh, check model.vtk
+                vtk_path = Path(filepath).with_suffix('.vtk')
+                if not vtk_path.exists():
+                     pass 
+                else:
+                    print(f"[MESH_LOADER] Loading VTK fallback: {vtk_path}")
+                    import pyvista as pv
+                    mesh = pv.read(str(vtk_path))
+                    
+                    # Convert PyVista mesh to VTK Generic
+                    # For rendering, we can just use the polydata directly
+                    if mesh.n_points > 0:
+                        poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+                        self.viewer.current_poly_data = poly_data
+                        
+                        mapper = vtk.vtkPolyDataMapper()
+                        mapper.SetInputData(poly_data)
+                        
+                        self.viewer.current_actor = vtk.vtkActor()
+                        self.viewer.current_actor.SetMapper(mapper)
+                        
+                        # Set default style
+                        self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
+                        self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
+                        
+                        self.viewer.renderer.AddActor(self.viewer.current_actor)
+                        self.viewer.renderer.ResetCamera()
+                        self.viewer.vtk_widget.GetRenderWindow().Render()
+                        
+                        self.viewer.info_label.setText(
+                            f"<b>Mesh Loaded (VTK)</b><br>"
+                            f"{vtk_path.name}<br>"
+                            f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
+                        )
+                        return "SUCCESS"
+            
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
 
             # Try to load surface quality data if not provided

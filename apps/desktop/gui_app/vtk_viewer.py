@@ -805,40 +805,22 @@ class VTK3DViewer(QFrame):
                 print("[POLY-VIZ ERROR] No cells were created!")
                 return "FAILED"
             
-            # 4. Manual Surface Extraction
-            # VTK's vtkDataSetMapper cannot render VTK_POLYHEDRON cells.
-            # Extract all faces from the JSON and create a surface mesh.
-            print("[POLY-VIZ] Manually extracting faces for visualization...")
+            # 4. Extract Surface Using VTK's Geometry Filter
+            # This automatically finds the boundary of the VTK_POLYHEDRON cells
+            print("[POLY-VIZ v2.0] Extracting surface using vtkGeometryFilter...")
             
-            all_faces = []
-            for elem in elements:
-                if elem['type'] != 'polyhedron':
-                    continue
-                for face in elem['faces']:
-                    try:
-                        vtk_face = [node_map[nid] for nid in face]
-                        all_faces.append(vtk_face)
-                    except KeyError:
-                        continue
-            
-            # Create PolyData from extracted faces
-            polydata = vtk.vtkPolyData()
-            polydata.SetPoints(points)
-            
-            polys = vtk.vtkCellArray()
-            for face_indices in all_faces:
-                polys.InsertNextCell(len(face_indices))
-                for idx in face_indices:
-                    polys.InsertCellPoint(idx)
-            
-            polydata.SetPolys(polys)
+            geometry_filter = vtk.vtkGeometryFilter()
+            geometry_filter.SetInputData(ugrid)
+            geometry_filter.Update()
+            polydata = geometry_filter.GetOutput()
             
             with open(debug_log, 'a') as f:
-                f.write(f"=== MANUAL SURFACE ===\n")
-                f.write(f"Faces extracted: {len(all_faces)}\n")
-                f.write(f"PolyData cells: {polydata.GetNumberOfCells()}\n")
+                f.write(f"=== SURFACE EXTRACTION (vtkGeometryFilter) ===\n")
+                f.write(f"Input cells: {ugrid.GetNumberOfCells()}\n")
+                f.write(f"Output surface cells: {polydata.GetNumberOfCells()}\n")
+                f.write(f"Output points: {polydata.GetNumberOfPoints()}\n")
             
-            print(f"[POLY-VIZ] Extracted {polydata.GetNumberOfCells()} face polygons")
+            print(f"[POLY-VIZ] Extracted {polydata.GetNumberOfCells()} surface cells")
             
             # 5. Mapper/Actor
             print("[POLY-VIZ] Creating mapper and actor...")
@@ -908,7 +890,7 @@ class VTK3DViewer(QFrame):
             
             self.vtk_widget.GetRenderWindow().Render()
             
-            self.info_label.setText(f"Polyhedral Mesh: {ugrid.GetNumberOfCells()} cells")
+            self.info_label.setText(f"<b>Polyhedral Mesh</b><br>{ugrid.GetNumberOfCells()} polyhedra")
             print("[POLY-VIZ] SUCCESS!")
             
             with open(debug_log, 'a') as f:
@@ -1296,6 +1278,15 @@ class VTK3DViewer(QFrame):
         """
         if not self.current_poly_data or not self.current_actor:
             return
+        
+        # SAFETY: Check for polyhedral meshes (no quality switching support yet)
+        if self.current_volumetric_grid is not None and hasattr(self, 'current_volumetric_grid'):
+            # This is a polyhedral mesh - quality switching not supported
+            print("[WARN] Quality metric switching not supported for polyhedral meshes")
+            # Just update opacity and return
+            self.current_actor.GetProperty().SetOpacity(opacity)
+            self.vtk_widget.GetRenderWindow().Render()
+            return
             
         # Update opacity
         self.current_actor.GetProperty().SetOpacity(opacity)
@@ -1315,6 +1306,8 @@ class VTK3DViewer(QFrame):
             metric_key = 'per_element_skewness'
         elif "Aspect" in metric:
             metric_key = 'per_element_aspect_ratio'
+        elif "Jacobian" in metric:
+            metric_key = 'per_element_quality'
             
         if metric_key in self.current_quality_data:
             quality_map = self.current_quality_data[metric_key]
@@ -1323,6 +1316,11 @@ class VTK3DViewer(QFrame):
             quality_map = self.current_quality_data.get('per_element_quality', {})
             
         if not quality_map:
+            return
+
+        # SAFETY: Ensure mesh elements exist
+        if not self.current_mesh_elements:
+            print("[WARN] Cannot update quality visualization: mesh elements not loaded")
             return
 
         # Create new PolyData for filtered mesh
@@ -1352,10 +1350,6 @@ class VTK3DViewer(QFrame):
                 g = hue_to_rgb(p, q, h)
                 b = hue_to_rgb(p, q, h - 1/3)
             return int(r * 255), int(g * 255), int(b * 255)
-
-        # Iterate through ORIGINAL elements to filter
-        if not self.current_mesh_elements:
-            return
             
         visible_count = 0
         filtered_count = 0
@@ -1402,24 +1396,55 @@ class VTK3DViewer(QFrame):
                         new_cells.InsertNextCell(tri)
                         
                         # Calculate color
-                        # Normalize to 0-1 based on global range
-                        norm = (val - global_min) / val_range
-                        norm = max(0.0, min(1.0, norm))
+                        # ABSOLUTE THRESHOLD COLORING
                         
-                        # Color map: Red (0.0) -> Green (0.33)
-                        # For Skewness/Aspect Ratio, lower is better (Green), higher is worse (Red)
-                        # For SICN/Gamma, higher is better (Green), lower is worse (Red)
+                        # Initialize values
+                        r, g, b = 150, 150, 150
                         
-                        if "Skewness" in metric or "Aspect" in metric:
-                            # 0 (Good/Green) -> 1 (Bad/Red)
-                            # Invert norm so 0->Green, 1->Red
-                            hue = (1.0 - norm) * 0.33
+                        if "Skewness" in metric:
+                            # Lower is better. Bad > 0.7
+                            if val > 0.7:
+                                # FAIL: Crimson Red
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: Green (0) -> Yellow/Orange (0.7)
+                                # Map 0.0 -> 0.7 range to Hue 0.33 (Green) -> 0.05 (Orange)
+                                # Actually standard gradient: 0=Best(Green), 0.7=Worst(Red)
+                                # But we want to avoid pure Red for passing elements.
+                                
+                                # Let's say 0.0 -> Green (0.33), 0.7 -> Orange (0.05)
+                                normalized_badness = max(0.0, min(1.0, val / 0.7))
+                                hue = (1.0 - normalized_badness) * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                                
+                        elif "Aspect" in metric:
+                            # Lower is better. Bad > 10.0 (per plan) or > 20? 
+                            # Let's say Bad > 10.0
+                            if val > 10.0:
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: 1.0 (Best) -> 10.0 (Worst)
+                                # Map 1.0->10.0 to Green->Orange
+                                normalized_badness = max(0.0, min(1.0, (val - 1.0) / 9.0))
+                                hue = (1.0 - normalized_badness) * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+
                         else:
-                            # 0 (Bad/Red) -> 1 (Good/Green)
-                            hue = norm * 0.33
-                            
-                        r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                        colors.InsertNextTuple3(r, g, b)
+                            # Higher is better (SICN, Gamma, Quality). Bad < 0.2
+                            if val < 0.2:
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: 1.0 (Best) -> 0.2 (Worst)
+                                # Map 0.2->1.0 to Orange->Green
+                                # Quality 1.0 -> 0.33 Hue
+                                # Quality 0.2 -> 0.05 Hue
+                                normalized = max(0.0, min(1.0, (val - 0.2) / 0.8))
+                                hue = normalized * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                                
                         visible_count += 1
                     else:
                         filtered_count += 1
@@ -2086,14 +2111,8 @@ except Exception as e:
                     else:
                         print(f"[DEBUG] Using direct surface element IDs")
 
-                    # Calculate global quality range for color mapping
+                    # Calculate global quality range for color mapping (UNUSED but kept for reference)
                     all_qualities = [q for q in per_elem_quality.values() if q is not None]
-                    if all_qualities:
-                        global_min = min(all_qualities)
-                        global_max = max(all_qualities)
-                        print(f"[DEBUG] Global quality range: {global_min:.3f} to {global_max:.3f}")
-                    else:
-                        global_min, global_max = 0.0, 1.0
                     
                     # Create color array for cells
                     colors = vtk.vtkUnsignedCharArray()
@@ -2124,6 +2143,11 @@ except Exception as e:
 
                     # Color each surface cell based on its quality
                     colored_count = 0
+                    
+                    # Default to SICN logic if not specified (since this is initial load)
+                    # "Lower is better" metrics logic will be handled if we detect them later, 
+                    # but usually initial load is SICN or generic "Quality"
+                    
                     for i in range(poly_data.GetNumberOfCells()):
                         # Get element ID - either from mapping (extracted surface) or direct (explicit surface)
                         elem_id = None
@@ -2142,21 +2166,35 @@ except Exception as e:
                         if quality is None:
                             colors.InsertNextTuple3(150, 150, 150)  # Gray for unknown
                         else:
-                            quality_range = global_max - global_min
-                            if quality_range > 0.0001:
-                                normalized = (quality - global_min) / quality_range
-                            else:
-                                normalized = 1.0
+                            # ABSOLUTE THRESHOLD COLORING
+                            # For SICN/Quality: Higher is better. 0.0 (Worst) -> 1.0 (Best)
+                            # Threshold: < 0.2 is BAD (Crimson)
                             
-                            normalized = max(0.0, min(1.0, normalized))
-                            hue = normalized * 0.33  # 0 (red) to 0.33 (green)
-                            r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                            colors.InsertNextTuple3(r, g, b)
+                            if quality < 0.2:
+                                # FAIL: Crimson Red
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: Gradient Green -> Yellow
+                                # Remap 0.2-1.0 to 0.0-1.0 for color calculation
+                                # We want 1.0 -> Green (0.33 Hue), 0.2 -> Yellow/Orange (0.05 Hue)
+                                # Actually standard is 0=Red, 0.33=Green. 
+                                # Let's map 0.2 -> 0.0 (Reddish/Orange start of gradient) to 1.0 -> 0.33 (Green)
+                                # But we want to avoid pure Red for "Pass but low", so maybe start at Orange (0.08)
+                                
+                                # Simpler: Map 0.0 -> 1.0 quality to 0.0 -> 0.33 hue, 
+                                # but override anything < 0.2 to Crimson.
+                                # So 0.2 element gets Hue 0.06 (Orange-ish) which distinguishes it from Crimson.
+                                
+                                normalized = max(0.0, min(1.0, quality))
+                                hue = normalized * 0.33
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                            
                             colored_count += 1
 
                     poly_data.GetCellData().SetScalars(colors)
-                    print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
-                    print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
+                    print(f"[DEBUG] [OK][OK]Applied ABSOLUTE THRESHOLD quality colors")
+                    print(f"[DEBUG] [OK][OK]Threshold: Elements < 0.2 marked CRIMSON RED")
                     print(f"[DEBUG] [OK][OK]Total colored surface cells: {colored_count}/{poly_data.GetNumberOfCells()}")
 
                     # Verify scalars were set

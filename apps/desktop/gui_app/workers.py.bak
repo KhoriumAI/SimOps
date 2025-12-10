@@ -22,7 +22,6 @@ class WorkerSignals(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str, int)  # (phase, percentage)
     phase_complete = pyqtSignal(str)  # Signal when phase is 100% done
-    intermediate_update = pyqtSignal(str, str) # (phase, file_path)
     finished = pyqtSignal(bool, dict)
 
 
@@ -179,21 +178,6 @@ class MeshWorker:
             # Debug: Show lines that look like they might be JSON
             if line.startswith('{') or ('"success"' in line and not line.startswith('Info')):
                 print(f"[GUI-WORKER] Potential JSON line (didn't match): {line[:100]}")
-            
-            # Check for display updates
-            if "[DISPLAY_UPDATE]" in line:
-                try:
-                    # Parse: [DISPLAY_UPDATE] phase=surface file=...
-                    phase_match = re.search(r'phase=(\w+)', line)
-                    file_match = re.search(r'file=(.+)', line)
-                    if phase_match and file_match:
-                        phase = phase_match.group(1)
-                        file_path = file_match.group(1).strip()
-                        self.signals.intermediate_update.emit(phase, file_path)
-                        print(f"[GUI-WORKER] Emitting intermediate update: {phase} -> {file_path}")
-                except Exception as e:
-                    print(f"[GUI-WORKER] Failed to parse intermediate update: {e}")
-
             self.signals.log.emit(line)
 
     def _run(self, cad_file: str, quality_params: dict = None):
