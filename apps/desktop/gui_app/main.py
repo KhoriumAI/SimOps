@@ -262,6 +262,9 @@ class ModernMeshGenGUI(QMainWindow):
             logging.info("Chat button set to enabled state")
         header_layout.addWidget(self.chat_toggle_btn)
 
+        # Exit button moved to Viewer Overlay
+        # self.exit_btn code removed from here
+
         layout.addLayout(header_layout)
 
         subtitle = QLabel("Parallel Mesh Generation (3-5x Faster)")
@@ -1130,6 +1133,8 @@ class ModernMeshGenGUI(QMainWindow):
 
         # 3D Viewer - Pass self as parent so CustomInteractorStyle can access main GUI
         self.viewer = VTK3DViewer(parent=self)
+        # Connect explicit exit signal from viewer overlay
+        self.viewer.exit_requested.connect(self.exit_application)
         layout.addWidget(self.viewer, 2)
 
         # Console
@@ -2702,6 +2707,24 @@ class ModernMeshGenGUI(QMainWindow):
             self.add_log(f"[!] Surface mesh failed: {e}")
             import traceback
             self.add_log(traceback.format_exc())
+
+    def exit_application(self):
+        """Exit the application and kill all subprocesses"""
+        print("[EXIT] User requested exit...")
+        
+        # Stop mesh worker if running
+        if self.worker and self.worker.is_running:
+            self.worker.stop()
+        
+        # Stop HQ worker if running
+        if hasattr(self, 'viewer') and self.viewer:
+            if hasattr(self.viewer, 'hq_worker') and self.viewer.hq_worker:
+                if self.viewer.hq_worker.isRunning():
+                    self.viewer.hq_worker.terminate()
+                    self.viewer.hq_worker.wait()
+        
+        # Close the application
+        QApplication.quit()
 
 
 def main():

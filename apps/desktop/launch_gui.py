@@ -4,27 +4,82 @@ Launch Khorium MeshGen GUI
 ===========================
 
 Simple launcher script for the modular GUI application.
+Includes splash screen and enforces light mode on macOS.
 """
 
 import sys
 import os
+import time
 from pathlib import Path
 
-# Add project root to path
+# Add project root to path FIRST (before any other imports)
 project_root = str(Path(__file__).parent.parent.parent.resolve())
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+# Import Qt basics first (lightweight)
 from PyQt5.QtWidgets import QApplication
-from gui_app import ModernMeshGenGUI
+
+# Import splash screen and palette helper
+from splash_screen import SplashScreen, create_light_palette
 
 
 def main():
-    """Launch the GUI application"""
+    """Launch the GUI application with splash screen."""
+    # Create application
     app = QApplication(sys.argv)
     
-    # Create and show main window
+    # CRITICAL: Set Fusion style and light palette BEFORE any widgets
+    # This fixes the dark mode issue on macOS
+    app.setStyle("Fusion")
+    app.setPalette(create_light_palette())
+    
+    # Create and show splash screen
+    print("[DEBUG] Creating splash screen...")
+    splash = SplashScreen()
+    splash.show()
+    splash.force_focus()  # Bring to front on macOS
+    splash.set_status("Starting up...")
+    splash.set_progress(10)
+    app.processEvents()
+    time.sleep(0.3)  # Ensure splash is visible
+    print("[DEBUG] Splash screen created and shown.")
+    
+    # Heavy imports with progress updates
+    splash.set_status("Loading PyQt5 widgets...")
+    splash.set_progress(20)
+    app.processEvents()
+    time.sleep(0.1)
+    
+    splash.set_status("Loading VTK viewer...")
+    splash.set_progress(40)
+    app.processEvents()
+    time.sleep(0.1)
+    
+    # Import the main GUI (this triggers heavy VTK imports)
+    from gui_app import ModernMeshGenGUI
+    
+    splash.set_status("Initializing mesh engine...")
+    splash.set_progress(70)
+    app.processEvents()
+    time.sleep(0.2)
+    
+    # Create main window
+    splash.set_status("Creating main window...")
+    splash.set_progress(85)
+    app.processEvents()
+    time.sleep(0.1)
+    
     gui = ModernMeshGenGUI()
-    gui.show()
+    
+    # Finalize and show
+    splash.set_status("Ready!")
+    splash.set_progress(100)
+    app.processEvents()
+    time.sleep(0.5)
+    
+    # Close splash and show main window
+    splash.finish(gui)
     
     sys.exit(app.exec_())
 

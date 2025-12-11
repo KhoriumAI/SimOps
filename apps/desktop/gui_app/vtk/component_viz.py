@@ -16,7 +16,7 @@ class ComponentVisualizer:
 
     def load_visualization(self, result: Dict):
         """Load and display CoACD components with PyVista"""
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/component_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write("=== COMPONENT VIZ DEBUG (Refactored) ===\n")
             f.write(f"Function called\n")

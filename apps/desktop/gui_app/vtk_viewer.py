@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QWidget, QSlider, QSpinBox,
     QPushButton, QCheckBox, QComboBox
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
@@ -28,8 +28,125 @@ from .interactor import CustomInteractorStyle
 from .utils import hsl_to_rgb
 
 
+class HQMeshWorker(QThread):
+    """Background worker for high-quality visualization mesh generation"""
+    finished = pyqtSignal(str, dict, str) # stl_path, geom_info, original_cad_path
+
+    def __init__(self, cad_path: str):
+        super().__init__()
+        self.cad_path = cad_path
+        self.process = None
+        
+    def stop(self):
+        """Force kill the worker and its subprocess"""
+        if self.process:
+            try:
+                self.process.kill()
+            except:
+                pass
+        self.quit()
+        self.wait() # Quickly clean up thread resources
+
+    def run(self):
+        try:
+            # Create temp file for HQ mesh
+            fd, tmp_stl = tempfile.mkstemp(suffix=".stl")
+            os.close(fd)
+            
+            # --- HQ TESSELLATION SETTINGS ---
+            # Using the "User Approved" high-fidelity settings
+            gmsh_script = f"""
+import gmsh
+import json
+import sys
+import os
+
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Verbosity", 1) # Less spam
+
+    # Open config
+    gmsh.open(r"{self.cad_path}")
+
+    # --- GEOMETRY ANALYSIS (Fast, BBox only) ---
+    bbox = gmsh.model.getBoundingBox(-1, -1)
+    bbox_dims = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
+    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5
+    
+    # Estimate volume from bbox to avoid OCC getMass hang
+    bbox_volume = bbox_dims[0] * bbox_dims[1] * bbox_dims[2]
+        
+    # Heuristic unit detection
+    # If it's big (> 10), it's likely mm. If it's tiny (< 1), it's likely m.
+    unit_name = "m"
+    if max(bbox_dims) > 10 or bbox_volume > 1000:
+        unit_name = "mm"
+        
+    geom_info = {{
+        "volume": bbox_volume * 0.5, # Rough estimate (50% fill)
+        "bbox_diagonal": bbox_diag,
+        "units_detected": unit_name
+    }}
+    print("GEOM_INFO:" + json.dumps(geom_info))
+
+    # --- HIGH QUALITY TESSELLATION ---
+    # "Perfect Circle" Logic using Curvature
+    # 100 nodes per full circle = 3.6 degrees per segment.
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 100) 
+    
+    # Constrain max element size based on scale
+    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 20.0)
+    
+    # Generate 2D mesh
+    gmsh.model.mesh.generate(2)
+    gmsh.write(r"{tmp_stl}")
+    gmsh.finalize()
+    print("SUCCESS_MARKER")
+
+except Exception as e:
+    print("GMSH_ERROR:" + str(e))
+    sys.exit(1)
+"""
+            # Run subprocess
+            current_env = os.environ.copy()
+            
+            # Use same python executable
+            # Use same python executable
+            # Use Popen to allow killing
+            self.process = subprocess.Popen(
+                [sys.executable, "-c", gmsh_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=current_env
+            )
+            
+            # Wait for result (blocking this thread only, not UI)
+            stdout, stderr = self.process.communicate(timeout=180)
+            
+            if self.process.returncode != 0 or "SUCCESS_MARKER" not in stdout:
+                print(f"[HQ WORKER] Failed: {stderr}")
+                return
+
+            # Parse info
+            geom_info = {}
+            for line in stdout.splitlines():
+                if line.startswith("GEOM_INFO:"):
+                    geom_info = json.loads(line[10:])
+                    break
+            
+            self.finished.emit(tmp_stl, geom_info, self.cad_path)
+            
+        except Exception as e:
+            print(f"[HQ WORKER] Exception: {e}")
+
+
 class VTK3DViewer(QFrame):
     """3D viewer with quality report overlay"""
+    
+    # Signal to request application exit
+    exit_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,6 +227,10 @@ class VTK3DViewer(QFrame):
         self.cross_section_mode = "layered"  # Always use layered mode (show complete volume cells)
         self.cross_section_element_mode = "auto"  # Auto-switch between tet/hex slicing
 
+        # Progressive loading state
+        self.hq_worker = None
+        self.current_cad_path = None
+
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
         self.brush_cursor_visible = False
@@ -122,21 +243,51 @@ class VTK3DViewer(QFrame):
         self.vtk_widget.Start()
 
         # Info overlay (top-left) - FIXED WIDTH to prevent truncation
-        self.info_label = QLabel("No CAD file loaded", self)
+        # Info label (Top-left overlay)
+        self.info_label = QLabel(self)
         self.info_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(255, 255, 255, 230);
-                padding: 12px 16px;
-                border-radius: 6px;
-                font-size: 11px;
-                color: #212529;
-                font-weight: 500;
-                border: 1px solid rgba(0,0,0,0.1);
+                background-color: rgba(255, 255, 255, 180);
+                padding: 10px;
+                border-radius: 5px;
+                font-family: Arial;
+                font-size: 12px;
+                border: 1px solid #dee2e6;
             }
         """)
-        self.info_label.setFixedWidth(450)  # Increased from 400 to 450
-        self.info_label.setMinimumHeight(80)  # Minimum height to prevent vertical truncation
-        self.info_label.setMaximumHeight(300)  # Increased from 200 to 300px for iterations
+        self.info_label.setText("<b>3D Preview</b><br>No model loaded")
+        self.info_label.setWordWrap(True) # Restore word wrap
+        self.info_label.setFixedWidth(450)  # Restore fixed width
+        self.info_label.setMinimumHeight(80)  # Restore minimum height
+        self.info_label.setMaximumHeight(300)  # Restore max height
+        self.info_label.move(10, 10)
+        self.info_label.show()
+
+        # Exit Button (Top-right overlay)
+        self.exit_btn = QPushButton("Exit", self)
+        self.exit_btn.setCursor(Qt.PointingHandCursor)
+        self.exit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 0, 0, 0.1); 
+                color: #555;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(220, 53, 69, 0.9);
+                color: white;
+                border: 1px solid #dc3545;
+            }
+        """)
+        self.exit_btn.clicked.connect(self.exit_requested.emit)
+        self.exit_btn.resize(60, 24)
+        self.exit_btn.show()
+
+        # Initial Camera Setup
+        self.renderer.SetBackground(0.95, 0.95, 0.97) # Reverted to original background color
         self.info_label.setWordWrap(True)
         self.info_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.info_label.move(15, 15)
@@ -214,7 +365,14 @@ class VTK3DViewer(QFrame):
         self.iteration_container.setVisible(False)  # Hidden until we have iterations
 
     def resizeEvent(self, event):
-        """Reposition quality label and iteration buttons on resize"""
+        """Handle resize to update overlay positions"""
+        # Keep info label top-left
+        self.info_label.move(10, 10)
+        
+        # Keep Exit button top-right
+        if hasattr(self, 'exit_btn'):
+            self.exit_btn.move(self.width() - self.exit_btn.width() - 10, 10)
+            
         super().resizeEvent(event)
         if self.quality_label.isVisible():
             self.quality_label.move(
@@ -697,7 +855,7 @@ class VTK3DViewer(QFrame):
     def load_polyhedral_file(self, json_path: str):
         """Load polyhedral mesh from JSON file"""
         # DEBUG: Write to file to prove function is running
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/poly_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write(f"=== POLYHEDRAL LOAD DEBUG ===\n")
             f.write(f"Function called at: {json_path}\n")
@@ -1158,6 +1316,23 @@ class VTK3DViewer(QFrame):
         clipper_below.Update()
         
         # Update main actor with below-cut mesh (fully visible)
+        
+        # SAFETY: Handle LODActor (which doesn't support GetMapper easily for clipping)
+        if self.current_actor.IsA("vtkLODActor"):
+            print("[DEBUG] Swapping LODActor for vtkActor to support clipping")
+            new_actor = vtk.vtkActor()
+            # Copy properties (color, lighting, etc.)
+            new_actor.SetProperty(self.current_actor.GetProperty())
+            
+            # Create new mapper for this standard actor
+            new_mapper = vtk.vtkPolyDataMapper()
+            new_actor.SetMapper(new_mapper)
+            
+            # Swap in renderer
+            self.renderer.RemoveActor(self.current_actor)
+            self.renderer.AddActor(new_actor)
+            self.current_actor = new_actor
+            
         mapper = self.current_actor.GetMapper()
         mapper.SetInputData(clipper_below.GetOutput())
         self.current_actor.GetProperty().SetOpacity(1.0)  # Fully visible
@@ -1641,6 +1816,94 @@ class VTK3DViewer(QFrame):
 
             self.vtk_widget.GetRenderWindow().Render()
 
+    def on_hq_mesh_ready(self, stl_path: str, geom_info: dict, original_cad_path: str):
+        """Callback when background HQ mesh generation finishes"""
+        try:
+            # RACE CONDITION CHECK: user might have loaded a different file
+            if original_cad_path != self.current_cad_path:
+                print(f"[HQ UPDATE] Stale update ignored. Current: {self.current_cad_path}, Received: {original_cad_path}")
+                if os.path.exists(stl_path):
+                    os.unlink(stl_path)
+                return
+
+            print(f"[HQ UPDATE] Swapping to high-fidelity mesh...")
+            
+            # Load the HQ mesh
+            if not os.path.exists(stl_path) or os.path.getsize(stl_path) < 100:
+                print("[HQ UPDATE ERROR] STL file missing or empty")
+                return
+                
+            mesh = pv.read(stl_path)
+            os.unlink(stl_path) # Cleanup
+            
+            if mesh.n_points == 0:
+                print("[HQ UPDATE ERROR] Empty mesh")
+                return
+
+            poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+            self.current_poly_data = poly_data # Update stored data for operations
+            
+            # Remove old actor
+            if self.current_actor:
+                self.renderer.RemoveActor(self.current_actor)
+            
+            # --- APPLY VISUALIZATION PIPELINE (Same as fast load but on HQ data) ---
+            # 1. Smooth Normals (No subdivision needed for HQ mesh usually)
+            normals_gen = vtk.vtkPolyDataNormals()
+            normals_gen.SetInputData(poly_data)
+            normals_gen.ComputePointNormalsOn()
+            normals_gen.ComputeCellNormalsOff()
+            normals_gen.SplittingOn() 
+            normals_gen.SetFeatureAngle(60.0)
+            normals_gen.Update()
+            smooth_poly_data = normals_gen.GetOutput()
+            
+            # 2. LOD Setup (Still good for performance even on HQ mesh)
+            mapper_high = vtk.vtkPolyDataMapper()
+            mapper_high.SetInputData(smooth_poly_data)
+            
+            decimator = vtk.vtkQuadricDecimation()
+            decimator.SetInputData(smooth_poly_data)
+            decimator.SetTargetReduction(0.9)
+            decimator.Update()
+            
+            mapper_low = vtk.vtkPolyDataMapper()
+            mapper_low.SetInputData(decimator.GetOutput())
+            
+            self.current_actor = vtk.vtkLODActor()
+            self.current_actor.AddLODMapper(mapper_high)
+            self.current_actor.AddLODMapper(mapper_low)
+            self.current_actor.SetDesiredUpdateRate(15.0) # Actor property, safe to set
+            
+            # 3. Styling
+            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
+            self.current_actor.GetProperty().SetInterpolationToPhong() 
+            self.current_actor.GetProperty().BackfaceCullingOn()       
+            self.current_actor.GetProperty().ShadingOn()
+            self.current_actor.GetProperty().SetAmbient(0.3)
+            self.current_actor.GetProperty().SetDiffuse(0.7)
+            self.current_actor.GetProperty().SetSpecular(0.5)          
+            self.current_actor.GetProperty().SetSpecularPower(40.0)
+            self.current_actor.GetProperty().EdgeVisibilityOff()
+            
+            self.renderer.AddActor(self.current_actor)
+            
+            # Flash informative text
+            self.info_label.setText(
+                self.info_label.text().replace(
+                    "<span style='color: #6c757d;'>", 
+                    "<span style='color: #198754; font-weight:bold;'>HQ READY: "
+                )
+            )
+            
+            self.vtk_widget.GetRenderWindow().Render()
+            print("[HQ UPDATE] Success!")
+            
+        except Exception as e:
+            print(f"[HQ UPDATE ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+
     def load_step_file(self, filepath: str):
         self.clear_view()
         self.quality_label.setVisible(False)
@@ -1662,51 +1925,40 @@ import gmsh
 import json
 import sys
 
-# Redirect stdout/stderr to ensure we capture errors
+# FAST PREVIEW SCRIPT - Minimal operations for speed
 try:
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 1) # Enable terminal output for debugging
-    gmsh.option.setNumber("General.Verbosity", 2) # Reduce spam, keep errors
+    gmsh.option.setNumber("General.Terminal", 0) # Silent mode for speed
+    gmsh.option.setNumber("General.Verbosity", 0)
 
-    gmsh.open(r"{filepath}") # Use raw string for Windows paths
+    gmsh.open(r"{filepath}")
 
-    # --- GEOMETRY ANALYSIS (Volume & Units) ---
+    # --- FAST GEOMETRY ANALYSIS (Bbox only) ---
     bbox = gmsh.model.getBoundingBox(-1, -1)
+    # We only need bbox for mesh sizing now, volume comes from VTK later
     bbox_dims = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
+    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5
 
-    volumes_3d = gmsh.model.getEntities(dim=3)
-    total_volume_raw = 0.0
-    for vol_dim, vol_tag in volumes_3d:
-        total_volume_raw += gmsh.model.occ.getMass(vol_dim, vol_tag)
 
-    bbox_volume_raw = bbox_dims[0] * bbox_dims[1] * bbox_dims[2]
-
-    # Heuristic unit detection
-    unit_name = "m"
-    unit_scale = 1.0
-    if total_volume_raw > 10000: # Likely mm^3
-        unit_scale = 0.001
-        unit_name = "mm"
-    elif max(bbox_dims) > 1000: # Large dimensions
-        unit_scale = 0.001
-        unit_name = "mm"
-
-    total_volume = total_volume_raw * (unit_scale ** 3)
-    bbox_volume = bbox_volume_raw * (unit_scale ** 3)
-    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5 * unit_scale
-
-    if total_volume > bbox_volume or total_volume <= 0:
-        total_volume = bbox_volume * 0.4
-
-    geom_info = {{
-        "volume": total_volume, 
-        "bbox_diagonal": bbox_diag, 
-        "units_detected": unit_name
-    }}
-    print("GEOM_INFO:" + json.dumps(geom_info))
-
-    # --- TESSELLATION ---
-    # Generate 2D mesh for visualization
+    # --- FAST TESSELLATION (Original Logic) ---
+    # Priority: Stability & Speed. 
+    # Reverting to the logic that worked (<5s for Impeller).
+    
+    # 1. No Multi-threading (Simple is stable)
+    # gmsh.option.setNumber("General.NumThreads", 1) # Default
+    
+    # 2. Basic Coarse Constraints
+    gmsh.option.setNumber("Mesh.MeshSizeMin", bbox_diag / 100.0)
+    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 20.0)
+    
+    # 3. Disable curvature (speed)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    
+    # 4. Standard Algorithm (Let Gmsh decide, usually Algo 6 or 2)
+    # Reverting to defaults which worked best for Impeller (<5s).
+    # Removed forced Algorithm 1/6.
+    
     gmsh.model.mesh.generate(2)
     gmsh.write(r"{tmp_stl}")
     gmsh.finalize()
@@ -1714,19 +1966,20 @@ try:
 
 except Exception as e:
     print("GMSH_ERROR:" + str(e))
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 """
 
             # WINDOWS FIX 2: Environment Variables
-            # Conda environments rely on PATH to find DLLs. We must pass the current env.
             current_env = os.environ.copy()
 
             result = subprocess.run(
                 [sys.executable, "-c", gmsh_script],
                 capture_output=True,
                 text=True,
-                timeout=45,
-                env=current_env  # CRITICAL: Passes DLL paths to subprocess
+                timeout=120, # Increased to 120s for complex assemblies (Impeller, etc)
+                env=current_env
             )
 
             # Debugging Output
@@ -1736,12 +1989,9 @@ except Exception as e:
                 print(f"STDERR: {result.stderr}")
                 raise Exception(f"CAD conversion subprocess failed. See console for details.")
 
-            # Parse geometry info
-            geom_info = None
-            for line in result.stdout.split('\n'):
-                if line.startswith("GEOM_INFO:"):
-                    geom_info = json.loads(line[10:])
-                    break
+            # Parse geometry info (REMOVED - we calculate in VTK now)
+            # geom_info = None
+
 
             # Check if file actually exists and has content
             if not os.path.exists(tmp_stl) or os.path.getsize(tmp_stl) < 100:
@@ -1758,39 +2008,123 @@ except Exception as e:
             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
             self.current_poly_data = poly_data # Store for clipping
 
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(poly_data)
+            # --- IMPROVED CAD VISUALIZATION PIPELINE ---
+            try:
+                # 0. Subdivision (The "Quality Boost")
+                # Even for the fast mesh, one level of subdivision helps it look less awful
+                processing_poly_data = poly_data
+                cell_count = poly_data.GetNumberOfCells()
+                
+                # Only apply light subdivision for the preview to keep it fast
+                if cell_count < 10000:
+                    print(f"[CAD VIS] Applying Fast Subdivision to {cell_count} cells...")
+                    subdivision = vtk.vtkLinearSubdivisionFilter()
+                    subdivision.SetInputData(poly_data)
+                    subdivision.SetNumberOfSubdivisions(1)
+                    subdivision.Update()
+                    processing_poly_data = subdivision.GetOutput()
+                
+                # 1. Generate Smooth Normals 
+                print("[CAD VIS] Generating smooth normals...")
+                normals_gen = vtk.vtkPolyDataNormals()
+                normals_gen.SetInputData(processing_poly_data)
+                normals_gen.ComputePointNormalsOn()
+                normals_gen.ComputeCellNormalsOff()
+                normals_gen.SplittingOn() 
+                normals_gen.SetFeatureAngle(60.0)
+                normals_gen.Update()
+                smooth_poly_data = normals_gen.GetOutput()
+                
+                # Update stored data
+                self.current_poly_data = smooth_poly_data 
+                
+                # 2. Simple Actor for fast load (No LOD needed for fast preview usually)
+                mapper = vtk.vtkPolyDataMapper()
+                mapper.SetInputData(smooth_poly_data)
+                self.current_actor = vtk.vtkActor()
+                self.current_actor.SetMapper(mapper)
+                
+                # 3. Styling
+                self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
+                self.current_actor.GetProperty().SetInterpolationToPhong() 
+                # DISABLED Backface Culling to fix visibility on complex manifolds (rocket nozzle)
+                self.current_actor.GetProperty().BackfaceCullingOff()       
+                self.current_actor.GetProperty().ShadingOn()
+                self.current_actor.GetProperty().SetAmbient(0.3)
+                self.current_actor.GetProperty().SetDiffuse(0.7)
+                self.current_actor.GetProperty().SetSpecular(0.5)          
+                self.current_actor.GetProperty().SetSpecularPower(40.0)
+                self.current_actor.GetProperty().EdgeVisibilityOff()
 
-            self.current_actor = vtk.vtkActor()
-            self.current_actor.SetMapper(mapper)
-            
-            # Styling: Smooth Blue CAD look
-            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
-            self.current_actor.GetProperty().SetInterpolationToPhong()
-            self.current_actor.GetProperty().EdgeVisibilityOff()
-            self.current_actor.GetProperty().SetAmbient(0.3)
-            self.current_actor.GetProperty().SetDiffuse(0.7)
-            self.current_actor.GetProperty().SetSpecular(0.2)
+            except Exception as e:
+                print(f"[CAD VIS ERROR] Fast pipeline failed: {e}. Falling back.")
+                import traceback
+                traceback.print_exc()
+                
+                # Basic fallback
+                mapper = vtk.vtkPolyDataMapper()
+                mapper.SetInputData(poly_data)
+                self.current_actor = vtk.vtkActor()
+                self.current_actor.SetMapper(mapper)
+                self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
 
             self.renderer.AddActor(self.current_actor)
             self.renderer.ResetCamera()
             self.vtk_widget.GetRenderWindow().Render()
 
-            # Update Info Label
-            volume_text = ""
-            if geom_info and 'volume' in geom_info:
-                v = geom_info['volume']
-                if v > 0.001: 
-                    volume_text = f"<br>Volume: {v:.4f} m³"
-                else: 
-                    volume_text = f"<br>Volume: {v*1e9:.0f} mm³"
+            # Accurate Volume Calculation via VTK
+            mass = vtk.vtkMassProperties()
+            mass.SetInputData(smooth_poly_data)
+            mass.Update()
+            volume = mass.GetVolume()
+            
+            # Unit Heuristic: If bounds > 5.0, assume mm
+            bounds = smooth_poly_data.GetBounds()
+            dim_x = bounds[1]-bounds[0]
+            dim_y = bounds[3]-bounds[2]
+            dim_z = bounds[5]-bounds[4]
+            max_dim = max(dim_x, dim_y, dim_z)
+            bbox_diag = (dim_x**2 + dim_y**2 + dim_z**2)**0.5
+            
+            unit_scale = 1.0
+            unit_name = 'm'
+            
+            if max_dim > 5.0:
+                 # Likely mm
+                 unit_name = 'mm'
+                 unit_scale = 0.001 # Convert mm to m for internal calculations
+                 # FIXED: Format as float (1234.56) instead of thousand-sep (1,234)
+                 volume_text = f"<br>Volume: {volume:.2f} mm³"
+            else:
+                 # Likely m
+                 volume_text = f"<br>Volume: {volume:.6f} m³"
 
             self.info_label.setText(
                 f"<b>CAD Preview</b><br>"
                 f"{Path(filepath).name}<br>"
                 f"<span style='color: #6c757d;'>{poly_data.GetNumberOfPoints():,} nodes{volume_text}</span>"
             )
+            
+            # --- PROGRESSIVE LOADING DISABLED ---
+            # Ensure any previous worker is dead
+            if self.hq_worker: 
+                try:
+                    self.hq_worker.finished.disconnect()
+                    self.hq_worker.stop()
+                except:
+                    pass
+            
+            # --- PROGRESSIVE LOADING DISABLED ---
+            # User requested "Fast" mode only. No background HQ worker.
+            self.hq_worker = None 
+            self.current_cad_path = filepath
 
+            # Construct standardized geom_info for main.py (expects meters)
+            geom_info = {
+                "volume": volume * (unit_scale ** 3), # Convert to m³
+                "bbox_diagonal": bbox_diag * unit_scale, # Convert to m
+                "units_detected": unit_name
+            }
             return geom_info
 
         except Exception as e:
@@ -1798,7 +2132,7 @@ except Exception as e:
             print(f"Load Error: {e}")
             import traceback
             traceback.print_exc()
-            self.info_label.setText(f"CAD Loaded<br><small>(Preview Unavailable)</small><br>Click 'Generate Mesh'")
+            self.info_label.setText(f"CAD Load Error<br><small>{str(e)[:50]}...</small><br>Click 'Generate Mesh'")
             return None
 
     def load_mesh_file(self, filepath: str, result: dict = None):
@@ -2482,7 +2816,7 @@ except Exception as e:
     def load_component_visualization(self, result: Dict):
         """Load and display CoACD components with PyVista"""
         from pathlib import Path
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/component_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write("=== COMPONENT VIZ DEBUG (Fixed) ===\n")
             f.write(f"Function called\n")
