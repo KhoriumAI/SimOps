@@ -4,7 +4,8 @@ Launch Khorium MeshGen GUI
 ===========================
 
 Simple launcher script for the modular GUI application.
-Includes splash screen and enforces light mode on macOS.
+Includes splash screen, enforces light mode on macOS, and
+pre-warms the mesh engine for instant mesh generation.
 """
 
 import sys
@@ -59,6 +60,26 @@ def main():
     # Import the main GUI (this triggers heavy VTK imports)
     from gui_app import ModernMeshGenGUI
     
+    splash.set_status("Pre-warming mesh engine...")
+    splash.set_progress(60)
+    app.processEvents()
+    
+    # Start mesh engine warmup in background
+    # This eliminates the 3-5s delay when clicking "Generate Mesh"
+    try:
+        from core.mesh_worker_pool import warmup_mesh_engine
+        
+        def warmup_callback(msg):
+            splash.set_status(msg)
+            app.processEvents()
+        
+        warmup_mesh_engine(warmup_callback)
+        print("[DEBUG] Mesh engine warmup started in background")
+    except ImportError as e:
+        print(f"[DEBUG] Mesh worker pool not available: {e}")
+    except Exception as e:
+        print(f"[DEBUG] Mesh warmup error (non-fatal): {e}")
+    
     splash.set_status("Initializing mesh engine...")
     splash.set_progress(70)
     app.processEvents()
@@ -86,3 +107,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

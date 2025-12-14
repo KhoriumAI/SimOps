@@ -308,7 +308,7 @@ class UIBuilder:
         # Worker Count Slider
         from multiprocessing import cpu_count
         total_cores = cpu_count()
-        default_workers = max(1, min(int(total_cores * 0.65), 6))
+        default_workers = 4  # Fixed default per user request
         
         worker_sublayout = QVBoxLayout()
         worker_sublayout.setSpacing(5)

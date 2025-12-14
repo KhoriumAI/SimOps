@@ -441,6 +441,26 @@ class BaseMeshGenerator(ABC):
         # Calculate bounding box
         self.geometry_info['bounding_box'] = self._calculate_bounding_box(volumes)
         self.geometry_info['diagonal'] = self._calculate_diagonal()
+        
+        # Calculate total volume for mesh sizing
+        try:
+            total_volume = 0.0
+            for v_dim, v_tag in volumes:
+                # getMass returns volume for 3D entities
+                total_volume += gmsh.model.occ.getMass(v_dim, v_tag)
+            self.geometry_info['volume'] = total_volume
+            self.log_message(f"[OK] Calculated geometry volume: {total_volume:.2f} mm³")
+            
+            # Debug: Show bounding box dimensions for unit diagnosis
+            bb = self.geometry_info.get('bounding_box', {})
+            if bb:
+                dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+                self.log_message(f"[DEBUG] Bounding box: {dims[0]:.2f} x {dims[1]:.2f} x {dims[2]:.2f} (model units)")
+                self.log_message(f"[DEBUG] If these look like mm values (e.g. 50-200), model is in mm")
+                self.log_message(f"[DEBUG] If these look like m values (e.g. 0.05-0.2), model is in meters")
+        except Exception as e:
+            self.log_message(f"[!] Could not calculate volume: {e}")
+            self.geometry_info['volume'] = None
 
     def _calculate_bounding_box(self, volumes) -> Dict[str, List[float]]:
         """Calculate overall bounding box"""

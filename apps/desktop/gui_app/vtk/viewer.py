@@ -104,7 +104,7 @@ class VTK3DViewer(QFrame):
         self.info_label = QLabel("No CAD file loaded", self)
         self.info_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(255, 255, 255, 230);
+                background-color: rgba(255, 255, 255, 255);
                 padding: 12px 16px;
                 border-radius: 6px;
                 font-size: 11px;

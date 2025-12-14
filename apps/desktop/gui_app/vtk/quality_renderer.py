@@ -169,13 +169,13 @@ class QualityRenderer:
 
         report_html += "</div>"
 
-        self.viewer.quality_label.setText(report_html)
-        self.viewer.quality_label.adjustSize()
-        self.viewer.quality_label.move(
-            self.viewer.width() - self.viewer.quality_label.width() - 15,
-            15
-        )
-        self.viewer.quality_label.setVisible(True)
+        # self.viewer.quality_label.setText(report_html)
+        # self.viewer.quality_label.adjustSize()
+        # self.viewer.quality_label.move(
+        #     self.viewer.width() - self.viewer.quality_label.width() - 15,
+        #     15
+        # )
+        # self.viewer.quality_label.setVisible(True)
 
 
     def update_quality_visualization(self, metric='SICN (Min)', opacity=1.0, min_val=None, max_val=None):

@@ -33,6 +33,13 @@ class MeshParameters:
     refinement_levels: int = 3
     max_iterations: int = 5
     ansys_mode: str = "None"  # ANSYS export mode: "None", "CFD (Fluent)", or "FEA (Mechanical)"
+    # Exhaustive strategy controls
+    score_threshold: float = 50.0  # Score below which a strategy is considered "good enough" (lower is better)
+    strategy_order: list = None  # Custom order of strategies to run (None = use default order)
+    
+    # Sizing control
+    max_size_mm: Optional[float] = None
+    min_size_mm: Optional[float] = None
 
 
 @dataclass

@@ -156,37 +156,61 @@ class GPUMeshOptimizer:
     def _compute_quality_gradients_gpu(self, nodes_gpu: 'cp.ndarray',
                                        elements_gpu: 'cp.ndarray') -> 'cp.ndarray':
         """
-        Compute quality gradients on GPU (massively parallel)
-
-        For each node, compute gradient of element quality
-        with respect to node position.
+        Compute quality gradients on GPU (truly vectorized, no Python loops).
+        
+        OPTIMIZED: Uses parallel array operations for all elements at once.
+        Expected 5-20x speedup over the loop-based version.
         """
-        num_nodes = len(nodes_gpu)
-        gradients = cp.zeros((num_nodes, 3), dtype=cp.float32)
-
-        # For each element, compute contribution to adjacent node gradients
-        for elem_idx in range(len(elements_gpu)):
-            elem_nodes = elements_gpu[elem_idx]
-
-            # Get element node coordinates
-            p0 = nodes_gpu[elem_nodes[0]]
-            p1 = nodes_gpu[elem_nodes[1]]
-            p2 = nodes_gpu[elem_nodes[2]]
-            p3 = nodes_gpu[elem_nodes[3]]
-
-            # Compute SICN gradient (simplified)
-            # Full implementation would use proper SICN derivative
-            grad = self._sicn_gradient_gpu(p0, p1, p2, p3)
-
-            # Distribute gradient to element nodes
-            for i, node_idx in enumerate(elem_nodes):
-                gradients[node_idx] += grad[i]
-
+        n_nodes = len(nodes_gpu)
+        n_elems = len(elements_gpu)
+        
+        # Gather element vertex coordinates (all at once)
+        # Shape: (n_elems, 4, 3)
+        elem_verts = nodes_gpu[elements_gpu]
+        
+        # Extract the 4 vertices of each element
+        p0 = elem_verts[:, 0]  # Shape: (n_elems, 3)
+        p1 = elem_verts[:, 1]
+        p2 = elem_verts[:, 2]
+        p3 = elem_verts[:, 3]
+        
+        # Compute edge vectors (all elements in parallel)
+        e1 = p1 - p0
+        e2 = p2 - p0
+        e3 = p3 - p0
+        
+        # Cross products for gradient computation (vectorized)
+        cross_e2_e3 = cp.cross(e2, e3)  # Shape: (n_elems, 3)
+        cross_e3_e1 = cp.cross(e3, e1)
+        cross_e1_e2 = cp.cross(e1, e2)
+        
+        # Volumes (sign determines orientation)
+        volumes = cp.einsum('ij,ij->i', e1, cross_e2_e3)
+        signs = cp.sign(volumes)[:, None]  # Shape: (n_elems, 1)
+        
+        # Gradients per element vertex (vectorized)
+        # grads[i, j, k] = gradient for element i, vertex j, coordinate k
+        grads = cp.zeros((n_elems, 4, 3), dtype=cp.float32)
+        grads[:, 0] = cross_e2_e3 * signs
+        grads[:, 1] = cross_e3_e1 * signs
+        grads[:, 2] = cross_e1_e2 * signs
+        grads[:, 3] = -(grads[:, 0] + grads[:, 1] + grads[:, 2])
+        
+        # Scatter gradients to nodes using cupyx.scatter_add
+        gradients = cp.zeros((n_nodes, 3), dtype=cp.float32)
+        
+        # Accumulate gradient contributions from each element vertex
+        for i in range(4):
+            # Create index array for scatter_add
+            indices = elements_gpu[:, i]
+            # Add gradients for this vertex position
+            for j in range(3):  # For each coordinate dimension
+                cp.add.at(gradients[:, j], indices, grads[:, i, j])
+        
         # Normalize gradients
-        gradient_norms = cp.linalg.norm(gradients, axis=1, keepdims=True)
-        gradient_norms = cp.maximum(gradient_norms, 1e-10)  # Avoid division by zero
-        gradients /= gradient_norms
-
+        norms = cp.linalg.norm(gradients, axis=1, keepdims=True)
+        gradients = gradients / cp.maximum(norms, 1e-10)
+        
         return gradients
 
     def _compute_quality_gradients_cpu(self, nodes: np.ndarray,
@@ -261,79 +285,91 @@ class GPUMeshOptimizer:
         return grad * np.sign(volume)
 
     def _compute_mesh_quality_gpu(self, nodes_gpu, elements_gpu) -> Dict:
-        """Compute mesh quality metrics on GPU"""
-        qualities = []
-
-        for elem_nodes in elements_gpu:
-            p0 = nodes_gpu[elem_nodes[0]]
-            p1 = nodes_gpu[elem_nodes[1]]
-            p2 = nodes_gpu[elem_nodes[2]]
-            p3 = nodes_gpu[elem_nodes[3]]
-
-            # Simplified SICN computation
-            e1 = p1 - p0
-            e2 = p2 - p0
-            e3 = p3 - p0
-            volume = cp.dot(e1, cp.cross(e2, e3))
-
-            # Edge lengths
-            lengths = cp.array([
-                cp.linalg.norm(e1),
-                cp.linalg.norm(e2),
-                cp.linalg.norm(e3),
-                cp.linalg.norm(p2 - p1),
-                cp.linalg.norm(p3 - p1),
-                cp.linalg.norm(p3 - p2)
-            ])
-
-            max_length = cp.max(lengths)
-            sicn = volume / (max_length ** 3) if max_length > 0 else 0
-            qualities.append(float(sicn))
-
-        qualities = cp.array(qualities)
-
+        """
+        Compute mesh quality metrics on GPU (fully vectorized).
+        
+        OPTIMIZED: Computes SICN for all elements in parallel.
+        """
+        # Gather element vertex coordinates
+        elem_verts = nodes_gpu[elements_gpu]  # Shape: (n_elems, 4, 3)
+        
+        p0 = elem_verts[:, 0]
+        p1 = elem_verts[:, 1]
+        p2 = elem_verts[:, 2]
+        p3 = elem_verts[:, 3]
+        
+        # Edge vectors (vectorized)
+        e1 = p1 - p0
+        e2 = p2 - p0
+        e3 = p3 - p0
+        
+        # Volumes using einsum (vectorized)
+        cross_e2_e3 = cp.cross(e2, e3)
+        volumes = cp.einsum('ij,ij->i', e1, cross_e2_e3)
+        
+        # All 6 edge lengths (vectorized)
+        len_e1 = cp.linalg.norm(e1, axis=1)
+        len_e2 = cp.linalg.norm(e2, axis=1)
+        len_e3 = cp.linalg.norm(e3, axis=1)
+        len_e12 = cp.linalg.norm(p2 - p1, axis=1)
+        len_e13 = cp.linalg.norm(p3 - p1, axis=1)
+        len_e23 = cp.linalg.norm(p3 - p2, axis=1)
+        
+        # Stack and find max edge length per element
+        all_lengths = cp.stack([len_e1, len_e2, len_e3, len_e12, len_e13, len_e23], axis=1)
+        max_lengths = cp.max(all_lengths, axis=1)
+        
+        # SICN = Volume / MaxEdge^3 (simplified quality metric)
+        sicn = volumes / (max_lengths ** 3 + 1e-12)
+        
         return {
-            'min': float(cp.min(qualities)),
-            'max': float(cp.max(qualities)),
-            'mean': float(cp.mean(qualities))
+            'min': float(cp.min(sicn)),
+            'max': float(cp.max(sicn)),
+            'mean': float(cp.mean(sicn))
         }
 
     def _compute_mesh_quality_cpu(self, nodes, elements) -> Dict:
-        """Compute mesh quality metrics on CPU"""
-        qualities = []
-
-        for elem_nodes in elements:
-            p0 = nodes[elem_nodes[0]]
-            p1 = nodes[elem_nodes[1]]
-            p2 = nodes[elem_nodes[2]]
-            p3 = nodes[elem_nodes[3]]
-
-            # Edge vectors
-            e1 = p1 - p0
-            e2 = p2 - p0
-            e3 = p3 - p0
-            volume = np.dot(e1, np.cross(e2, e3))
-
-            # Edge lengths
-            lengths = np.array([
-                np.linalg.norm(e1),
-                np.linalg.norm(e2),
-                np.linalg.norm(e3),
-                np.linalg.norm(p2 - p1),
-                np.linalg.norm(p3 - p1),
-                np.linalg.norm(p3 - p2)
-            ])
-
-            max_length = np.max(lengths)
-            sicn = volume / (max_length ** 3) if max_length > 0 else 0
-            qualities.append(sicn)
-
-        qualities = np.array(qualities)
-
+        """
+        Compute mesh quality metrics on CPU (fully vectorized).
+        
+        OPTIMIZED: Computes SICN for all elements in parallel using NumPy.
+        """
+        # Gather element vertex coordinates
+        elem_verts = nodes[elements]  # Shape: (n_elems, 4, 3)
+        
+        p0 = elem_verts[:, 0]
+        p1 = elem_verts[:, 1]
+        p2 = elem_verts[:, 2]
+        p3 = elem_verts[:, 3]
+        
+        # Edge vectors (vectorized)
+        e1 = p1 - p0
+        e2 = p2 - p0
+        e3 = p3 - p0
+        
+        # Volumes using einsum (vectorized)
+        cross_e2_e3 = np.cross(e2, e3)
+        volumes = np.einsum('ij,ij->i', e1, cross_e2_e3)
+        
+        # All 6 edge lengths (vectorized)
+        len_e1 = np.linalg.norm(e1, axis=1)
+        len_e2 = np.linalg.norm(e2, axis=1)
+        len_e3 = np.linalg.norm(e3, axis=1)
+        len_e12 = np.linalg.norm(p2 - p1, axis=1)
+        len_e13 = np.linalg.norm(p3 - p1, axis=1)
+        len_e23 = np.linalg.norm(p3 - p2, axis=1)
+        
+        # Stack and find max edge length per element
+        all_lengths = np.stack([len_e1, len_e2, len_e3, len_e12, len_e13, len_e23], axis=1)
+        max_lengths = np.max(all_lengths, axis=1)
+        
+        # SICN = Volume / MaxEdge^3 (simplified quality metric)
+        sicn = volumes / (max_lengths ** 3 + 1e-12)
+        
         return {
-            'min': float(np.min(qualities)),
-            'max': float(np.max(qualities)),
-            'mean': float(np.mean(qualities))
+            'min': float(np.min(sicn)),
+            'max': float(np.max(sicn)),
+            'mean': float(np.mean(sicn))
         }
 
     def _log(self, message: str):

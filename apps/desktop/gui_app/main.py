@@ -17,15 +17,31 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QProgressBar, QGroupBox,
     QSplitter, QFileDialog, QFrame, QScrollArea, QGridLayout,
-    QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox
+    QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox,
+    QListWidget, QListWidgetItem, QAbstractItemView
 )
 from qtrangeslider import QRangeSlider
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QObject, QEvent
 from PyQt5.QtGui import QFont, QPalette, QColor
 
-from .workers import MeshWorker
+from .workers import MeshWorker, QualityAnalysisWorker
 from .vtk_viewer import VTK3DViewer
 from .utils import setup_logging
+
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that ignores wheel events to prevent accidental changes"""
+    def wheelEvent(self, event):
+        event.ignore()
+
+class NoScrollComboBox(QComboBox):
+    """QComboBox that ignores wheel events to prevent accidental changes"""
+    def wheelEvent(self, event):
+        event.ignore()
+
+class NoScrollSlider(QSlider):
+    """QSlider that ignores wheel events to prevent accidental changes"""
+    def wheelEvent(self, event):
+        event.ignore()
 
 # Paintbrush imports
 PAINTBRUSH_AVAILABLE = False
@@ -87,7 +103,11 @@ class ModernMeshGenGUI(QMainWindow):
         self.worker.signals.intermediate_update.connect(self.on_intermediate_update)
         self.worker.signals.finished.connect(self.on_mesh_finished)
 
+        # Settings persistence
+        self.settings_file = Path.home() / ".khorium_meshgen_settings.json"
+
         self.init_ui()
+        self.load_settings()  # Restore previous session settings
 
     def init_ui(self):
         self.setWindowTitle("Khorium MeshGen - Parallel Edition")
@@ -204,7 +224,10 @@ class ModernMeshGenGUI(QMainWindow):
 
         # Content widget inside scroll area
         content_widget = QWidget()
+        content_widget.setStyleSheet(".QWidget { background-color: white; }")  # Ensure white background
         layout = QVBoxLayout(content_widget)
+        # CRITICAL: Prevent horizontal expansion that causes scrolling
+        layout.setSizeConstraint(QVBoxLayout.SetMinAndMaxSize)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)  # Reduced from 15
 
@@ -352,7 +375,7 @@ class ModernMeshGenGUI(QMainWindow):
         preset_label.setStyleSheet("font-size: 11px; color: #495057;")
         preset_layout.addWidget(preset_label)
 
-        self.quality_preset = QComboBox()
+        self.quality_preset = NoScrollComboBox()
         self.quality_preset.addItems(["Coarse", "Medium", "Fine", "Very Fine", "Custom"])
         self.quality_preset.setCurrentIndex(1)  # Default to Medium
         self.quality_preset.setStyleSheet("""
@@ -369,36 +392,11 @@ class ModernMeshGenGUI(QMainWindow):
         preset_layout.addWidget(self.quality_preset, 1)
         quality_layout.addLayout(preset_layout)
 
-        # Target element count
-        target_layout = QHBoxLayout()
-        target_label = QLabel("Target Elements:")
-        target_label.setStyleSheet("font-size: 11px; color: #495057;")
-        target_layout.addWidget(target_label)
-
-        self.target_elements = QSpinBox()
-        self.target_elements.setRange(100, 1000000)
-        self.target_elements.setValue(10000)
-        self.target_elements.setSingleStep(1000)
-        self.target_elements.setStyleSheet("""
-            QSpinBox {
-                padding: 5px;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                background-color: white;
-                color: #212529;
-                font-size: 11px;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                width: 16px;
-                background-color: #f8f9fa;
-                border: 1px solid #ced4da;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #e9ecef;
-            }
-        """)
-        target_layout.addWidget(self.target_elements, 1)
-        quality_layout.addLayout(target_layout)
+        # Target elements - REMOVED per user request (element count determined by max_size)
+        # target_layout = QHBoxLayout()
+        # target_label = QLabel("Target Elements:")
+        # ... (commented out entire section)
+        # quality_layout.addLayout(target_layout)
 
         # Max element size only (ANSYS-style) - label and control on same line
         size_layout = QHBoxLayout()
@@ -406,14 +404,16 @@ class ModernMeshGenGUI(QMainWindow):
         size_label.setStyleSheet("font-size: 11px; color: #495057;")
         size_layout.addWidget(size_label)
 
-        self.max_size = QSpinBox()
-        self.max_size.setRange(1, 10000)
-        self.max_size.setValue(100)
+        self.max_size = NoScrollDoubleSpinBox()
+        self.max_size.setRange(0.01, 10000.0)
+        self.max_size.setValue(2.0)
+        self.max_size.setDecimals(2)
+        self.max_size.setSingleStep(0.1)
         self.max_size.setSuffix(" mm")
         self.max_size.setFixedWidth(100)  # Compact width
-        self.max_size.setButtonSymbols(QSpinBox.UpDownArrows)
+        self.max_size.setButtonSymbols(QDoubleSpinBox.UpDownArrows)
         self.max_size.setStyleSheet("""
-            QSpinBox {
+            QDoubleSpinBox {
                 padding: 4px;
                 border: 1px solid #ced4da;
                 border-radius: 4px;
@@ -425,16 +425,45 @@ class ModernMeshGenGUI(QMainWindow):
         size_layout.addWidget(self.max_size, 1)
         quality_layout.addLayout(size_layout)
 
+        # Min Element Size (decoupled)
+        min_size_layout = QHBoxLayout()
+        min_size_label = QLabel("Min Element Size:")
+        min_size_label.setStyleSheet("font-size: 11px; color: #495057;")
+        min_size_layout.addWidget(min_size_label)
+
+        self.min_size = NoScrollDoubleSpinBox()
+        self.min_size.setRange(0.01, 1000.0)
+        self.min_size.setValue(1.0)
+        self.min_size.setDecimals(2)
+        self.min_size.setSingleStep(0.5)
+        self.min_size.setSuffix(" mm")
+        self.min_size.setFixedWidth(100)
+        self.min_size.setButtonSymbols(QDoubleSpinBox.UpDownArrows)
+        self.min_size.setToolTip("Minimum element size near surfaces (for quality/detail)")
+        self.min_size.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+        """)
+        min_size_layout.addWidget(self.min_size, 1)
+        quality_layout.addLayout(min_size_layout)
+
         # Mesh strategy selector
         strategy_layout = QHBoxLayout()
         strategy_label = QLabel("Mesh Strategy:")
         strategy_label.setStyleSheet("font-size: 11px; color: #495057;")
         strategy_layout.addWidget(strategy_label)
 
-        self.mesh_strategy = QComboBox()
+        self.mesh_strategy = NoScrollComboBox()
         self.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)",
             "Tetrahedral (GPU Delaunay)",
+            # Exhaustive merged into Delaunay
             "Hex Dominant (Subdivision)",
             "Hex Dominant Testing",
             "Polyhedral (Dual)"
@@ -443,10 +472,12 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy.setToolTip(
             "Tetrahedral (Delaunay): Robust conformal tet mesh (CPU)\n"
             "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
+            "Exhaustive (Parallel Race): Tries ALL strategies, picks best score\n"
             "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
             "Hex Dominant Testing: Visualize CoACD components\n"
             "Polyhedral (Dual): Polyhedral cells from tet dual"
         )
+        self.mesh_strategy.currentTextChanged.connect(self.on_strategy_changed)
         self.mesh_strategy.setStyleSheet("""
             QComboBox {
                 padding: 5px;
@@ -466,6 +497,8 @@ class ModernMeshGenGUI(QMainWindow):
         self.curvature_adaptive.setToolTip("Refine mesh on curved surfaces")
         quality_layout.addWidget(self.curvature_adaptive)
         
+
+        
         # STL Export checkbox
         self.save_stl = QCheckBox("Save intermediate STL files")
         self.save_stl.setStyleSheet("color: black; font-size: 11px;")
@@ -477,7 +510,7 @@ class ModernMeshGenGUI(QMainWindow):
         ansys_layout = QHBoxLayout()
         ansys_label = QLabel("ANSYS Export:")
         ansys_label.setStyleSheet("color: black; font-size: 11px; font-weight: bold;")
-        self.ansys_mode = QComboBox()
+        self.ansys_mode = NoScrollComboBox()
         self.ansys_mode.addItems(["None", "CFD (Fluent)", "FEA (Mechanical)"])
         self.ansys_mode.setStyleSheet("color: black; font-size: 11px;")
         self.ansys_mode.setToolTip(
@@ -488,10 +521,154 @@ class ModernMeshGenGUI(QMainWindow):
         ansys_layout.addWidget(self.ansys_mode, 1)
         quality_layout.addLayout(ansys_layout)
 
+        # Element Order selector (Tet4/Tet10)
+        element_order_layout = QHBoxLayout()
+        element_order_label = QLabel("Element Type:")
+        element_order_label.setStyleSheet("color: black; font-size: 11px; font-weight: bold;")
+        self.element_order = NoScrollComboBox()
+        self.element_order.addItems(["Tet10 (Quadratic)", "Tet4 (Linear)"])
+        self.element_order.setCurrentIndex(0)  # Default to Tet10
+        self.element_order.setStyleSheet("color: black; font-size: 11px;")
+        self.element_order.setToolTip(
+            "Tet10: 10-node quadratic tetrahedra (higher accuracy, more nodes)\n"
+            "Tet4: 4-node linear tetrahedra (faster, fewer nodes)"
+        )
+        element_order_layout.addWidget(element_order_label)
+        element_order_layout.addWidget(self.element_order, 1)
+        quality_layout.addLayout(element_order_layout)
+
+        # Defer Quality Calculation checkbox
+        self.defer_quality = QCheckBox("Defer Quality Calculation")
+        self.defer_quality.setStyleSheet("color: black; font-size: 11px;")
+        self.defer_quality.setToolTip(
+            "Show mesh immediately without quality calculation.\n"
+            "Quality metrics will be calculated in background after display."
+        )
+        self.defer_quality.setChecked(False)  # Default off
+        quality_layout.addWidget(self.defer_quality)
+
+        # === EXHAUSTIVE STRATEGY CONTROLS (initially hidden) ===
+        self.exhaustive_controls = QWidget()
+        exhaustive_layout = QVBoxLayout(self.exhaustive_controls)
+        exhaustive_layout.setContentsMargins(0, 5, 0, 5)
+        exhaustive_layout.setSpacing(8)
+
+        # Score Threshold Slider
+        threshold_header = QHBoxLayout()
+        threshold_label = QLabel("Score Threshold:")
+        threshold_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        threshold_header.addWidget(threshold_label)
+        
+        self.threshold_value_label = QLabel("50")
+        self.threshold_value_label.setStyleSheet("font-size: 11px; color: #dc3545; font-weight: bold;")
+        threshold_header.addStretch()
+        threshold_header.addWidget(self.threshold_value_label)
+        exhaustive_layout.addLayout(threshold_header)
+        
+        self.score_threshold_slider = NoScrollSlider(Qt.Horizontal)
+        self.score_threshold_slider.setRange(10, 200)
+        self.score_threshold_slider.setValue(50)
+        self.score_threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.score_threshold_slider.setTickInterval(20)
+        self.score_threshold_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #dee2e6;
+                height: 6px;
+                background: #e9ecef;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #dc3545;
+                border: 1px solid #c82333;
+                width: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #c82333;
+            }
+        """)
+        self.score_threshold_slider.valueChanged.connect(self.on_score_threshold_changed)
+        exhaustive_layout.addWidget(self.score_threshold_slider)
+        
+        threshold_info = QLabel("Stop if Score < Threshold (0 = Perfect, Lower is Better)")
+        threshold_info.setStyleSheet("font-size: 9px; color: #6c757d;")
+        threshold_info.setAlignment(Qt.AlignCenter)
+        exhaustive_layout.addWidget(threshold_info)
+
+        # Strategy Order List
+        order_label = QLabel("Strategy Order (drag to reorder):")
+        order_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold; margin-top: 5px;")
+        exhaustive_layout.addWidget(order_label)
+        
+        # Select/Deselect All Button
+        self.toggle_strategies_btn = QPushButton("Select/Deselect All")
+        self.toggle_strategies_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e9ecef;
+                border: 1px solid #ced4da;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 10px;
+                color: #495057;
+            }
+            QPushButton:hover {
+                background-color: #dde0e3;
+            }
+        """)
+        self.toggle_strategies_btn.clicked.connect(self.toggle_all_strategies)
+        exhaustive_layout.addWidget(self.toggle_strategies_btn)
+        
+        self.strategy_order_list = QListWidget()
+        self.strategy_order_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.strategy_order_list.setDefaultDropAction(Qt.MoveAction)
+        self.strategy_order_list.setMaximumHeight(150)
+        self.strategy_order_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 10px;
+            }
+            QListWidget::item {
+                padding: 3px;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            QListWidget::item:selected {
+                background-color: #0d6efd;
+                color: white;
+            }
+        """)
+        # Populate with default strategies
+        default_strategies = [
+            "tet_delaunay_optimized",
+            "tet_frontal_optimized",
+            "tet_hxt_optimized",
+            "tet_mmg3d_optimized",
+            "very_coarse_tet",
+            "adaptive_coarse_to_fine",
+            "linear_tet_delaunay",
+            "linear_tet_frontal",
+            "automatic_gmsh_default",
+        ]
+        for strat in default_strategies:
+            item = QListWidgetItem(strat)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.strategy_order_list.addItem(item)
+        exhaustive_layout.addWidget(self.strategy_order_list)
+        
+        self.exhaustive_controls.setVisible(False)  # Hidden by default
+        quality_layout.addWidget(self.exhaustive_controls)
+
+        # Trigger initial visibility check
+        self.on_strategy_changed(self.mesh_strategy.currentText())
+
+
         # Worker Count Slider
         from multiprocessing import cpu_count
         total_cores = cpu_count()
-        default_workers = max(1, min(int(total_cores * 0.65), 6))
+        default_workers = 4  # Fixed default per user request
         
         worker_sublayout = QVBoxLayout()
         worker_sublayout.setSpacing(5)
@@ -507,7 +684,7 @@ class ModernMeshGenGUI(QMainWindow):
         worker_header.addWidget(self.worker_value_label)
         worker_sublayout.addLayout(worker_header)
         
-        self.worker_count_slider = QSlider(Qt.Horizontal)
+        self.worker_count_slider = NoScrollSlider(Qt.Horizontal)
         self.worker_count_slider.setRange(1, min(total_cores, 32))
         self.worker_count_slider.setValue(default_workers)
         self.worker_count_slider.setTickPosition(QSlider.TicksBelow)
@@ -1100,6 +1277,50 @@ class ModernMeshGenGUI(QMainWindow):
 
         return panel
 
+    def load_settings(self):
+        """Load GUI settings from JSON file"""
+        try:
+            if self.settings_file.exists():
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                
+                # Restore settings
+                if 'max_size' in settings:
+                    self.max_size.setValue(settings['max_size'])
+                if 'min_size' in settings:
+                    self.min_size.setValue(settings['min_size'])
+                if 'quality_preset' in settings:
+                    index = self.quality_preset.findText(settings['quality_preset'])
+                    if index >= 0:
+                        self.quality_preset.setCurrentIndex(index)
+                if 'mesh_strategy' in settings:
+                    index = self.mesh_strategy.findText(settings['mesh_strategy'])
+                    if index >= 0:
+                        self.mesh_strategy.setCurrentIndex(index)
+                if 'worker_count' in settings:
+                    self.worker_count_slider.setValue(settings['worker_count'])
+                if 'defer_quality' in settings:
+                    self.defer_quality.setChecked(settings['defer_quality'])
+        except Exception as e:
+            print(f"[Warning] Could not load settings: {e}")
+    
+    def save_settings(self):
+        """Save GUI settings to JSON file"""
+        try:
+            settings = {
+                'max_size': self.max_size.value(),
+                'min_size': self.min_size.value(),
+                'quality_preset': self.quality_preset.currentText(),
+                'mesh_strategy': self.mesh_strategy.currentText(),
+                'worker_count': self.worker_count_slider.value(),
+                'defer_quality': self.defer_quality.isChecked()
+            }
+            
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            print(f"[Warning] Could not save settings: {e}")
+
     def create_right_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -1191,6 +1412,180 @@ class ModernMeshGenGUI(QMainWindow):
         layout.addWidget(console_frame)
         return panel
 
+    # ===================================
+    # SETTINGS PERSISTENCE
+    # ===================================
+    def load_settings(self):
+        """Load settings from previous session."""
+        try:
+            if self.settings_file.exists():
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                
+                # Apply saved settings to widgets
+                if 'worker_count' in settings and hasattr(self, 'worker_count_slider'):
+                    self.worker_count_slider.setValue(settings['worker_count'])
+                    self.worker_value_label.setText(f"{settings['worker_count']} workers")
+                    
+                if 'quality_preset' in settings and hasattr(self, 'quality_preset'):
+                    idx = self.quality_preset.findText(settings['quality_preset'])
+                    if idx >= 0:
+                        self.quality_preset.setCurrentIndex(idx)
+                        
+                if 'mesh_strategy' in settings and hasattr(self, 'mesh_strategy'):
+                    idx = self.mesh_strategy.findText(settings['mesh_strategy'])
+                    if idx >= 0:
+                        self.mesh_strategy.setCurrentIndex(idx)
+                        
+                if 'target_elements' in settings and hasattr(self, 'target_elements'):
+                    self.target_elements.setValue(settings['target_elements'])
+                    
+                if 'max_size' in settings and hasattr(self, 'max_size'):
+                    self.max_size.setValue(settings['max_size'])
+                    
+                if 'curvature_adaptive' in settings and hasattr(self, 'curvature_adaptive'):
+                    self.curvature_adaptive.setChecked(settings['curvature_adaptive'])
+                
+                # Load defer_quality
+                if 'defer_quality' in settings and hasattr(self, 'defer_quality'):
+                    self.defer_quality.setChecked(settings['defer_quality'])
+                    
+                # Load element_order
+                if 'element_order' in settings and hasattr(self, 'element_order'):
+                    idx = self.element_order.findText(settings['element_order'])
+                    if idx >= 0:
+                        self.element_order.setCurrentIndex(idx)
+
+                # Load strategy_order
+                if 'strategy_order' in settings and hasattr(self, 'strategy_order_list'):
+                    saved_strategies = settings['strategy_order']
+                    if saved_strategies:
+                        self.strategy_order_list.clear()
+                        for entry in saved_strategies:
+                            # Handle both new dict format and legacy string format
+                            if isinstance(entry, dict):
+                                name = entry.get('name')
+                                checked = entry.get('checked', True)
+                            else:
+                                name = entry
+                                checked = True  # Legacy default
+                                
+                            item = QListWidgetItem(name)
+                            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                            self.strategy_order_list.addItem(item)
+                        
+                        # Add any new default strategies that might be missing from saved list
+                        default_strategies = [
+                            "adaptive_coarse_to_fine",
+                            "linear_tet_delaunay",
+                            "linear_tet_frontal",
+                            "tet_delaunay_optimized",
+                            "tet_frontal_optimized",
+                            "tet_hxt_optimized",
+                            "tet_mmg3d_optimized",
+                            "tet_with_boundary_layers",
+                            "anisotropic_curvature",
+                            "hybrid_prism_tet",
+                            "hybrid_hex_tet",
+                            "recombined_to_hex",
+                            "transfinite_structured",
+                            "very_coarse_tet",
+                            "subdivide_and_mesh",
+                            "automatic_gmsh_default",
+                            "resurfacing_reconstruction"
+                        ]
+                        
+                    existing_strategies = set()
+                    for i in range(self.strategy_order_list.count()):
+                         existing_strategies.add(self.strategy_order_list.item(i).text())
+
+                    for default in default_strategies:
+                        if default not in existing_strategies:
+                            item = QListWidgetItem(default)
+                            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                            item.setCheckState(Qt.Checked)
+                            self.strategy_order_list.addItem(item)
+    
+
+                    
+                print("[Settings] Restored settings from previous session", flush=True)
+        except Exception as e:
+            print(f"[Settings] Could not load settings: {e}", flush=True)
+
+    def toggle_all_strategies(self):
+        """Toggle all strategies selected/deselected"""
+        if not hasattr(self, 'strategy_order_list'):
+            return
+            
+        # Check if all are currently selected to decide whether to select all or deselect all
+        all_selected = True
+        for i in range(self.strategy_order_list.count()):
+            if self.strategy_order_list.item(i).checkState() != Qt.Checked:
+                all_selected = False
+                break
+        
+        new_state = Qt.Unchecked if all_selected else Qt.Checked
+        
+        for i in range(self.strategy_order_list.count()):
+            self.strategy_order_list.item(i).setCheckState(new_state)
+
+    def get_selected_strategies(self):
+        """Collect names of currently checked strategies in list order"""
+        strategies = []
+        if not hasattr(self, 'strategy_order_list'):
+            return strategies
+            
+        for i in range(self.strategy_order_list.count()):
+            item = self.strategy_order_list.item(i)
+            if item.checkState() == Qt.Checked:
+                strategies.append(item.text())
+        return strategies
+    
+    def save_settings(self):
+        """Save current settings for next session."""
+        try:
+            settings = {
+                'worker_count': self.worker_count_slider.value() if hasattr(self, 'worker_count_slider') else 4,
+                'quality_preset': self.quality_preset.currentText() if hasattr(self, 'quality_preset') else 'Medium',
+                'mesh_strategy': self.mesh_strategy.currentText() if hasattr(self, 'mesh_strategy') else 'Tetrahedral (Delaunay)',
+                'target_elements': self.target_elements.value() if hasattr(self, 'target_elements') else 10000,
+                'max_size': self.max_size.value() if hasattr(self, 'max_size') else 100,
+                'curvature_adaptive': self.curvature_adaptive.isChecked() if hasattr(self, 'curvature_adaptive') else False,
+                'defer_quality': self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
+                'element_order': self.element_order.currentText() if hasattr(self, 'element_order') else 'Tet10 (Quadratic)',
+                'element_order': self.element_order.currentText() if hasattr(self, 'element_order') else 'Tet10 (Quadratic)',
+                'strategy_order': [],
+            }
+            
+            # Save strategy order with check state
+            if hasattr(self, 'strategy_order_list'):
+                strategies = []
+                for i in range(self.strategy_order_list.count()):
+                    item = self.strategy_order_list.item(i)
+                    strategies.append({
+                        'name': item.text(),
+                        'checked': item.checkState() == Qt.Checked
+                    })
+                settings['strategy_order'] = strategies
+            
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            print("[Settings] Saved settings for next session", flush=True)
+        except Exception as e:
+            print(f"[Settings] Could not save settings: {e}", flush=True)
+    
+    def closeEvent(self, event):
+        """Handle window close - save settings."""
+        self.save_settings()
+        
+        # Stop any running mesh generation
+        if hasattr(self, 'worker') and self.worker and self.worker.is_running:
+            self.worker.stop()
+        
+        event.accept()
+
     def calculate_suggested_element_counts(self, geom_info: dict):
         """Calculate appropriate element counts based on geometry size"""
         volume = geom_info.get('volume', 0.001)  # cubic meters
@@ -1266,8 +1661,70 @@ class ModernMeshGenGUI(QMainWindow):
 
         if preset in presets and presets[preset]:
             values = presets[preset]
-            self.target_elements.setValue(values["target"])
-            self.max_size.setValue(values["max"])
+            # Block signals to prevent triggering set_custom_preset loop
+            self.target_elements.blockSignals(True)
+            self.max_size.blockSignals(True)
+            try:
+                self.target_elements.setValue(values["target"])
+                self.max_size.setValue(values["max"])
+            finally:
+                self.target_elements.blockSignals(False)
+                self.max_size.blockSignals(False)
+
+    def set_custom_preset(self):
+        """Switch preset to Custom when values are manually modified"""
+        # Only switch if not already Custom to avoid redundant signal firing
+        if self.quality_preset.currentText() != "Custom":
+            self.quality_preset.blockSignals(True)
+            self.quality_preset.setCurrentText("Custom")
+            self.quality_preset.blockSignals(False)
+    
+    def on_target_elements_changed(self, value):
+        """Update max_size estimate when target_elements changes"""
+        # Prevent feedback loop - check VALUE not just existence
+        if getattr(self, '_updating_sync', False):
+            return
+        
+        try:
+            self._updating_sync = True
+            
+            # Estimate max_size from target using empirical relationship
+            # Size ≈ 2.0 * (38000/Target)^(1/3)
+            # Baseline: 38000 elements @ 2.0mm
+            baseline_target = 38000.0
+            baseline_size = 2.0
+            
+            size_ratio = (baseline_target / max(value, 100)) ** (1.0/3.0)
+            estimated_size = baseline_size * size_ratio
+            
+            self.max_size.blockSignals(True)
+            self.max_size.setValue(round(estimated_size, 2))
+            self.max_size.blockSignals(False)
+        finally:
+            self._updating_sync = False
+    
+    def on_max_size_changed(self, value):
+        """Update target_elements estimate when max_size changes"""
+        # Prevent feedback loop - check VALUE not just existence
+        if getattr(self, '_updating_sync', False):
+            return
+        
+        try:
+            self._updating_sync = True
+            
+            # Estimate target from max_size using inverse formula
+            # Target ~ 38000 * (2.0 / NewSize)^3
+            baseline_target = 38000.0
+            baseline_size = 2.0
+            
+            target_ratio = (baseline_size / max(value, 0.01)) ** 3.0
+            estimated_target = int(baseline_target * target_ratio)
+            
+            self.target_elements.blockSignals(True)
+            self.target_elements.setValue(min(estimated_target, 1000000))
+            self.target_elements.blockSignals(False)
+        finally:
+            self._updating_sync = False
 
     def on_worker_count_changed(self, value):
         """Handle worker count slider change"""
@@ -1419,6 +1876,34 @@ class ModernMeshGenGUI(QMainWindow):
         self.viz_range_max_label.setText(f"Max: {data_max:.2f}")
     # --------------------------------------
 
+    def on_strategy_changed(self, text):
+        """Show/hide exhaustive controls based on strategy selection"""
+        if hasattr(self, 'exhaustive_controls'):
+            # Show controls for Tetrahedral (Delaunay) which now serves as the exhaustive mode
+            is_exhaustive = "Tetrahedral (Delaunay)" in text
+            self.exhaustive_controls.setVisible(is_exhaustive)
+    
+    def on_score_threshold_changed(self, value):
+        """Update score threshold label"""
+        if hasattr(self, 'threshold_value_label'):
+            self.threshold_value_label.setText(str(value))
+    
+    def on_worker_count_changed(self, value):
+        """Update worker count label"""
+        if hasattr(self, 'worker_value_label'):
+            self.worker_value_label.setText(f"{value} workers")
+    
+    def get_selected_strategies(self):
+        """Get ordered list of checked strategies from the list widget"""
+        strategies = []
+        if hasattr(self, 'strategy_order_list'):
+            for i in range(self.strategy_order_list.count()):
+                item = self.strategy_order_list.item(i)
+                if item.checkState() == Qt.Checked:
+                    strategies.append(item.text())
+        return strategies if strategies else None
+
+
     def load_cad_file(self):
         # Kill any running mesh generation workers before loading new CAD
         if self.worker and self.worker.is_running:
@@ -1478,7 +1963,9 @@ class ModernMeshGenGUI(QMainWindow):
             self.viewer.clear_iterations()
 
             # Load CAD and get geometry info
+            self.add_log(f"[DEBUG] Calling viewer.load_step_file({filepath})")
             geom_info = self.viewer.load_step_file(filepath)
+            self.add_log(f"[DEBUG] load_step_file returned: {geom_info}")
             self.current_geom_info = geom_info  # Store for logging
 
             # Load geometry for paintbrush (after CAD is loaded)
@@ -1561,8 +2048,8 @@ class ModernMeshGenGUI(QMainWindow):
             # Format as "Xm Ys" or "Xs"
             if remaining < 0:
                 eta_text = "Finishing..."
-            elif remaining < 60:
-                eta_text = f"{int(remaining)}s"
+            elif remaining < 180: # Sub 3 minutes: High precision
+                eta_text = f"{remaining:.2f}s"
             else:
                 mins = int(remaining // 60)
                 secs = int(remaining % 60)
@@ -1591,13 +2078,13 @@ class ModernMeshGenGUI(QMainWindow):
         self.phase_completion_times = {}
         self.master_progress = 0.0
         
-        # Calculate phase weights based on target elements and quality preset
-        element_target = self.target_elements.value()
-        quality_preset = self.quality_preset.currentText()
+        
+        # Calculate phase weights with defaults (target_elements removed from UI)
+        element_target = 10000  # Default for phase weight calculation
+        quality_preset = "Standard"  # Default
         self.phase_weights = self.calculate_phase_weights(element_target, quality_preset)
         
         self.add_log(f"[DEBUG] Phase weights calculated: {self.phase_weights}")
-        self.add_log(f"[DEBUG] Target elements: {element_target}, Quality: {quality_preset}")
         
         # Reset master bar if it exists
         if hasattr(self, 'master_bar'):
@@ -1608,16 +2095,20 @@ class ModernMeshGenGUI(QMainWindow):
         if hasattr(self, 'current_process_label'):
             self.current_process_label.setText("Initializing...")
 
-        # Collect quality parameters from GUI
+        # Collect quality parameters from GUI (target_elements removed)
         quality_params = {
-            "quality_preset": self.quality_preset.currentText(),
-            "target_elements": self.target_elements.value(),
             "max_size_mm": self.max_size.value(),
+            "min_size_mm": self.min_size.value(),  # User-specified minimum size (decoupled from max)
             "curvature_adaptive": self.curvature_adaptive.isChecked(),
             "mesh_strategy": self.mesh_strategy.currentText(),
             "save_stl": self.save_stl.isChecked(),  # Export intermediate STL files
             "ansys_mode": self.ansys_mode.currentText(),  # ANSYS export mode
-            "worker_count": self.worker_count_slider.value()  # User-selected worker count
+            "worker_count": self.worker_count_slider.value(),  # User-selected worker count
+            # Exhaustive strategy parameters
+            "score_threshold": self.score_threshold_slider.value() if hasattr(self, 'score_threshold_slider') else 50,
+            "strategy_order": self.get_selected_strategies() if hasattr(self, 'strategy_order_list') else None,
+            "element_order": 2 if hasattr(self, 'element_order') and "Tet10" in self.element_order.currentText() else 1,
+            "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
         }
 
         # Add painted regions if any exist
@@ -1646,7 +2137,6 @@ class ModernMeshGenGUI(QMainWindow):
 
         self.add_log("=" * 70)
         self.add_log("Starting PARALLEL mesh generation...")
-        self.add_log(f"Quality: {quality_params['quality_preset']}, Target: {quality_params['target_elements']:,} elements")
         self.add_log(f"Max element size: {quality_params['max_size_mm']} mm (ANSYS-style, no minimum)")
         self.add_log(f"Strategy: {quality_params['mesh_strategy']}")
         if quality_params['curvature_adaptive']:
@@ -1958,11 +2448,10 @@ class ModernMeshGenGUI(QMainWindow):
     def add_completed_stage_to_ui(self, stage_name: str, duration: float):
         """Add a completed stage to the UI list"""
         # Format duration
-        if duration < 1:
-            time_str = "< 1s"
-        elif duration < 60:
-            time_str = f"{int(duration)}s"
-        else:
+        # Format duration
+        if duration < 180: # Sub 3 minutes: High precision
+            time_str = f"{duration:.2f}s"
+        else: # > 3 minutes: Standard minutes/seconds
             mins = int(duration // 60)
             secs = int(duration % 60)
             time_str = f"{mins}m {secs}s"
@@ -2092,8 +2581,8 @@ class ModernMeshGenGUI(QMainWindow):
             import time
             if self.mesh_start_time:
                 total_time = time.time() - self.mesh_start_time
-                if total_time < 60:
-                    time_str = f"{int(total_time)}s"
+                if total_time < 180: # Sub 3 minutes: High precision
+                    time_str = f"{total_time:.2f}s"
                 else:
                     mins = int(total_time // 60)
                     secs = int(total_time % 60)
@@ -2134,6 +2623,28 @@ class ModernMeshGenGUI(QMainWindow):
             self.add_log(f"[DEBUG] File exists: {Path(self.mesh_file).exists() if self.mesh_file else 'N/A'}")
 
             if self.mesh_file and Path(self.mesh_file).exists():
+                # Handle Deferred Quality
+                if result.get('deferred', False):
+                    self.add_log("\n[Status] Mesh generated! Quality calculation deferred.")
+                    self.add_log("[Status] Displaying mesh immediately...")
+                    
+                    # Load mesh immediately (Green/Solid)
+                    # We pass the result which contains counts but no quality metrics
+                    self.viewer.load_mesh_file(self.mesh_file, result)
+                    
+                    self.add_log("[Status] Starting background quality analysis...")
+                    self.current_process_label.setText("Calculating Quality...")
+                    
+                    # Start background worker
+                    self.quality_worker = QualityAnalysisWorker(self.mesh_file)
+                    self.quality_worker.log.connect(self.add_log)
+                    self.quality_worker.finished.connect(self.on_quality_check_finished)
+                    self.quality_worker.start()
+                    
+                    # Return early to avoid running other post-processing or chatbox updates
+                    # that rely on full quality metrics
+                    return
+
                 # Check if post-processing conversion is needed
                 strategy = self.mesh_strategy.currentText()
 
@@ -2231,6 +2742,134 @@ class ModernMeshGenGUI(QMainWindow):
             self.add_log("MESH GENERATION FAILED")
             self.add_log(f"Error: {result.get('error')}")
             self.add_log("=" * 70)
+
+    def on_quality_check_finished(self, success: bool, result: dict):
+        """Called when background quality analysis completes"""
+        if success and result.get('success'):
+            self.add_log("=" * 70)
+            self.add_log("QUALITY ANALYSIS COMPLETE")
+            self.add_log("=" * 70)
+            
+            # Merge metrics into viewer's current data
+            if hasattr(self, 'viewer') and self.viewer:
+                # Reload mesh with full quality data
+                # This ensures colors are applied correctly
+                self.add_log("[Status] Applying quality metrics to visualization...")
+                self.viewer.load_mesh_file(self.mesh_file, result)
+                
+                # Show quality report (top-right overlay disabled per user request)
+                if 'quality_metrics' in result:
+                    self.viewer.show_quality_report(result['quality_metrics'])
+                    
+                    # Log comprehensive min/max quality metrics to console
+                    metrics = result['quality_metrics']
+                    self.add_log("")
+                    self.add_log("Quality Metrics Summary:")
+                    self.add_log(f"  SICN:         min={metrics.get('sicn_min', 0.0):.4f}  avg={metrics.get('sicn_avg', 0.0):.4f}  max={metrics.get('sicn_max', 0.0):.4f}")
+                    self.add_log(f"  Gamma:        avg={metrics.get('gamma_avg', 0.0):.4f}")
+                    self.add_log(f"  Skewness:     avg={metrics.get('skewness_avg', 0.0):.4f}")
+                    self.add_log(f"  Aspect Ratio: avg={metrics.get('aspect_ratio_avg', 0.0):.2f}")
+                    self.add_log(f"  10th %ile SICN: {metrics.get('sicn_10_percentile', 0.0):.4f}")
+                    
+                    # Write quality histogram to TXT file
+                    self._write_quality_histogram(result)
+            
+            self.current_process_label.setText("Quality Verified")
+            self.add_log("[Status] Quality verified.")
+            
+            # Now update chatbox since we have metrics
+            if hasattr(self, 'chatbox') and self.chatbox:
+                 mesh_data = {
+                    'file_name': Path(self.mesh_file).name,
+                    'total_elements': result.get('total_elements', 0),
+                    'total_nodes': result.get('total_nodes', 0),
+                    **result.get('quality_metrics', {})
+                }
+                 # Re-fetch config
+                 config = getattr(self, 'last_quality_params', {})
+                 self.chatbox.update_mesh_data(mesh_data, self.cad_file, config)
+                 
+        else:
+            self.add_log(f"[Error] Quality analysis failed: {result.get('error')}")
+            self.current_process_label.setText("Quality Check Failed")
+
+    def _write_quality_histogram(self, result: dict):
+        """Write quality distribution histogram (SICN + Skewness) to TXT file for spreadsheet import"""
+        try:
+            histogram_file = None
+            if self.mesh_file:
+                histogram_file = Path(self.mesh_file).with_suffix('.quality_histogram.txt')
+            
+            if not histogram_file:
+                 return
+
+            with open(histogram_file, 'w') as f:
+                # --- SICN SECTION ---
+                per_element_quality = result.get('per_element_quality', {})
+                if per_element_quality:
+                    quality_values = list(per_element_quality.values())
+                    if quality_values:
+                        bucket_centers = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+                        bucket_counts = {center: 0 for center in bucket_centers}
+                        for q in quality_values:
+                            for center in bucket_centers:
+                                if center - 0.05 <= q < center + 0.05:
+                                    bucket_counts[center] += 1
+                                    break
+                        
+                        f.write("SICN Quality Distribution (1.0 = Perfect)\n")
+                        f.write("=" * 45 + "\n")
+                        f.write(f"Total Elements: {len(quality_values)}\n")
+                        f.write(f"Min Quality: {min(quality_values):.4f}\n")
+                        f.write(f"Max Quality: {max(quality_values):.4f}\n")
+                        f.write(f"Avg Quality: {sum(quality_values)/len(quality_values):.4f}\n")
+                        f.write("\n")
+                        f.write("Bucket\tCount\tPercentage\n")
+                        for center in bucket_centers:
+                            count = bucket_counts[center]
+                            pct = (count / len(quality_values)) * 100
+                            f.write(f"{center:.2f}\t{count}\t{pct:.2f}%\n")
+                        f.write("\n")
+                        f.write("Tab-separated (SICN):\n")
+                        f.write("\t".join([f"{c:.2f}" for c in bucket_centers]) + "\n")
+                        f.write("\t".join([str(bucket_counts[c]) for c in bucket_centers]) + "\n")
+                        f.write("\n\n")
+
+                # --- SKEWNESS SECTION ---
+                per_element_skewness = result.get('per_element_skewness', {})
+                if per_element_skewness:
+                    skew_values = list(per_element_skewness.values())
+                    if skew_values:
+                        bucket_centers = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+                        bucket_counts = {center: 0 for center in bucket_centers}
+                        for q in skew_values:
+                            # Clamp for bucket finding (skew can be slightly > 1 or < 0 due to precision)
+                            q_clamped = max(0.0, min(1.0, q))
+                            for center in bucket_centers:
+                                if center - 0.05 <= q_clamped < center + 0.05:
+                                    bucket_counts[center] += 1
+                                    break
+                        
+                        f.write("Skewness Distribution (0.0 = Perfect)\n")
+                        f.write("=" * 45 + "\n")
+                        f.write(f"Total Elements: {len(skew_values)}\n")
+                        f.write(f"Min Skewness: {min(skew_values):.4f}\n")
+                        f.write(f"Max Skewness: {max(skew_values):.4f}\n")
+                        f.write(f"Avg Skewness: {sum(skew_values)/len(skew_values):.4f}\n")
+                        f.write("\n")
+                        f.write("Bucket\tCount\tPercentage\n")
+                        for center in bucket_centers:
+                            count = bucket_counts[center]
+                            pct = (count / len(skew_values)) * 100
+                            f.write(f"{center:.2f}\t{count}\t{pct:.2f}%\n")
+                        f.write("\n")
+                        f.write("Tab-separated (Skewness):\n")
+                        f.write("\t".join([f"{c:.2f}" for c in bucket_centers]) + "\n")
+                        f.write("\t".join([str(bucket_counts[c]) for c in bucket_centers]) + "\n")
+
+            self.add_log(f"[OK] Quality histogram saved to: {histogram_file.name}")
+        except Exception as e:
+            self.add_log(f"[Warning] Could not write histogram: {e}")
 
     def on_ai_iteration_mesh_ready(self, mesh_path: str, metrics: Dict):
         """Called when an AI iteration completes - auto-display the mesh"""
@@ -2725,6 +3364,11 @@ class ModernMeshGenGUI(QMainWindow):
         
         # Close the application
         QApplication.quit()
+
+    def closeEvent(self, event):
+        """Save settings when window closes"""
+        self.save_settings()
+        event.accept()
 
 
 def main():

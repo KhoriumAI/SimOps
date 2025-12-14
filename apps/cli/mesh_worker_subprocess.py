@@ -4,6 +4,9 @@ Subprocess-based mesh generation worker
 
 Runs mesh generation in a separate process to avoid gmsh threading issues.
 Gmsh uses signals internally which only work in the main thread.
+
+OPTIMIZATION: Heavy imports are done at module load time so subsequent
+calls are faster. The GUI subprocess inherits cached imports.
 """
 
 import sys
@@ -13,13 +16,22 @@ import json
 from pathlib import Path
 from typing import Dict
 import time
-import numpy as np
 
-# Add project root to path
+# Add project root to path FIRST
 # From apps/cli/, go up 2 levels to MeshPackageLean/
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+# ==============================================================================
+# HEAVY IMPORTS - Done at module load to reduce per-call delay
+# ==============================================================================
+print("[INIT] Loading NumPy...", flush=True)
+import numpy as np
+
+print("[INIT] Loading Gmsh...", flush=True)
+import gmsh
+
+print("[INIT] Loading strategies...", flush=True)
 from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
 from strategies.hex_dominant_strategy import (
     HighFidelityDiscretization,
@@ -30,8 +42,18 @@ from strategies.polyhedral_strategy import PolyhedralMeshGenerator
 from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
 from core.config import Config
 import tempfile
-import gmsh
 
+# Pre-load GPU mesher if available (this is the main delay)
+print("[INIT] Loading GPU mesher...", flush=True)
+try:
+    from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
+    print(f"[INIT] GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
+except ImportError as e:
+    GPU_AVAILABLE = False
+    print(f"[INIT] GPU mesher not available: {e}", flush=True)
+
+print("[INIT] Ready.", flush=True)
+# ==============================================================================
 
 def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
@@ -310,10 +332,11 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
     2. Extract surface vertices and triangles
     3. Run GPU Fill & Filter pipeline
     4. Save result as Gmsh-compatible mesh
+    
+    NOTE: gpu_mesher is pre-loaded at module level for faster startup.
     """
     try:
-        from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
-        
+        # GPU_AVAILABLE and gpu_delaunay_fill_and_filter are imported at module level
         if not GPU_AVAILABLE:
             print("[GPU Mesher] GPU not available, falling back to CPU", flush=True)
             return {'success': False, 'message': 'GPU Mesher not available. Falling back to CPU meshing.'}
@@ -862,6 +885,17 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         
         # Apply quality params to config
         if quality_params:
+            # DEBUG: Print all keys to diagnose missing parameters
+            print(f"[DEBUG] quality_params keys: {list(quality_params.keys())}")
+            if 'element_order' in quality_params:
+                print(f"[DEBUG] element_order value: {quality_params['element_order']}")
+            else:
+                print(f"[DEBUG] element_order NOT in quality_params - using default")
+            if 'defer_quality' in quality_params:
+                print(f"[DEBUG] defer_quality value: {quality_params['defer_quality']}")
+            else:
+                print(f"[DEBUG] defer_quality NOT in quality_params - using default")
+            
             # Inject painted regions directly into config object (monkey-patching)
             # This allows the generator to access it without changing Config structure definition
             if 'painted_regions' in quality_params:
@@ -872,14 +906,46 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             if 'quality_preset' in quality_params:
                 print(f"[DEBUG] Using quality preset: {quality_params['quality_preset']}")
                 
-            # Update target elements if present (could be used by generator)
+            # Update target elements if present (used by adaptive sizing in strategies)
             if 'target_elements' in quality_params:
-                config.target_elements = quality_params['target_elements']
+                config.mesh_params.target_elements = int(quality_params['target_elements'])
+                print(f"[DEBUG] Set target_elements to: {quality_params['target_elements']}")
+            
+            # Update max size if present (used by adaptive sizing in strategies)
+            if 'max_size_mm' in quality_params:
+                config.mesh_params.max_size_mm = float(quality_params['max_size_mm'])
+                print(f"[DEBUG] Set max_size_mm to: {quality_params['max_size_mm']}")
+            
+            # Update min size if present (used by adaptive sizing in strategies)
+            if 'min_size_mm' in quality_params:
+                config.mesh_params.min_size_mm = float(quality_params['min_size_mm'])
+                print(f"[DEBUG] Set min_size_mm to: {quality_params['min_size_mm']}")
             
             # Update ansys_mode for CFD/FEA export
             if 'ansys_mode' in quality_params:
                 config.mesh_params.ansys_mode = quality_params['ansys_mode']
                 print(f"[DEBUG] Set ansys_mode to: {quality_params['ansys_mode']}")
+            
+            # Update exhaustive strategy parameters
+            if 'score_threshold' in quality_params:
+                config.mesh_params.score_threshold = float(quality_params['score_threshold'])
+                print(f"[DEBUG] Set score_threshold to: {quality_params['score_threshold']}")
+            
+            if 'strategy_order' in quality_params and quality_params['strategy_order']:
+                config.mesh_params.strategy_order = quality_params['strategy_order']
+                print(f"[DEBUG] Set strategy_order to: {quality_params['strategy_order']}")
+            
+            # Update element order (1=Tet4 linear, 2=Tet10 quadratic)
+            if 'element_order' in quality_params:
+                config.mesh_params.element_order = int(quality_params['element_order'])
+                print(f"[DEBUG] Set element_order to: {quality_params['element_order']} ({'Tet10 quadratic' if quality_params['element_order'] == 2 else 'Tet4 linear'})")
+            
+            # Defer quality calculation (show mesh faster)
+            if 'defer_quality' in quality_params:
+                config.defer_quality = bool(quality_params['defer_quality'])
+            else:
+                config.defer_quality = False  # Default to full quality analysis
+            print(f"[DEBUG] defer_quality = {config.defer_quality}")
 
         generator = ExhaustiveMeshGenerator(config)
 
@@ -1043,7 +1109,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 'score': best_attempt.get('score', 0),
                 'message': result.message,
                 'total_elements': metrics.get('total_elements', 0),
-                'total_nodes': metrics.get('total_nodes', 0)
+                'total_nodes': metrics.get('total_nodes', 0),
+                'deferred': metrics.get('deferred', False)  # Propagate deferred flag for background quality calc
             }
         else:
             return {

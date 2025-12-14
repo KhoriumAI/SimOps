@@ -109,17 +109,38 @@ except Exception as e:
             if not os.path.exists(tmp_stl) or os.path.getsize(tmp_stl) < 100:
                 raise Exception("STL file was not created or is empty.")
 
+            print(f"[CAD PREVIEW] Loading STL: {tmp_stl}")
             mesh = pv.read(tmp_stl)
             os.unlink(tmp_stl)
 
+            print(f"[CAD PREVIEW] Mesh stats: {mesh.n_points} points, {mesh.n_cells} cells")
+            
             if mesh.n_points == 0:
                 raise Exception("Empty mesh - no geometry in CAD file")
 
             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
-            self.viewer.current_poly_data = poly_data
+            print(f"[CAD PREVIEW] Surface extracted: {poly_data.GetNumberOfPoints()} points, {poly_data.GetNumberOfCells()} cells")
+            
+            # Apply smooth normals for better CAD visualization
+            try:
+                import vtk
+                normals_gen = vtk.vtkPolyDataNormals()
+                normals_gen.SetInputData(poly_data)
+                normals_gen.ComputePointNormalsOn()
+                normals_gen.ComputeCellNormalsOff()
+                normals_gen.SplittingOn()
+                normals_gen.SetFeatureAngle(60.0)
+                normals_gen.Update()
+                smooth_poly_data = normals_gen.GetOutput()
+                print(f"[CAD PREVIEW] Smooth normals generated")
+                self.viewer.current_poly_data = smooth_poly_data
+            except Exception as e:
+                print(f"[CAD PREVIEW] Normals failed: {e}, using raw mesh")
+                smooth_poly_data = poly_data
+                self.viewer.current_poly_data = poly_data
 
             mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(poly_data)
+            mapper.SetInputData(smooth_poly_data)
 
             self.viewer.current_actor = vtk.vtkActor()
             self.viewer.current_actor.SetMapper(mapper)
@@ -127,13 +148,18 @@ except Exception as e:
             self.viewer.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
             self.viewer.current_actor.GetProperty().SetInterpolationToPhong()
             self.viewer.current_actor.GetProperty().EdgeVisibilityOff()
+            self.viewer.current_actor.GetProperty().BackfaceCullingOff()  # Fix for complex manifolds
+            self.viewer.current_actor.GetProperty().ShadingOn()
             self.viewer.current_actor.GetProperty().SetAmbient(0.3)
             self.viewer.current_actor.GetProperty().SetDiffuse(0.7)
-            self.viewer.current_actor.GetProperty().SetSpecular(0.2)
+            self.viewer.current_actor.GetProperty().SetSpecular(0.5)
+            self.viewer.current_actor.GetProperty().SetSpecularPower(40.0)
 
+            print(f"[CAD PREVIEW] Adding actor to renderer")
             self.viewer.renderer.AddActor(self.viewer.current_actor)
             self.viewer.renderer.ResetCamera()
             self.viewer.vtk_widget.GetRenderWindow().Render()
+            print(f"[CAD PREVIEW] Render complete")
 
             volume_text = ""
             if geom_info and 'volume' in geom_info:
@@ -180,42 +206,53 @@ except Exception as e:
                 pass # Fallback to VTK check
                 
             if not nodes or not elements:
+                print(f"[MESH_LOADER DEBUG] Parsing returned empty/none. Nodes: {len(nodes) if nodes else 0}, Elements: {len(elements) if elements else 0}")
                 # Check for sibling .vtk file (e.g. model.vtk or model_fluent.vtk)
-                # If filepath is model.msh, check model.vtk
+                # If filepath is model.msh, check model.vtk or model.vtu
                 vtk_path = Path(filepath).with_suffix('.vtk')
                 if not vtk_path.exists():
+                     vtk_path = Path(filepath).with_suffix('.vtu')
+                     
+                if not vtk_path.exists():
+                     print(f"[MESH_LOADER DEBUG] Fallback VTK/VTU not found at {vtk_path}")
                      pass 
                 else:
                     print(f"[MESH_LOADER] Loading VTK fallback: {vtk_path}")
                     import pyvista as pv
-                    mesh = pv.read(str(vtk_path))
-                    
-                    # Convert PyVista mesh to VTK Generic
-                    # For rendering, we can just use the polydata directly
-                    if mesh.n_points > 0:
-                        poly_data = mesh.cast_to_unstructured_grid().extract_surface()
-                        self.viewer.current_poly_data = poly_data
+                    try:
+                        mesh = pv.read(str(vtk_path))
+                        print(f"[MESH_LOADER DEBUG] PyVista loaded mesh: {type(mesh)}, Points: {mesh.n_points}, Cells: {mesh.n_cells}")
                         
-                        mapper = vtk.vtkPolyDataMapper()
-                        mapper.SetInputData(poly_data)
-                        
-                        self.viewer.current_actor = vtk.vtkActor()
-                        self.viewer.current_actor.SetMapper(mapper)
-                        
-                        # Set default style
-                        self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
-                        self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
-                        
-                        self.viewer.renderer.AddActor(self.viewer.current_actor)
-                        self.viewer.renderer.ResetCamera()
-                        self.viewer.vtk_widget.GetRenderWindow().Render()
-                        
-                        self.viewer.info_label.setText(
-                            f"<b>Mesh Loaded (VTK)</b><br>"
-                            f"{vtk_path.name}<br>"
-                            f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
-                        )
-                        return "SUCCESS"
+                        # Convert PyVista mesh to VTK Generic
+                        # For rendering, we can just use the polydata directly
+                        if mesh.n_points > 0:
+                            poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+                            self.viewer.current_poly_data = poly_data
+                            
+                            mapper = vtk.vtkPolyDataMapper()
+                            mapper.SetInputData(poly_data)
+                            
+                            self.viewer.current_actor = vtk.vtkActor()
+                            self.viewer.current_actor.SetMapper(mapper)
+                            
+                            # Set default style
+                            self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
+                            self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
+                            
+                            self.viewer.renderer.AddActor(self.viewer.current_actor)
+                            self.viewer.renderer.ResetCamera()
+                            self.viewer.vtk_widget.GetRenderWindow().Render()
+                            
+                            self.viewer.info_label.setText(
+                                f"<b>Mesh Loaded (VTK)</b><br>"
+                                f"{vtk_path.name}<br>"
+                                f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
+                            )
+                            return "SUCCESS"
+                        else:
+                            print("[MESH_LOADER DEBUG] PyVista mesh has 0 points!")
+                    except Exception as e:
+                        print(f"[MESH_LOADER DEBUG] Failed to load PyVista fallback: {e}")
             
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
 

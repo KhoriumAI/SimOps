@@ -509,15 +509,47 @@ def generate_openfoam_hex_mesh(
         shutil.copy(msh_file, output_path)
         
         # Convert to VTK for internal visualization
-        # We try to create a sibling file with .vtk extension
-        output_vtk_path = str(Path(output_path).with_suffix('.vtk'))
+        # We try to create a sibling file with .vtk extension (or .vtu)
         vtk_file = convert_to_vtk(case_dir, verbose)
         
+        output_vtk_path = None
         if vtk_file:
+             # Preserve extension (might be .vtu or .vtk)
+             output_vtk_path = str(Path(output_path).with_suffix(vtk_file.suffix))
              shutil.copy(vtk_file, output_vtk_path)
              if verbose:
                  print(f"[OpenFOAM] Vis: VTK mesh saved to {output_vtk_path}")
         
+        # Stats calculation
+        # Gmsh often fails to read Fluent .msh files properly for stats
+        # So we try to get stats from the valid VTK/VTU file if possible
+        total_nodes = 0
+        total_elements = 0
+        
+        if vtk_file:
+            try:
+                # Use simple parsing to avoid heavy dependencies if possible
+                # But since we need accuracy, let's just parse the header or use regex
+                # Or since we are in the strategy, we can use pyvista if available (it is in requirements)
+                # But strategy runs in subprocess, might verify import first.
+                # Safer: grep the file/log or just trust the VTK generation log?
+                # The log said: "Cells: 18315"
+                # Let's try to parse the log we captured? No, we didn't capture it to a var.
+                
+                # Let's simple-parse the VTU file (XML)
+                # It has <Piece NumberOfPoints="20672" NumberOfCells="18315">
+                # Quotes can be single or double
+                content = vtk_file.read_text()
+                if 'NumberOfPoints=' in content:
+                    import re
+                    # Match="value" or ='value'
+                    p_match = re.search(r'''NumberOfPoints=['"](\d+)['"]''', content)
+                    c_match = re.search(r'''NumberOfCells=['"](\d+)['"]''', content)
+                    if p_match: total_nodes = int(p_match.group(1))
+                    if c_match: total_elements = int(c_match.group(1))
+            except:
+                pass
+
         if verbose:
             print(f"[OpenFOAM] SUCCESS: Mesh saved to {output_path}")
         
@@ -526,7 +558,9 @@ def generate_openfoam_hex_mesh(
             'output_file': output_path,
             'visualization_file': output_vtk_path if vtk_file else None,
             'strategy': f'OpenFOAM {mesher}',
-            'message': 'Hex-dominant mesh generated successfully'
+            'message': 'Hex-dominant mesh generated successfully',
+            'total_nodes': total_nodes,
+            'total_elements': total_elements
         }
         
     except Exception as e:
@@ -558,27 +592,45 @@ def convert_to_vtk(case_dir: Path, verbose: bool = True) -> Optional[Path]:
     try:
         subprocess.run(cmd, capture_output=True, timeout=120)
         
-        # VTK files are inside a VTK/ directory
-        # Look specifically in the VTK directory to avoid picking up the log
         vtk_dir = case_dir / "VTK"
-        if not vtk_dir.exists():
+        # Search for both legacy .vtk and modern .vtu (XML) files
+        found_files = list(vtk_dir.rglob("*.vtk")) + list(vtk_dir.rglob("*.vtu"))
+        vtk_files = found_files if vtk_dir.exists() else []
+
+        # If failed, try explicitly converting 'constant' directory
+        if not vtk_files:
+             if verbose:
+                 print("[OpenFOAM] No VTK/VTU files found with default settings. Retrying with -constant...")
+             
+             cmd_const = [
+                'wsl', 'bash', '-c',
+                f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; '
+                f'cd "{case_dir_wsl}" && '
+                f'foamToVTK -ascii -constant > log.vtk.const 2>&1'
+            ]
+             subprocess.run(cmd_const, capture_output=True, timeout=120)
+             found_files = list(vtk_dir.rglob("*.vtk")) + list(vtk_dir.rglob("*.vtu")) if vtk_dir.exists() else []
+             vtk_files = found_files
+
+        if not vtk_files:
             if verbose:
-                 print(f"[OpenFOAM] WARNING: VTK directory not found in {case_dir}")
-                 # Debug: print log
+                 print(f"[OpenFOAM] WARNING: Failed to generate VTK files.")
+                 # Debug: print both logs
                  log_file = case_dir / "log.vtk"
                  if log_file.exists():
-                     print(f"[OpenFOAM] VTK Log:\n{log_file.read_text()}")
+                     print(f"[OpenFOAM] foamToVTK Log 1:\n{log_file.read_text()}")
+                 log_file_const = case_dir / "log.vtk.const"
+                 if log_file_const.exists():
+                     print(f"[OpenFOAM] foamToVTK Log 2 (-constant):\n{log_file_const.read_text()}")
             return None
             
-        vtk_files = list(vtk_dir.rglob("*.vtk"))
-        
         if verbose:
-             print(f"[OpenFOAM] Found {len(vtk_files)} VTK files in {vtk_dir}:")
+             print(f"[OpenFOAM] Found {len(vtk_files)} output files in {vtk_dir}:")
              for f in vtk_files:
                  print(f"  - {f.relative_to(case_dir)} ({f.stat().st_size} bytes)")
         
         if vtk_files:
-            # Sort by size descending
+            # Sort by size descending (largest is likely the internal mesh)
             vtk_files.sort(key=lambda p: p.stat().st_size, reverse=True)
             chosen = vtk_files[0]
             if verbose:
@@ -586,7 +638,10 @@ def convert_to_vtk(case_dir: Path, verbose: bool = True) -> Optional[Path]:
             return chosen
             
         return None
-    except:
+    except Exception as e:
+        print(f"[OpenFOAM] ERROR in convert_to_vtk: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

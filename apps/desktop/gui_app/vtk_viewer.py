@@ -247,7 +247,7 @@ class VTK3DViewer(QFrame):
         self.info_label = QLabel(self)
         self.info_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(255, 255, 255, 180);
+                background-color: rgba(255, 255, 255, 255);
                 padding: 10px;
                 border-radius: 5px;
                 font-family: Arial;
@@ -545,13 +545,14 @@ class VTK3DViewer(QFrame):
 
         report_html += "</div>"
 
-        self.quality_label.setText(report_html)
-        self.quality_label.adjustSize()
-        self.quality_label.move(
-            self.width() - self.quality_label.width() - 15,
-            15
-        )
-        self.quality_label.setVisible(True)
+        # Quality overlay disabled per user request - metrics shown in console instead
+        # self.quality_label.setText(report_html)
+        # self.quality_label.adjustSize()
+        # self.quality_label.move(
+        #     self.width() - self.quality_label.width() - 15,
+        #     15
+        # )
+        # self.quality_label.setVisible(True)
 
     def add_iteration_mesh(self, mesh_path: str, metrics: Dict = None):
         """Add a new iteration mesh and display it"""
@@ -1905,7 +1906,11 @@ class VTK3DViewer(QFrame):
             traceback.print_exc()
 
     def load_step_file(self, filepath: str):
-        self.clear_view()
+        print(f"[CAD PREVIEW DEBUG] load_step_file called: {filepath}", flush=True)
+        try:
+            self.clear_view()
+        except Exception as ee:
+            print(f"[CAD PREVIEW DEBUG] clear_view failed: {ee}", flush=True)
         self.quality_label.setVisible(False)
         self.info_label.setText(f"Loading: {Path(filepath).name}")
 
@@ -2001,11 +2006,14 @@ except Exception as e:
             mesh = pv.read(tmp_stl)
             os.unlink(tmp_stl) # Cleanup temp file
 
+            print(f"[CAD PREVIEW DEBUG] STL loaded: {mesh.n_points} points, {mesh.n_cells} cells", flush=True)
+
             # --- VTK VISUALIZATION SETUP ---
             if mesh.n_points == 0:
                 raise Exception("Empty mesh - no geometry in CAD file")
 
             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+            print(f"[CAD PREVIEW DEBUG] Surface extracted: {poly_data.GetNumberOfPoints()} pts, {poly_data.GetNumberOfCells()} cells", flush=True)
             self.current_poly_data = poly_data # Store for clipping
 
             # --- IMPROVED CAD VISUALIZATION PIPELINE ---
@@ -2196,78 +2204,85 @@ except Exception as e:
                         traceback.print_exc()
                 else:
                     # Compute quality from mesh file using Gmsh
-                    print(f"[DEBUG] No quality file found, computing quality from mesh using Gmsh...")
-                    try:
-                        import gmsh
-                        gmsh.initialize()
-                        gmsh.option.setNumber("General.Terminal", 0)
-                        gmsh.merge(str(filepath))
-                        
-                        per_element_quality = {}
-                        per_element_gamma = {}
-                        per_element_skewness = {}
-                        per_element_aspect_ratio = {}
-                        
-                        # Get surface elements (triangles)
-                        tri_types, tri_tags, tri_nodes = gmsh.model.mesh.getElements(2)
-                        all_qualities = []
-                        
-                        for elem_type, tags in zip(tri_types, tri_tags):
-                            if elem_type in [2, 9]:  # Linear & Quadratic Triangles
-                                try:
-                                    # Extract SICN quality for surface triangles
-                                    sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                                    gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
-                                    
-                                    for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
-                                        tag_int = int(tag)
-                                        per_element_quality[tag_int] = float(sicn)
-                                        per_element_gamma[tag_int] = float(gamma)
-                                        per_element_skewness[tag_int] = 1.0 - float(sicn)
-                                        per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
-                                        all_qualities.append(sicn)
-                                    
-                                    print(f"[DEBUG] Computed quality for {len(tags)} surface triangles (type {elem_type})")
-                                except Exception as e:
-                                    print(f"[DEBUG] Error computing surface triangle qualities: {e}")
-                        
-                        gmsh.finalize()
-                        
-                        if per_element_quality:
-                            # Calculate statistics
-                            sorted_q = sorted(all_qualities)
-                            idx_10 = max(0, int(len(sorted_q) * 0.10))
+                    # Skip for very large meshes (> 100k elements) to avoid hang
+                    print(f"[DEBUG] No quality file found")
+                    
+                    if len(elements) > 100000:
+                        print(f"[DEBUG] Large mesh ({len(elements)} elements) - skipping quality computation to improve load time")
+                        print(f"[DEBUG] Tip: Use quality overlay button after loading")
+                    else:
+                        print(f"[DEBUG] Computing quality from mesh using Gmsh...")
+                        try:
+                            import gmsh
+                            gmsh.initialize()
+                            gmsh.option.setNumber("General.Terminal", 0)
+                            gmsh.merge(str(filepath))
                             
-                            avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma) if per_element_gamma else 0
-                            avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness) if per_element_skewness else 0
-                            avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio) if per_element_aspect_ratio else 1.0
+                            per_element_quality = {}
+                            per_element_gamma = {}
+                            per_element_skewness = {}
+                            per_element_aspect_ratio = {}
                             
-                            if not result:
-                                result = {}
-                            result['per_element_quality'] = per_element_quality
-                            result['per_element_gamma'] = per_element_gamma
-                            result['per_element_skewness'] = per_element_skewness
-                            result['per_element_aspect_ratio'] = per_element_aspect_ratio
-                            result['quality_metrics'] = {
-                                'sicn_min': min(all_qualities),
-                                'sicn_avg': sum(all_qualities) / len(all_qualities),
-                                'sicn_max': max(all_qualities),
-                                'sicn_10_percentile': sorted_q[idx_10],
-                                'gamma_avg': avg_gamma,
-                                'avg_skewness': avg_skewness,
-                                'avg_aspect_ratio': avg_aspect_ratio,
-                            }
+                            # Get surface elements (triangles)
+                            tri_types, tri_tags, tri_nodes = gmsh.model.mesh.getElements(2)
+                            all_qualities = []
                             
-                            self.current_quality_data = result
+                            for elem_type, tags in zip(tri_types, tri_tags):
+                                if elem_type in [2, 9]:  # Linear & Quadratic Triangles
+                                    try:
+                                        # Extract SICN quality for surface triangles
+                                        sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                                        gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                                        
+                                        for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                            tag_int = int(tag)
+                                            per_element_quality[tag_int] = float(sicn)
+                                            per_element_gamma[tag_int] = float(gamma)
+                                            per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                            per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                            all_qualities.append(sicn)
+                                        
+                                        print(f"[DEBUG] Computed quality for {len(tags)} surface triangles (type {elem_type})")
+                                    except Exception as e:
+                                        print(f"[DEBUG] Error computing surface triangle qualities: {e}")
                             
-                            print(f"[DEBUG] [OK][OK] Computed quality for {len(per_element_quality)} surface elements")
-                            print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
-                            print(f"[DEBUG] Gamma avg: {avg_gamma:.3f}, Skew avg: {avg_skewness:.3f}, AR avg: {avg_aspect_ratio:.2f}")
-                        
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to compute quality from mesh: {e}")
-                        import traceback
-                        traceback.print_exc()
+                            gmsh.finalize()
+                            
+                            if per_element_quality:
+                                # Calculate statistics
+                                sorted_q = sorted(all_qualities)
+                                idx_10 = max(0, int(len(sorted_q) * 0.10))
+                                
+                                avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma) if per_element_gamma else 0
+                                avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness) if per_element_skewness else 0
+                                avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio) if per_element_aspect_ratio else 1.0
+                                
+                                if not result:
+                                    result = {}
+                                result['per_element_quality'] = per_element_quality
+                                result['per_element_gamma'] = per_element_gamma
+                                result['per_element_skewness'] = per_element_skewness
+                                result['per_element_aspect_ratio'] = per_element_aspect_ratio
+                                result['quality_metrics'] = {
+                                    'sicn_min': min(all_qualities),
+                                    'sicn_avg': sum(all_qualities) / len(all_qualities),
+                                    'sicn_max': max(all_qualities),
+                                    'sicn_10_percentile': sorted_q[idx_10],
+                                    'gamma_avg': avg_gamma,
+                                    'avg_skewness': avg_skewness,
+                                    'avg_aspect_ratio': avg_aspect_ratio,
+                                }
+                                
+                                self.current_quality_data = result
+                                
+                                print(f"[DEBUG] [OK][OK] Computed quality for {len(per_element_quality)} surface elements")
+                                print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
+                                print(f"[DEBUG] Gamma avg: {avg_gamma:.3f}, Skew avg: {avg_skewness:.3f}, AR avg: {avg_aspect_ratio:.2f}")
+                            
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to compute quality from mesh: {e}")
+                            import traceback
+                            traceback.print_exc()
             else:
                 print(f"[DEBUG] Quality data already in result dict")
                 # Ensure we store it for visualization
@@ -2617,6 +2632,17 @@ except Exception as e:
                 f"Nodes: {display_nodes:,} * Elements: {display_elements:,}<br>",
                 f"Tetrahedra: {tet_count:,} * Triangles: {tri_count:,}"
             ]
+            
+            # Add bounding box dimensions if available
+            if result and result.get('bounding_box'):
+                bb = result['bounding_box']
+                dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+                info_lines.append(f"<br><b>Bounds:</b> {dims[0]:.1f} x {dims[1]:.1f} x {dims[2]:.1f} mm")
+            
+            # Add volume if available
+            if result and result.get('volume'):
+                vol = result['volume']
+                info_lines.append(f" | <b>Vol:</b> {vol:,.0f} mm³")
 
             # Add quality metrics if available in result
             if result and result.get('quality_metrics'):
