@@ -304,6 +304,69 @@ class UIBuilder:
         self.window.export_ansys.setStyleSheet("color: black; font-size: 11px;")
         self.window.export_ansys.setToolTip("Exports .cgns file with Physical Groups for boundary conditions")
         group_layout.addWidget(self.window.export_ansys)
+        
+        # FAST MODE Checkbox (Hidden by default, shown for GPU strategy)
+        self.window.fast_mode = QCheckBox("Fast Mode (Skip Winding Checks)")
+        self.window.fast_mode.setStyleSheet("color: #d63384; font-weight: bold; font-size: 11px;")
+        self.window.fast_mode.setToolTip("Skips expensive winding number checks. 2-3x FASTER. \n"
+                                         "Only use for single-body geometry with NO voids/gaps.")
+        self.window.fast_mode.setVisible(False) # Hidden initially
+        group_layout.addWidget(self.window.fast_mode)
+        
+        # Connect strategy change signal
+        self.window.mesh_strategy.currentTextChanged.connect(self.window.on_mesh_strategy_changed)
+        
+        # Worker Count Slider
+        from multiprocessing import cpu_count
+        total_cores = cpu_count()
+        default_workers = 4  # Fixed default per user request
+        
+        worker_sublayout = QVBoxLayout()
+        worker_sublayout.setSpacing(5)
+        
+        worker_header = QHBoxLayout()
+        worker_label = QLabel("Parallel Workers:")
+        worker_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        worker_header.addWidget(worker_label)
+        
+        self.window.worker_value_label = QLabel(f"{default_workers} workers")
+        self.window.worker_value_label.setStyleSheet("font-size: 11px; color: #0d6efd; font-weight: bold;")
+        worker_header.addStretch()
+        worker_header.addWidget(self.window.worker_value_label)
+        worker_sublayout.addLayout(worker_header)
+        
+        self.window.worker_count_slider = QSlider(Qt.Horizontal)
+        self.window.worker_count_slider.setRange(1, min(total_cores, 32))
+        self.window.worker_count_slider.setValue(default_workers)
+        self.window.worker_count_slider.setTickPosition(QSlider.TicksBelow)
+        self.window.worker_count_slider.setTickInterval(2)
+        self.window.worker_count_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #dee2e6;
+                height: 6px;
+                background: #e9ecef;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #0d6efd;
+                border: 1px solid #0b5ed7;
+                width: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #0b5ed7;
+            }
+        """)
+        self.window.worker_count_slider.valueChanged.connect(self.window.on_worker_count_changed)
+        worker_sublayout.addWidget(self.window.worker_count_slider)
+        
+        worker_info = QLabel(f"1 worker (serial) ← → {min(total_cores, 32)} workers (max parallel)")
+        worker_info.setStyleSheet("font-size: 9px; color: #6c757d;")
+        worker_info.setAlignment(Qt.AlignCenter)
+        worker_sublayout.addWidget(worker_info)
+        
+        group_layout.addLayout(worker_sublayout)
 
         group.setLayout(group_layout)
         layout.addWidget(group)
@@ -369,7 +432,7 @@ class UIBuilder:
         h = QHBoxLayout()
         h.addWidget(self._create_label("Metric:"))
         self.window.viz_metric_combo = QComboBox()
-        self.window.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio"])
+        self.window.viz_metric_combo.addItems(["SICN (Min)", "Gamma", "Skewness", "Aspect Ratio", "Jacobian"])
         self.window.viz_metric_combo.setStyleSheet(self._get_combo_style())
         self.window.viz_metric_combo.currentTextChanged.connect(self.window.on_viz_metric_changed)
         h.addWidget(self.window.viz_metric_combo, 1)

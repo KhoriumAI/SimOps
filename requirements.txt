@@ -27,3 +27,7 @@ pytest>=7.2.0
 black>=23.0.0
 trimesh>=3.20.0
 coacd>=1.0.0
+
+# External Dependencies (System Level)
+# - OpenFOAM v2006+ (via WSL2 on Windows) for Hex-Dominant Meshing
+# - WSL2 for Windows users

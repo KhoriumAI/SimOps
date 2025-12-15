@@ -113,59 +113,104 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
             # 2.5 Extract Surface Topology for Boundary Faces
             self.log_message("Step 2.5: Extracting surface triangles for boundary closure...")
             
-            # Get surface triangles (2D elements on 3D boundary)
-            surface_tris = []
-            tri_type = 2  # Linear triangle
+            # Map node_index -> list of surface triangle indices
+            node_surface_tris = {} 
+            # Map edge (n1, n2) -> list of surface triangle indices
+            edge_surface_tris = {}
+            
+            surface_centroids = []
             
             try:
-                # Correct Gmsh API usage: Iterate over surface entities (dim=2)
+                # Get surface entities (dim=2)
                 surface_entities = gmsh.model.getEntities(2)
                 all_surface_tris = []
                 
+                tri_count = 0
+                
                 for entity in surface_entities:
                     tag = entity[1]
-                    # Get elements for this surface entity
-                    # getElements returns: elementTypes, elementTags, nodeTags
                     elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2, tag)
                     
                     for e_type, e_tags, e_nodes in zip(elem_types, elem_tags, elem_node_tags):
-                        if e_type == tri_type:
-                            # Reshape nodes to (num_elements, 3)
+                        if e_type == 2: # Triangle
                             tris = np.array(e_nodes).reshape(-1, 3)
-                            all_surface_tris.append(tris)
+                            
+                            for tri in tris:
+                                # Map tags to indices
+                                try:
+                                    tri_idx = [node_map[n] for n in tri]
+                                except KeyError:
+                                    continue # Skip if node not found (shouldn't happen)
+                                
+                                # Store Surface Triangle
+                                all_surface_tris.append(tri_idx)
+                                current_tri_idx = tri_count
+                                tri_count += 1
+                                
+                                # Calculate Centroid
+                                coords = nodes[tri_idx]
+                                center = np.mean(coords, axis=0)
+                                surface_centroids.append(center)
+                                
+                                # Map Nodes to this Tri
+                                for n in tri_idx:
+                                    if n not in node_surface_tris: node_surface_tris[n] = []
+                                    node_surface_tris[n].append(current_tri_idx)
+                                
+                                # Map Edges to this Tri
+                                edges = [
+                                    tuple(sorted((tri_idx[0], tri_idx[1]))),
+                                    tuple(sorted((tri_idx[1], tri_idx[2]))),
+                                    tuple(sorted((tri_idx[2], tri_idx[0])))
+                                ]
+                                for edge in edges:
+                                    if edge not in edge_surface_tris: edge_surface_tris[edge] = []
+                                    edge_surface_tris[edge].append(current_tri_idx)
                 
-                if all_surface_tris:
-                    # Combine all triangles from all surfaces
-                    combined_tris = np.vstack(all_surface_tris)
-                    # Map node tags to indices
-                    tris_idx = np.vectorize(node_map.get)(combined_tris)
-                    surface_tris = tris_idx
-                    self.log_message(f"Found {len(surface_tris)} surface triangles")
-                else:
-                    self.log_message("No surface triangles found.")
-                    
+                surface_centroids = np.array(surface_centroids)
+                self.log_message(f"Found {len(surface_centroids)} surface triangles")
+                
             except Exception as e:
                 self.log_message(f"Warning: Could not extract surface triangles: {e}")
                 import traceback
                 self.log_message(traceback.format_exc())
-            
-            # 3. Compute Dual Graph (Polyhedral Faces)
+                surface_centroids = np.zeros((0, 3))
+
+            # 3. Compute Dual Graph
             self.log_message("Step 3: Computing Dual Polyhedral Faces...")
             
-            # Calculate Centroids (Dual Vertices)
-            tet_coords = nodes[tets_idx]
-            centroids = np.mean(tet_coords, axis=1)
+            # ALL Dual Nodes = [Tet Centroids] + [Surface Triangle Centroids] + [Original Surface Nodes]
+            # We need Original Surface Nodes to form the "Peaks" of the boundary cells, 
+            # recovering volume at corners/curvature.
             
-            # We need to identify internal edges to create dual faces.
-            # An internal edge in the primal mesh corresponds to a face in the dual mesh.
-            # The face connects the centroids of the tets sharing that edge.
+            tet_centroids = np.mean(nodes[tets_idx], axis=1)
+            num_tets = len(tet_centroids)
+            num_surf_tris = len(surface_centroids)
             
+            # Identify surface nodes (we need their coordinates)
+            # We can just add ALL nodes or just surface nodes? 
+            # Adding only surface nodes breaks indexing unless handled carefully.
+            # Simpler: Add ALL original nodes? No, that's wasteful for internal nodes.
+            # Let's add ONLY surface nodes.
+            
+            surface_node_indices = list(node_surface_tris.keys())
+            surface_node_map = {old_idx: i for i, old_idx in enumerate(surface_node_indices)}
+            surface_node_coords = nodes[surface_node_indices]
+            
+            offset_surf_tris = num_tets
+            offset_surf_nodes = num_tets + num_surf_tris
+            
+            if num_surf_tris > 0 and len(surface_node_indices) > 0:
+                all_dual_nodes = np.vstack([tet_centroids, surface_centroids, surface_node_coords])
+            else:
+                all_dual_nodes = tet_centroids
+
+            self.log_message(f"Total Dual Nodes: {len(all_dual_nodes)} " 
+                             f"({num_tets} tets + {num_surf_tris} surf_tris + {len(surface_node_indices)} surf_nodes)")
+
             # Build Edge -> Tets adjacency
-            # An edge is defined by sorted pair of node indices (n1, n2)
             edge_to_tets = {}
-            
             for t_idx, tet in enumerate(tets_idx):
-                # 6 edges per tet
                 edges = [
                     tuple(sorted((tet[0], tet[1]))),
                     tuple(sorted((tet[0], tet[2]))),
@@ -175,128 +220,96 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
                     tuple(sorted((tet[2], tet[3])))
                 ]
                 for edge in edges:
-                    if edge not in edge_to_tets:
-                        edge_to_tets[edge] = []
+                    if edge not in edge_to_tets: edge_to_tets[edge] = []
                     edge_to_tets[edge].append(t_idx)
             
-            self.log_message(f"Found {len(edge_to_tets)} total edges")
+            dual_faces = [] 
+            edge_to_face_idx = {}
             
-            # Filter for internal edges (shared by 3+ tets usually, but at least 1)
-            # Actually, boundary edges (on surface) also create dual faces (clipped).
-            # But for "Polyhedral" visualization, we mainly care about the internal structure.
-            # Let's generate faces for ALL edges that have > 1 tet.
-            # If an edge has only 1 tet, it's on a sharp boundary or something weird? 
-            # Actually, surface edges have > 1 tet usually? No, a surface edge might have only 1 tet if it's on the boundary volume.
-            # Wait, an edge on the boundary surface is shared by some number of tets inside the volume.
-            # The dual face for a boundary edge would be perpendicular to the boundary.
-            
-            dual_faces = [] # List of polygons (list of centroid indices)
-            edge_to_face_idx = {} # Map edge tuple -> index in dual_faces
-            
+            # --- 3A. Generate Faces for Primal Edges (Internal & Side-Walls) ---
             for edge, connected_tets in edge_to_tets.items():
-                # Include ALL edges, even boundary ones
-                # Boundary edges (< 3 tets) still form valid dual faces
-                if len(connected_tets) < 1:
-                    continue
-                    
-                # For edges with only 1-2 tets, just use them as-is (no need for ordering)
-                if len(connected_tets) <= 2:
-                    ordered_tet_indices = list(connected_tets)
-                else:
-                    # We need to order the tets around the edge to form a valid polygon.
-                    # The centroids must be ordered.
-                    # Project centroids onto a plane perpendicular to the edge.
-                    
-                    # Edge vector
-                    p1 = nodes[edge[0]]
-                    p2 = nodes[edge[1]]
-                    edge_vec = p2 - p1
-                    edge_len = np.linalg.norm(edge_vec)
-                    if edge_len < 1e-9:
-                        continue
-                    edge_vec /= edge_len
-                    
-                    # Get centroids of connected tets
-                    c_points = centroids[connected_tets]
-                    
-                    # Project points onto plane perpendicular to edge_vec
-                    # v_proj = v - (v . edge_vec) * edge_vec
-                    # We use the first point p1 as origin for projection
-                    vecs = c_points - p1
-                    dots = np.sum(vecs * edge_vec, axis=1)[:, np.newaxis]
-                    projected = vecs - dots * edge_vec
-                    
-                    # Now we have 3D points on a plane. We need 2D coords to sort by angle.
-                    # Create a local basis.
-                    # u = normalized first projected vector (if not zero)
-                    u = projected[0]
-                    if np.linalg.norm(u) < 1e-9:
-                        # All centroids are collinear with edge? Degenerate case
-                        ordered_tet_indices = list(connected_tets)
+                if len(connected_tets) < 1: continue
+                
+                is_boundary_edge = edge in edge_surface_tris
+                
+                # Case 1: Purely Internal Edge
+                if not is_boundary_edge:
+                    if len(connected_tets) <= 2:
+                        ordered_indices = list(connected_tets)
                     else:
-                        u /= np.linalg.norm(u)
-                        
-                        # v = edge_vec x u
-                        v = np.cross(edge_vec, u)
-                        
-                        # Calculate angles
-                        x = np.sum(projected * u, axis=1)
-                        y = np.sum(projected * v, axis=1)
-                        angles = np.arctan2(y, x)
-                        
-                        # Sort indices by angle
-                        sorted_indices = np.argsort(angles)
-                        ordered_tet_indices = [connected_tets[i] for i in sorted_indices]
-                
-                # Store the face
-                face_idx = len(dual_faces)
-                dual_faces.append(ordered_tet_indices)
-                edge_to_face_idx[edge] = face_idx
-                
-            self.log_message(f"Generated {len(dual_faces)} dual faces (internal edges)")
-            
-            # 3.5 Add Boundary Closure Faces for Surface Nodes
-            self.log_message("Step 3.5: Adding boundary closure faces...")
-            
-            boundary_faces_added = 0
-            for node_idx in node_surface_tris.keys():
-                # Get surface triangles sharing this boundary node
-                tri_indices = node_surface_tris[node_idx]
-                
-                # For each triangle, create a closure face using:
-                # - The tet centroid adjacent to the triangle
-                # - The triangle vertices (in dual space, we need the primal triangle)
-                
-                # Find tets adjacent to this node
-                if node_idx in node_to_edges:
-                    # Get all tets connected via edges from this node
-                    connected_tets_set = set()
-                    for edge in node_to_edges[node_idx]:
-                        if edge in edge_to_tets:
-                            connected_tets_set.update(edge_to_tets[edge])
+                        ordered_indices = self._order_angular(edge, connected_tets, nodes, tet_centroids)
                     
-                    # Create a boundary closure face from connected tet centroids
-                    # This "caps" the open side of the boundary polyhedron
-                    if len(connected_tets_set) >= 3:
-                        # Sort centroids to form a valid closure polygon
-                        boundary_tet_list = list(connected_tets_set)
-                        
-                        # Use the first connected tet centroid to project others
-                        if len(boundary_tet_list) >= 3:
-                            face_idx = len(dual_faces)
-                            dual_faces.append(boundary_tet_list)
-                            # Don't add to edge_to_face_idx since this isn't from an edge
-                            boundary_faces_added += 1
+                    dual_faces.append(ordered_indices)
+                    edge_to_face_idx[edge] = len(dual_faces) - 1
+                    
+                # Case 2: Boundary Edge (Needs Closure)
+                else:
+                    # Side Walls connect [Tet Centers] + [Surface Tri Centers]
+                    s_tris = edge_surface_tris[edge]
+                    s_indices = [idx + offset_surf_tris for idx in s_tris]
+                    
+                    combined_indices = list(connected_tets) + s_indices
+                    ordered_indices = self._order_angular(edge, combined_indices, nodes, all_dual_nodes)
+                    
+                    dual_faces.append(ordered_indices)
+                    edge_to_face_idx[edge] = len(dual_faces) - 1
+
+            self.log_message(f"Generated {len(dual_faces)} dual faces from edges")
             
-            self.log_message(f"Added {boundary_faces_added} boundary closure faces")
-            self.log_message(f"Total dual faces: {len(dual_faces)} (internal + boundary)")
+            # --- 3B. Generate Boundary Polygon Faces (Proper Voronoi) ---
+            self.log_message("Step 3.5: Creating boundary polygon faces...")
+            boundary_faces_added = 0
             
-            # ---------------------------------------------------------
-            # 4. Construct Full Polyhedral Data Structure
-            # ---------------------------------------------------------
+            # Track which boundary edges we've already processed
+            processed_boundary_edges = set()
+            
+            # For each boundary edge, create a quadrilateral face
+            # connecting the two surface triangle centroids and the two edge nodes
+            for edge, s_tris in edge_surface_tris.items():
+                if edge in processed_boundary_edges:
+                    continue
+                processed_boundary_edges.add(edge)
+                
+                # Boundary edges should have exactly 2 adjacent surface triangles
+                if len(s_tris) != 2:
+                    self.log_message(f"[WARN] Boundary edge {edge} has {len(s_tris)} adjacent triangles (expected 2)")
+                    continue
+                
+                n1, n2 = edge  # Primal node indices
+                t1_idx, t2_idx = s_tris  # Surface triangle indices
+                
+                # Convert to dual node indices
+                # Surface triangle centroids are at offset_surf_tris + tri_idx
+                c1 = t1_idx + offset_surf_tris
+                c2 = t2_idx + offset_surf_tris
+                
+                # Surface nodes are at offset_surf_nodes + surface_node_map[node_idx]
+                dn1 = offset_surf_nodes + surface_node_map[n1]
+                dn2 = offset_surf_nodes + surface_node_map[n2]
+                
+                # Create quadrilateral face: [dn1, c1, dn2, c2]
+                # Order matters for correct winding
+                # We want: node1 -> centroid1 -> node2 -> centroid2
+                face = [dn1, c1, dn2, c2]
+                dual_faces.append(face)
+                boundary_faces_added += 1
+            
+            self.log_message(f"Added {boundary_faces_added} boundary polygon faces")
+            
+            # Track face indices for cell construction
+            # Map: boundary_edge -> face_index
+            edge_to_boundary_face = {}
+            face_start_idx = len(dual_faces) - boundary_faces_added
+            
+            idx = 0
+            for edge in processed_boundary_edges:
+                edge_to_boundary_face[edge] = face_start_idx + idx
+                idx += 1
+
+
+            # 4. Construct Cells
             self.log_message("Step 4: Constructing Polyhedral Cells...")
             
-            # Build Node -> Edges adjacency to find faces for each primal node
             node_to_edges = {}
             for edge in edge_to_face_idx.keys():
                 n1, n2 = edge
@@ -305,93 +318,64 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
                 node_to_edges[n1].append(edge)
                 node_to_edges[n2].append(edge)
             
-            # Construct Polyhedra
-            # Each primal node becomes a dual polyhedron
             polyhedral_elements = []
             
-            # Debug counters
-            skipped_no_edges = 0
-            skipped_too_few_faces = 0
-            face_count_histogram = {}
-            
             for p_node_idx in range(len(nodes)):
-                if p_node_idx not in node_to_edges:
-                    skipped_no_edges += 1
-                    continue
-                    
-                connected_edges = node_to_edges[p_node_idx]
                 cell_faces = []
                 
-                for edge in connected_edges:
-                    if edge in edge_to_face_idx:
-                        face_idx = edge_to_face_idx[edge]
-                        # The face is a list of dual node indices (centroids)
-                        face_nodes = dual_faces[face_idx]
-                        cell_faces.append(face_nodes)
+                # Check if this is a surface node
+                is_surface_node = p_node_idx in node_surface_tris
                 
-                # Track face count distribution
-                num_faces = len(cell_faces)
-                face_count_histogram[num_faces] = face_count_histogram.get(num_faces, 0) + 1
+                # 1. Faces from Edges (Internal faces)
+                if p_node_idx in node_to_edges:
+                    for edge in node_to_edges[p_node_idx]:
+                        if edge in edge_to_face_idx:
+                            f_idx = edge_to_face_idx[edge]
+                            cell_faces.append(dual_faces[f_idx])
                 
-                # Lowered threshold to 1 to include boundary polyhedra
-                # VTK can handle open/partial polyhedra on boundaries
-                if len(cell_faces) >= 1:
+                # 2. Boundary Faces (Quad faces if on boundary)
+                # ONLY add boundary faces to SURFACE nodes (the "first" node of every edge)
+                # This prevents duplication - each boundary face belongs to exactly one cell
+                if is_surface_node and p_node_idx in node_to_edges:
+                    for edge in node_to_edges[p_node_idx]:
+                        if edge in edge_to_boundary_face:
+                            # Only add if this node is the "first" node in the edge (or both are surface)
+                            n1, n2 = edge
+                            other_node = n2 if n1 == p_node_idx else n1
+                            
+                            # Add to this cell only if:
+                            # - Other node is NOT a surface node, OR
+                            # - This node has smaller index (tiebreaker)
+                            if other_node not in node_surface_tris or p_node_idx < other_node:
+                                f_idx = edge_to_boundary_face[edge]
+                                cell_faces.append(dual_faces[f_idx])
+
+                
+                if len(cell_faces) >= 4:
                     polyhedral_elements.append({
                         'id': p_node_idx + 1,
                         'type': 'polyhedron',
                         'faces': cell_faces
                     })
-                else:
-                    skipped_too_few_faces += 1
             
             self.log_message(f"Constructed {len(polyhedral_elements)} polyhedral cells")
-            self.log_message(f"Skipped: {skipped_no_edges} (no edges), {skipped_too_few_faces} (too few faces)")
-            self.log_message(f"Face count histogram: {sorted(face_count_histogram.items())}")
             
-            # ---------------------------------------------------------
-            # 5. Save Data
-            # ---------------------------------------------------------
+            # 5. Save Data (JSON)
             import json
-            
-            # Save JSON for the viewer
             json_output_file = str(Path(output_file).with_suffix('.json'))
             
             poly_data = {
-                "nodes": {i: c.tolist() for i, c in enumerate(centroids)},
+                "nodes": {i: c.tolist() for i, c in enumerate(all_dual_nodes)},
                 "elements": polyhedral_elements
             }
             
             with open(json_output_file, 'w') as f:
                 json.dump(poly_data, f)
-                
+            
             self.log_message(f"Saved polyhedral data to {json_output_file}")
             
-            # Also save the surface mesh (triangulated) for legacy/fallback
-            gmsh.model.add("dual_mesh_viz")
-            surf_tag = gmsh.model.addDiscreteEntity(2)
-            c_tags = list(range(1, len(centroids) + 1))
-            c_coords = centroids.flatten()
-            gmsh.model.mesh.addNodes(2, surf_tag, c_tags, c_coords)
-            
-            tri_tags = []
-            tri_nodes = []
-            tag_counter = 1
-            
-            for face_indices in dual_faces:
-                face_tags = [i + 1 for i in face_indices]
-                v0 = face_tags[0]
-                for i in range(1, len(face_tags) - 1):
-                    v1 = face_tags[i]
-                    v2 = face_tags[i+1]
-                    tri_tags.append(tag_counter)
-                    tri_nodes.extend([v0, v1, v2])
-                    tag_counter += 1
-            
-            if tri_tags:
-                gmsh.model.mesh.addElements(2, surf_tag, [2], [tri_tags], [tri_nodes])
-            
-            gmsh.write(output_file)
-            self.log_message(f"Saved surface visualization to {output_file}")
+            # Save Debug Surface Mesh
+            self._save_debug_surface(output_file, all_dual_nodes, dual_faces)
             
             return True
             
@@ -400,5 +384,86 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
             import traceback
             self.log_message(traceback.format_exc())
             return False
+
+    def _order_angular(self, edge, indices, primal_nodes, dual_nodes):
+        """Helper to order dual nodes angularly around a primal edge"""
+        p1 = primal_nodes[edge[0]]
+        p2 = primal_nodes[edge[1]]
+        edge_vec = p2 - p1
+        edge_len = np.linalg.norm(edge_vec)
+        if edge_len < 1e-9: return list(indices)
+        edge_vec /= edge_len
+        
+        points = dual_nodes[indices]
+        
+        # Project onto plane
+        vecs = points - p1
+        dots = np.sum(vecs * edge_vec, axis=1)[:, np.newaxis]
+        projected = vecs - dots * edge_vec
+        
+        # Basis
+        if len(projected) == 0: return list(indices)
+        u = projected[0]
+        if np.linalg.norm(u) < 1e-9: return list(indices)
+        u /= np.linalg.norm(u)
+        v = np.cross(edge_vec, u)
+        
+        x = np.sum(projected * u, axis=1)
+        y = np.sum(projected * v, axis=1)
+        angles = np.arctan2(y, x)
+        
+        sorted_idx = np.argsort(angles)
+        return [indices[i] for i in sorted_idx]
+
+    def _sort_points_angular(self, center, normal, indices, dual_nodes):
+        """Sort points around a center with given normal"""
+        points = dual_nodes[indices]
+        
+        # Basis
+        if np.linalg.norm(normal) < 1e-9: return list(indices)
+        normal /= np.linalg.norm(normal)
+        
+        u = points[0] - center
+        u = u - np.dot(u, normal) * normal
+        if np.linalg.norm(u) < 1e-9: return list(indices)
+        u /= np.linalg.norm(u)
+        
+        v = np.cross(normal, u)
+        
+        vecs = points - center
+        x = np.sum(vecs * u, axis=1)
+        y = np.sum(vecs * v, axis=1)
+        angles = np.arctan2(y, x)
+        
+        sorted_idx = np.argsort(angles)
+        return [indices[i] for i in sorted_idx]
+
+    def _save_debug_surface(self, filename, nodes, faces):
+        gmsh.model.add("dual_debug")
+        tag = gmsh.model.addDiscreteEntity(2)
+        
+        # Nodes
+        n_tags = list(range(1, len(nodes)+1))
+        gmsh.model.mesh.addNodes(2, tag, n_tags, nodes.flatten())
+        
+        # Elements (Triangulate faces)
+        tri_tags = []
+        tri_nodes = []
+        t_id = 1
+        for face in faces:
+            fl = len(face)
+            if fl < 3: continue
+            f_tags = [i+1 for i in face]
+            v0 = f_tags[0]
+            for i in range(1, fl-1):
+                tri_tags.append(t_id)
+                tri_nodes.extend([v0, f_tags[i], f_tags[i+1]])
+                t_id += 1
+        
+        if tri_tags:
+            gmsh.model.mesh.addElements(2, tag, [2], [tri_tags], [tri_nodes])
+            
+        gmsh.write(filename)
+
 
 

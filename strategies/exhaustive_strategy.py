@@ -170,7 +170,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         geom_stats = self.geometry_cleanup.analyze_geometry()
 
         # Define all strategies to try
-        strategy_names = [
+        # Use custom order from config if provided
+        default_strategy_names = [
             "tet_delaunay_optimized",
             "tet_frontal_optimized",
             "tet_hxt_optimized",
@@ -190,47 +191,110 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             "automatic_gmsh_default",
             "resurfacing_reconstruction",
         ]
+        
+        # Use custom strategy order from config if provided
+        using_custom_order = False
+        if hasattr(self.config.mesh_params, 'strategy_order') and self.config.mesh_params.strategy_order:
+            strategy_names = list(self.config.mesh_params.strategy_order)  # Make a copy to avoid mutation
+            using_custom_order = True
+            self.log_message(f"Using custom strategy order: {strategy_names}")
+        else:
+            strategy_names = list(default_strategy_names)  # Make a copy to avoid mutation
+        
+        # Get score threshold from config
+        score_threshold = getattr(self.config.mesh_params, 'score_threshold', 50.0)
 
-        if TETGEN_AVAILABLE:
-            strategy_names.append("tetgen")
-        if PYMESH_AVAILABLE:
-            strategy_names.append("pymesh")
+        # Only add supplementary meshers if NOT using custom strategy order
+        # (User's custom selection should be respected exactly)
+        if not using_custom_order:
+            if TETGEN_AVAILABLE:
+                strategy_names.append("tetgen")
+            if PYMESH_AVAILABLE:
+                strategy_names.append("pymesh")
+        
+        # ANSYS FLUENT COMPATIBILITY: Filter out hex/poly strategies
+        # Fluent export only supports tetrahedral meshes
+        ansys_mode = getattr(self.config.mesh_params, 'ansys_mode', 'None')
+        if ansys_mode and ansys_mode != "None":
+            # List of strategies that produce non-tetrahedral elements
+            hex_poly_strategies = [
+                "hybrid_hex_tet",
+                "recombined_to_hex",
+                "transfinite_structured",
+                "subdivide_and_mesh",  # Produces hex elements
+                "resurfacing_reconstruction",  # Might produce non-tet
+            ]
+            
+            original_count = len(strategy_names)
+            strategy_names = [s for s in strategy_names if s not in hex_poly_strategies]
+            filtered_count = original_count - len(strategy_names)
+            
+            if filtered_count > 0:
+                self.log_message(f"[ANSYS] Filtered out {filtered_count} hex/poly strategies (Fluent requires tets)")
+                self.log_message(f"[ANSYS] Remaining strategies: {len(strategy_names)}")
 
         # Determine number of workers
-        # CRITICAL: Cap at 4 workers to prevent RAM exhaustion and "Out of Memory" crashes
-        # Running 14+ instances of Gmsh concurrently is unstable on Windows
+        # Use up to 65% of available cores for parallel meshing
+        # Cap at 6 workers to prevent Windows pool shutdown hangs
+        # (8 workers caused deadlocks during graceful termination)
         total_cores = multiprocessing.cpu_count()
-        num_workers = max(1, min(total_cores - 2, 4))
+        max_workers = max(1, min(int(total_cores * 0.65), 6))
         
-        self.log_message(f"Starting parallel pool with {num_workers} workers (Capped at 4 for stability)")
+        # Allow override via environment variable for advanced tuning
+        if 'MESH_MAX_WORKERS' in os.environ:
+            try:
+                override = int(os.environ['MESH_MAX_WORKERS'])
+                if 1 <= override <= total_cores:
+                    max_workers = override
+                    self.log_message(f"Using MESH_MAX_WORKERS override: {max_workers}")
+            except ValueError:
+                pass
+        
+        num_workers = max_workers
+        
+        self.log_message(f"Starting parallel pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
+        self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
         best_mesh_path = None
         best_score = float('inf')
         best_strategy = None
         
-        # CRITICAL: Use Manager to create a Windows-safe picklable Event proxy
-        # On Windows, standard multiprocessing.Event() cannot be pickled and passed to workers.
-        # The Manager creates a server process that holds the real event and gives us a proxy.
-        with multiprocessing.Manager() as manager:
-            # Create Event via Manager (This gives us a Windows-safe Proxy)
-            stop_event = manager.Event()
+        # OPTIMIZATION: Use sequential execution when only 1 worker or 1 strategy
+        # This avoids spawning unnecessary subprocess and the [INIT] overhead
+        use_sequential = (num_workers == 1) or (len(strategy_names) == 1)
+        
+        if use_sequential:
+            self.log_message(f"Using SEQUENTIAL mode (1 worker or 1 strategy - no subprocess overhead)")
             
-            # Prepare arguments for workers: (strategy_name, input_file, config, stop_event)
-            worker_args = [(name, input_file, self.config, stop_event) for name in strategy_names]
+            # CRITICAL: Use optimal thread count for stability + performance
+            # 6 threads provides ~4.5x speedup with excellent stability on Windows
+            # (32 threads causes access violations, 1 thread is too slow)
+            OPTIMAL_THREAD_COUNT = 6
             
-            pool = None
-            try:
-                pool = multiprocessing.Pool(processes=num_workers)
+            # Reinitialize Gmsh with controlled threading
+            self.log_message(f"[Performance] Reinitializing Gmsh with {OPTIMAL_THREAD_COUNT} threads for optimal speed/stability balance")
+            self.finalize_gmsh()
+            self.initialize_gmsh(thread_count=OPTIMAL_THREAD_COUNT)
+            
+            # CRITICAL: Reload the CAD file since we finalized Gmsh
+            if not self.load_cad_file(input_file):
+                self.log_message("[ERROR] Failed to reload CAD file after Gmsh reinitialization", level="ERROR")
+                return False
+            
+
+            for strategy_name in strategy_names:
+                self.log_message(f"\nTrying strategy: {strategy_name}")
                 
-                # Use imap_unordered to process results as they arrive
-                results_iter = pool.imap_unordered(run_strategy_wrapper, worker_args)
+                # Find the strategy method
+                method_name = f"_try_{strategy_name}"
+                method = getattr(self, method_name, None)
+                if not method:
+                    self.log_message(f"[!] Unknown strategy method: {method_name}, skipping")
+                    continue
                 
-                for strategy_name, success, metrics, result_data in results_iter:
-                    # If we already found a winner, we are just draining the pool
-                    if stop_event.is_set():
-                        continue
-                        
-                    self.log_message(f"Strategy finished: {strategy_name} (Success={success})")
+                try:
+                    # Run the strategy directly in main process
+                    success, metrics = method()
                     
                     attempt_data = {
                         'strategy': strategy_name,
@@ -239,49 +303,156 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                     }
                     
                     if success:
-                        temp_mesh_file = result_data
                         score = self._calculate_quality_score(metrics)
                         attempt_data['score'] = score
                         self.log_message(f"  Quality Score: {score:.2f}")
                         
                         if self.check_quality_targets(metrics):
                             self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} meets quality targets!")
-                            self.log_message("Signaling other strategies to stop (Graceful Shutdown)...")
                             
-                            # Signal stop - this safely signals all workers via the Manager proxy
-                            stop_event.set()
+                            # Save mesh to temp file
+                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
+                            self.save_mesh(temp_output)
                             
-                            best_mesh_path = temp_mesh_file
+                            best_mesh_path = temp_output
                             best_score = score
                             best_strategy = strategy_name
                             self.all_attempts.append(attempt_data)
-                            break # Exit loop and proceed to cleanup
+                            break  # Exit loop - we have a winner
+                        
+                        # Check if score is below threshold
+                        if score < score_threshold:
+                            self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} score {score:.2f} < threshold {score_threshold}!")
+                            
+                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
+                            self.save_mesh(temp_output)
+                            
+                            best_mesh_path = temp_output
+                            best_score = score
+                            best_strategy = strategy_name
+                            self.all_attempts.append(attempt_data)
+                            break
                         
                         # Keep as candidate
                         if score < best_score:
+                            # Save this mesh as best so far
+                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
+                            self.save_mesh(temp_output)
+                            
+                            # Clean up previous best if exists
+                            if best_mesh_path and os.path.exists(best_mesh_path):
+                                try:
+                                    os.remove(best_mesh_path)
+                                except:
+                                    pass
+                            
                             best_score = score
-                            best_mesh_path = temp_mesh_file
+                            best_mesh_path = temp_output
                             best_strategy = strategy_name
                             self.log_message(f"  New best candidate (score {score:.2f})")
-                            
                     else:
-                        attempt_data['error'] = result_data
+                        attempt_data['error'] = "Strategy returned failure"
                         attempt_data['score'] = float('inf')
                     
                     self.all_attempts.append(attempt_data)
+                    
+                except Exception as e:
+                    self.log_message(f"[!] Strategy {strategy_name} failed with error: {e}")
+                    self.all_attempts.append({
+                        'strategy': strategy_name,
+                        'success': False,
+                        'error': str(e),
+                        'score': float('inf')
+                    })
+        else:
+            # PARALLEL MODE: Use multiprocessing Pool for multiple strategies
+            # CRITICAL: Use Manager to create a Windows-safe picklable Event proxy
+            # On Windows, standard multiprocessing.Event() cannot be pickled and passed to workers.
+            # The Manager creates a server process that holds the real event and gives us a proxy.
+            with multiprocessing.Manager() as manager:
+                # Create Event via Manager (This gives us a Windows-safe Proxy)
+                stop_event = manager.Event()
                 
-                # Graceful shutdown strategy:
-                # 1. We already signaled stop_event.set() if we broke the loop.
-                # 2. Close the pool to prevent new work from starting
-                # 3. Workers will check stop_event and exit gracefully
-                pool.close()
-                pool.join()
+                # Prepare arguments for workers: (strategy_name, input_file, config, stop_event)
+                worker_args = [(name, input_file, self.config, stop_event) for name in strategy_names]
                 
-            except Exception as e:
-                self.log_message(f"[!] Parallel execution error: {e}")
-                if pool:
-                    pool.terminate() # Fallback to hard kill on error
+                pool = None
+                try:
+                    pool = multiprocessing.Pool(processes=num_workers)
+                    
+                    # Use imap_unordered to process results as they arrive
+                    results_iter = pool.imap_unordered(run_strategy_wrapper, worker_args)
+                    
+                    for strategy_name, success, metrics, result_data in results_iter:
+                        # If we already found a winner, we are just draining the pool
+                        if stop_event.is_set():
+                            continue
+                            
+                        self.log_message(f"Strategy finished: {strategy_name} (Success={success})")
+                        
+                        attempt_data = {
+                            'strategy': strategy_name,
+                            'success': success,
+                            'metrics': metrics
+                        }
+                        
+                        if success:
+                            temp_mesh_file = result_data
+                            score = self._calculate_quality_score(metrics)
+                            attempt_data['score'] = score
+                            self.log_message(f"  Quality Score: {score:.2f}")
+                            
+                            if self.check_quality_targets(metrics):
+                                self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} meets quality targets!")
+                                self.log_message("Signaling other strategies to stop (Graceful Shutdown)...")
+                                
+                                # Signal stop - this safely signals all workers via the Manager proxy
+                                stop_event.set()
+                                
+                                best_mesh_path = temp_mesh_file
+                                best_score = score
+                                best_strategy = strategy_name
+                                self.all_attempts.append(attempt_data)
+                                break # Exit loop and proceed to cleanup
+                            
+                            # Check if score is below threshold (user-settable early stop)
+                            if score < score_threshold:
+                                self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} score {score:.2f} < threshold {score_threshold}!")
+                                self.log_message("Signaling other strategies to stop (Score Threshold)...")
+                                
+                                stop_event.set()
+                                
+                                best_mesh_path = temp_mesh_file
+                                best_score = score
+                                best_strategy = strategy_name
+                                self.all_attempts.append(attempt_data)
+                                break
+                            
+                            # Keep as candidate
+                            if score < best_score:
+                                best_score = score
+                                best_mesh_path = temp_mesh_file
+                                best_strategy = strategy_name
+                                self.log_message(f"  New best candidate (score {score:.2f})")
+                                
+                        else:
+                            attempt_data['error'] = result_data
+                            attempt_data['score'] = float('inf')
+                        
+                        self.all_attempts.append(attempt_data)
+                    
+                    # Graceful shutdown strategy:
+                    # 1. We already signaled stop_event.set() if we broke the loop.
+                    # 2. Close the pool to prevent new work from starting
+                    # 3. Workers will check stop_event and exit gracefully
+                    pool.close()
                     pool.join()
+                    
+                except Exception as e:
+                    self.log_message(f"[!] Parallel execution error: {e}")
+                    if pool:
+                        pool.terminate() # Fallback to hard kill on error
+                        pool.join()
                 
         # Process the winner
         if best_mesh_path and os.path.exists(best_mesh_path):
@@ -517,15 +688,16 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         """
         self.log_message("Tetrahedral HXT (Fast-Path) with standard optimization...")
 
-        # PRODUCTION SETTINGS: Prevent 4-million element explosion
-        # Set reasonable mesh sizes (assuming typical mechanical part in mm)
-        diagonal = self.geometry_info.get('diagonal', 100.0)
-        gmsh.option.setNumber("Mesh.MeshSizeMin", diagonal / 200.0)  # Prevent microscopic tets
-        gmsh.option.setNumber("Mesh.MeshSizeMax", diagonal / 10.0)   # Allow coarser tets
+        # Build mesh parameters from config (max_size_mm/min_size_mm from GUI)
+        mesh_params = {
+            'max_size_mm': self.config.mesh_params.max_size_mm,
+            'min_size_mm': self.config.mesh_params.min_size_mm
+        }
+        self.apply_mesh_parameters(mesh_params)
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay 2D
         gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Parallel, Robust)
-        gmsh.option.setNumber("Mesh.ElementOrder", 2)  # Quadratic
+        gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)  # User-selected
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
@@ -543,7 +715,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # Frontal-Delaunay 3D
-        gmsh.option.setNumber("Mesh.ElementOrder", 2)
+        gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
@@ -564,7 +736,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Correct ID is 10)
-        gmsh.option.setNumber("Mesh.ElementOrder", 2)
+        gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
@@ -581,7 +753,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 7)  # MMG3D
-        gmsh.option.setNumber("Mesh.ElementOrder", 2)
+        gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
@@ -620,7 +792,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             # Standard tet mesh for core
             gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
             gmsh.option.setNumber("Mesh.Smoothing", 15)
 
             return self._generate_and_analyze()
@@ -650,7 +822,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             gmsh.option.setNumber("Mesh.AnisoMax", 100)  # Allow high anisotropy
             gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             return self._generate_and_analyze()
 
@@ -683,7 +855,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
             gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             return self._generate_and_analyze()
 
@@ -701,7 +873,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)  # 3D recombination
             gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 3)  # Simple full-quad
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             self.log_message("[OK] Recombination to hex enabled")
 
@@ -722,7 +894,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
             gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)  # Blossom
             gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)  # All quads
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             return self._generate_and_analyze()
 
@@ -782,7 +954,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 self.log_message(f"[!] Too many surfaces failed transfinite ({failed_surfaces}/{len(surfaces)})")
                 return False, None
 
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             self.log_message("[OK] Transfinite constraints applied")
 
@@ -820,6 +992,59 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         try:
             diagonal = self.geometry_info.get('diagonal', 1.0)
+            volume = self.geometry_info.get('volume', None)
+            
+            # Calculate heuristic size based on target elements
+            target_elements = getattr(self.config.mesh_params, 'target_elements', 8000)
+            target_elements = max(target_elements, 100) # prevent zero/negative
+            
+            heuristic_max = None
+            if volume and volume > 0:
+                # Volume-based sizing (Robust)
+                # Size ~ 2.0 * (Volume / Target)^(1/3)
+                # Assumes element volume ~ Size^3/8 and some irregularity factor
+                curr_vol_per_elem = volume / float(target_elements)
+                heuristic_max = 2.0 * (curr_vol_per_elem ** (1.0/3.0))
+                self.log_message(f"[DEBUG] Volume-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
+            
+            if not heuristic_max:
+                # Fallback to Diagonal scaling if volume missing
+                # Baseline: 38000 elements ~ diagonal/10 sizing (observed empirically)
+                # scaling_factor = 10 * (Target/38000)^(1/3)
+                scaling_factor = 10.0 * (target_elements / 38000.0) ** (1.0/3.0)
+                heuristic_max = diagonal / scaling_factor
+                self.log_message(f"[DEBUG] Diagonal-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
+
+            heuristic_min = heuristic_max / 10.0
+
+            # Determine final sizing: max_size and min_size are now independent
+            user_max_size = getattr(self.config.mesh_params, 'max_size_mm', None)
+            user_min_size = getattr(self.config.mesh_params, 'min_size_mm', None)
+            
+            self.log_message(f"[DEBUG] user_max_size from config: {user_max_size}")
+            self.log_message(f"[DEBUG] user_min_size from config: {user_min_size}")
+            
+            if user_max_size and user_max_size > 0:
+                size_max = float(user_max_size)
+                self.log_message(f"[DEBUG] Using user max_size: {size_max} mm")
+            else:
+                # No user constraint - use volume/target-based heuristic
+                size_max = heuristic_max if heuristic_max else (diagonal / 10.0)
+                self.log_message(f"[DEBUG] Using heuristic max_size: {size_max} mm")
+            
+            # Min size is now independent of max size
+            if user_min_size and user_min_size > 0:
+                size_min = float(user_min_size)
+                self.log_message(f"[DEBUG] Using user min_size: {size_min} mm")
+            else:
+                # Default: 1mm floor to prevent hang on tiny features
+                size_min = 1.0
+                self.log_message(f"[DEBUG] Using default min_size: {size_min} mm")
+            
+            # Sanity check: min should be < max
+            if size_min >= size_max:
+                self.log_message(f"[WARNING] min_size ({size_min}) >= max_size ({size_max}), clamping min to max/2")
+                size_min = size_max / 2.0
 
             # Create size field: fine near geometry, coarse inside
             field_tag = gmsh.model.mesh.field.add("Distance")
@@ -828,16 +1053,16 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
             threshold_field = gmsh.model.mesh.field.add("Threshold")
             gmsh.model.mesh.field.setNumber(threshold_field, "IField", field_tag)
-            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMin", diagonal / 100.0)
-            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMax", diagonal / 10.0)
-            gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", diagonal / 50.0)
-            gmsh.model.mesh.field.setNumber(threshold_field, "DistMax", diagonal / 10.0)
+            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMin", size_min)
+            gmsh.model.mesh.field.setNumber(threshold_field, "SizeMax", size_max)
+            gmsh.model.mesh.field.setNumber(threshold_field, "DistMin", size_max * 0.2)
+            gmsh.model.mesh.field.setNumber(threshold_field, "DistMax", size_max)
 
             gmsh.model.mesh.field.setAsBackgroundMesh(threshold_field)
 
             gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-            gmsh.option.setNumber("Mesh.ElementOrder", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", self.config.mesh_params.element_order)
 
             return self._generate_and_analyze()
 
@@ -969,23 +1194,53 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             if not self.generate_mesh_internal(dimension=3):
                 return False, None
 
-            # Analyze quality
-            metrics = self.analyze_current_mesh()
-            if not metrics:
-                return False, None
+            # Check if we should defer quality analysis for faster display
+            defer_quality = getattr(self.config, 'defer_quality', False)
+            
+            if defer_quality:
+                # Return minimal metrics without expensive quality analysis
+                self.log_message("[Deferred] Skipping quality analysis for faster display...")
+                
+                # Get basic element count only
+                try:
+                    elem_types, elem_tags, _ = gmsh.model.mesh.getElements(dim=3)
+                    total_elements = sum(len(tags) for tags in elem_tags)
+                    node_tags, _, _ = gmsh.model.mesh.getNodes()
+                    total_nodes = len(node_tags)
+                    
+                    metrics = {
+                        'total_elements': total_elements,
+                        'total_nodes': total_nodes,
+                        'deferred': True,
+                        # Placeholder values - actual quality will be calculated in background
+                        'gmsh_sicn': {'min': 0, 'max': 0, 'avg': 0},
+                        'gmsh_gamma': {'min': 0, 'max': 0, 'avg': 0},
+                        'skewness': {'min': 0, 'max': 0, 'avg': 0},
+                        'aspect_ratio': {'min': 0, 'max': 0, 'avg': 0}
+                    }
+                    self.log_message(f"[Deferred] Generated mesh: {total_elements:,} elements, {total_nodes:,} nodes")
+                    return True, metrics
+                except Exception as e:
+                    self.log_message(f"[!] Failed to get basic metrics: {e}")
+                    return False, None
+            else:
+                # Full quality analysis
+                metrics = self.analyze_current_mesh()
+                if not metrics:
+                    return False, None
 
-            # Check if we have valid elements
-            if metrics.get('total_elements', 0) == 0:
-                self.log_message("[!] No elements generated")
-                return False, None
+                # Check if we have valid elements
+                if metrics.get('total_elements', 0) == 0:
+                    self.log_message("[!] No elements generated")
+                    return False, None
 
-            # Check for degenerate elements (skewness = 1.0)
-            if metrics.get('skewness') and metrics['skewness']['max'] >= 0.99:
-                self.log_message("[!] Degenerate elements detected (skewness ~= 1.0)")
-                # Still return the metrics for comparison, but mark as problematic
-                return True, metrics  # Allow comparison even if poor
+                # Check for degenerate elements (skewness = 1.0)
+                if metrics.get('skewness') and metrics['skewness']['max'] >= 0.99:
+                    self.log_message("[!] Degenerate elements detected (skewness ~= 1.0)")
+                    # Still return the metrics for comparison, but mark as problematic
+                    return True, metrics  # Allow comparison even if poor
 
-            return True, metrics
+                return True, metrics
 
         except Exception as e:
             self.log_message(f"[!] Generation/analysis failed: {e}")

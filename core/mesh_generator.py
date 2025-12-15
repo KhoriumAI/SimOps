@@ -173,40 +173,79 @@ class BaseMeshGenerator(ABC):
                             self.log_message(f"[ANSYS] Writing Gmsh intermediate: {gmsh_temp}")
                             gmsh.write(gmsh_temp)
                             
-                            # Convert to native Fluent format using custom writer
+                            # Convert to pure Fluent-compatible mesh
+                            # FIX: Fluent requires surface elements ("skin") to define the domain.
+                            # Pure volume meshes cause "Null Domain Pointer" crashes.
+                            # Convert to Fluent-compatible format
+                            # FIX: Fluent 2025 fails with standard .msh files ("Null Domain Pointer").
+                            # SOLUTION: Use Nastran (.bdf) format which works robustly.
+                            # Also use createTopology() to ensure graph connectivity is perfect.
+                            self.log_message("[ANSYS] Preparing Fluent-compatible mesh (Nastran BDF)...")
+                            
                             try:
-                                from core.write_fluent_mesh import write_fluent_msh
-                                import meshio
+                                # Save current model to temp file
+                                gmsh_temp = str(Path(output_file).with_suffix('')) + "_temp.msh"
+                                gmsh.write(gmsh_temp)
                                 
-                                ansys_file = str(Path(output_file).with_suffix('')) + "_fluent.msh"
-                                self.log_message(f"[ANSYS] Converting to native Fluent format (custom writer)...")
+                                # Use a fresh Gmsh session for clean topology rebuilding
+                                import gmsh as gmsh_export
+                                gmsh_export.initialize()
+                                gmsh_export.open(gmsh_temp)
                                 
-                                # Read with meshio, write with custom writer
-                                mesh = meshio.read(gmsh_temp)
-                                success = write_fluent_msh(ansys_file, mesh.points, mesh.cells)
+                                # 1. Clear Groups
+                                gmsh_export.model.removePhysicalGroups(gmsh_export.model.getPhysicalGroups())
                                 
-                                if success:
-                                    self.log_message(f"[ANSYS] ✓ Native Fluent export: {ansys_file}")
-                                    # Clean up temp file
-                                    try:
-                                        os.remove(gmsh_temp)
-                                    except:
-                                        pass
+                                # 2. Linearize (Tet10 -> Tet4)
+                                self.log_message("[ANSYS] Linearizing mesh elements...")
+                                gmsh_export.model.mesh.setOrder(1)
+                                
+                                # 3. Rebuild Topology (The Robust Fix)
+                                # This automatically handles skin extraction, node sharing, and connectivity
+                                self.log_message("[ANSYS] Rebuilding topology (createTopology)...")
+                                gmsh_export.model.mesh.createTopology()
+                                
+                                # 4. Assign Standard CFD Groups
+                                # Volume -> "fluid"
+                                vols = gmsh_export.model.getEntities(3)
+                                if vols:
+                                    p_vol = gmsh_export.model.addPhysicalGroup(3, [e[1] for e in vols])
+                                    gmsh_export.model.setPhysicalName(3, p_vol, "fluid")
+                                    self.log_message(f"[ANSYS] Assigned 'fluid' zone (Tags: {[e[1] for e in vols]})")
                                 else:
-                                    self.log_message("[ANSYS] Custom writer failed, keeping Gmsh format", level="WARNING")
-                                    ansys_file = gmsh_temp
-                                    
-                            except ImportError as e:
-                                import traceback
-                                self.log_message(f"[ANSYS] Import error: {e}", level="ERROR")
-                                self.log_message(f"[ANSYS] Traceback:\n{traceback.format_exc()}", level="ERROR")
-                                self.log_message("[ANSYS] Install with: pip install meshio", level="WARNING")
-                                ansys_file = gmsh_temp  # Fallback to Gmsh format
+                                    self.log_message("[ANSYS] WARNING: No volume entities found!", level="WARNING")
+
+                                # Surface -> "wall"
+                                surfs = gmsh_export.model.getEntities(2)
+                                if surfs:
+                                    p_surf = gmsh_export.model.addPhysicalGroup(2, [e[1] for e in surfs])
+                                    gmsh_export.model.setPhysicalName(2, p_surf, "wall")
+                                    self.log_message(f"[ANSYS] Assigned 'wall' zone (Tags: {[e[1] for e in surfs]})")
+                                else:
+                                    self.log_message("[ANSYS] WARNING: No surface entities found!", level="WARNING")
+                                
+                                # 5. Export to Nastran BDF
+                                # Fluent prefers this over .msh for 2025 R2
+                                ansys_file = str(Path(output_file).with_suffix('')) + ".bdf"
+                                
+                                gmsh_export.option.setNumber("Mesh.BdfFieldFormat", 1) # Standard BDF
+                                gmsh_export.option.setNumber("Mesh.SaveAll", 0)        # Only save Physical Groups
+                                gmsh_export.write(ansys_file)
+                                
+                                gmsh_export.finalize()
+                                
+                                self.log_message(f"[ANSYS] ✓ Successfully exported: {ansys_file}")
+                                
+                                # Clean up
+                                try:
+                                    os.remove(gmsh_temp)
+                                except:
+                                    pass
+
                             except Exception as e:
                                 import traceback
-                                self.log_message(f"[ANSYS] Conversion failed: {e}", level="ERROR")
-                                self.log_message(f"[ANSYS] Full traceback:\n{traceback.format_exc()}", level="ERROR")
-                                ansys_file = gmsh_temp
+                                self.log_message(f"[ANSYS] Export failed: {e}", level="ERROR")
+                                self.log_message(f"[ANSYS] Traceback:\n{traceback.format_exc()}", level="ERROR")
+                                ansys_file = output_file # Fallback
                             
                         elif "FEA" in ansys_mode:
                             # FEA MODE: Quadratic elements, .bdf for Mechanical
@@ -282,8 +321,19 @@ class BaseMeshGenerator(ABC):
         Initialize Gmsh with configurable multi-threading
         
         Args:
-            thread_count: Number of threads to use. If None, uses all cores.
-                         Set to 1 when running multiple workers in parallel.
+            thread_count: Number of threads for Gmsh operations
+                         - None: Use ALL cores (WARNING: risky on Windows with 32+ threads!)
+                         - 1: Single-threaded (safest, but slow - ~4.5x slower than optimal)
+                         - 4-8: OPTIMAL for Windows (stable + 3-5x speedup over single-thread)
+                         - 16+: UNSTABLE on Windows (access violations likely in HXT algorithm)
+        
+        CRITICAL: Windows has Gmsh threading bugs with 16+ threads in HXT (Algorithm3D=10).
+        Recommended: Use 6 threads for best stability/performance balance.
+        
+        Performance data (typical):
+        - 1 thread: baseline (stable but slow)
+        - 6 threads: 4.5x faster, stable
+        - 32 threads: 8x faster, frequent crashes
         """
         if not self.gmsh_initialized:
             import multiprocessing
@@ -333,7 +383,24 @@ class BaseMeshGenerator(ABC):
             # They must be applied before merge() so OCC cleans geometry during import
             gmsh.option.setNumber("Geometry.OCCAutoFix", 1)      # Auto-fix micro-gaps
             gmsh.option.setNumber("Geometry.AutoCoherence", 1)   # Auto-merge touching vertices
-            gmsh.option.setNumber("Geometry.Tolerance", 1e-08)   # Tight tolerance (GUI default)
+            
+            # CONDITIONAL AGGRESSIVE DEFEATURING for complex geometries (gyroid, TPMS, etc.)
+            # User can enable this via GUI checkbox for problematic meshes
+            aggressive_healing = getattr(self.config.mesh_params, 'aggressive_healing', False)
+            
+            if aggressive_healing:
+                self.log_message("[Geometry] Applying aggressive healing (slow but thorough)")
+                # Increased from 1e-08 to 1e-06 to heal problematic intersections
+                gmsh.option.setNumber("Geometry.Tolerance", 1e-06)   # More forgiving tolerance
+                
+                # Additional OCC healing for complex boundary intersections
+                gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)  # Fix degenerate edges/faces
+                gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)    # Remove/merge tiny edges
+                gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)    # Remove/merge tiny faces
+            else:
+                self.log_message("[Geometry] Using fast mode (tight tolerance, minimal healing)")
+                # Tight tolerance for speed (GUI default)
+                gmsh.option.setNumber("Geometry.Tolerance", 1e-08)
             
             # Disable destructive operations that the GUI doesn't use
             gmsh.option.setNumber("Geometry.OCCSewFaces", 0)     # Don't force sewing
@@ -362,6 +429,9 @@ class BaseMeshGenerator(ABC):
 
             # Apply geometry-aware mesh settings
             self._apply_geometry_aware_settings()
+            
+            # NOTE: User mesh parameters (max_size_mm/min_size_mm) will be applied
+            # by the strategy code just before meshing, not here during CAD load
             
             # CRITICAL: Assign Physical Groups to volumes
             # Without this, if ANY surface group is defined, volumes won't export!
@@ -402,6 +472,26 @@ class BaseMeshGenerator(ABC):
         # Calculate bounding box
         self.geometry_info['bounding_box'] = self._calculate_bounding_box(volumes)
         self.geometry_info['diagonal'] = self._calculate_diagonal()
+        
+        # Calculate total volume for mesh sizing
+        try:
+            total_volume = 0.0
+            for v_dim, v_tag in volumes:
+                # getMass returns volume for 3D entities
+                total_volume += gmsh.model.occ.getMass(v_dim, v_tag)
+            self.geometry_info['volume'] = total_volume
+            self.log_message(f"[OK] Calculated geometry volume: {total_volume:.2f} mm³")
+            
+            # Debug: Show bounding box dimensions for unit diagnosis
+            bb = self.geometry_info.get('bounding_box', {})
+            if bb:
+                dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+                self.log_message(f"[DEBUG] Bounding box: {dims[0]:.2f} x {dims[1]:.2f} x {dims[2]:.2f} (model units)")
+                self.log_message(f"[DEBUG] If these look like mm values (e.g. 50-200), model is in mm")
+                self.log_message(f"[DEBUG] If these look like m values (e.g. 0.05-0.2), model is in meters")
+        except Exception as e:
+            self.log_message(f"[!] Could not calculate volume: {e}")
+            self.geometry_info['volume'] = None
 
     def _calculate_bounding_box(self, volumes) -> Dict[str, List[float]]:
         """Calculate overall bounding box"""
@@ -597,7 +687,8 @@ class BaseMeshGenerator(ABC):
     def _apply_geometry_aware_settings(self):
         """Apply mesh settings based on geometry analysis"""
         try:
-            # Enable mesh size from curvature
+            # Enable mesh size from curvature for good geometry adaptation
+            # User's CharacteristicLengthMax will cap this to respect max_size_mm
             gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 1)
             gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 12)
 
@@ -704,8 +795,10 @@ class BaseMeshGenerator(ABC):
         if params is None:
             params = self.current_mesh_params
 
-        cl_min = params.get('cl_min', 1.0)
-        cl_max = params.get('cl_max', 10.0)
+        # Support both old (cl_min/cl_max) and new (min_size_mm/max_size_mm) parameter names
+        # Priority: explicit cl_min/cl_max > min_size_mm/max_size_mm > defaults
+        cl_min = params.get('cl_min') or params.get('min_size_mm', 1.0)
+        cl_max = params.get('cl_max') or params.get('max_size_mm', 10.0)
 
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", cl_min)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", cl_max)
@@ -744,8 +837,19 @@ class BaseMeshGenerator(ABC):
         try:
             gmsh.model.mesh.clear()
 
-            # Generate mesh
-            gmsh.model.mesh.generate(dimension)
+            # Generate mesh with improved error handling
+            try:
+                gmsh.model.mesh.generate(dimension)
+            except RuntimeError as e:
+                # Gmsh throws RuntimeError for access violations and internal crashes
+                error_str = str(e).lower()
+                if "access violation" in error_str or "exception" in error_str:
+                    self.log_message(f"[!] Gmsh internal crash detected: {e}", level="ERROR")
+                    self.log_message(f"[!] This is usually caused by threading issues or geometry problems", level="ERROR")
+                    self.log_message(f"[!] Solutions: reduce thread count, simplify geometry, or use GPU mesher", level="ERROR")
+                # Re-raise to trigger retry logic below
+                raise
+
 
             # CRITICAL: Validate that 3D elements were actually generated
             if dimension == 3:

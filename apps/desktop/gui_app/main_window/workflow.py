@@ -61,7 +61,13 @@ class WorkflowManager:
             "max_size_mm": self.window.max_size.value(),
             "curvature_adaptive": self.window.curvature_adaptive.isChecked(),
             "mesh_strategy": self.window.mesh_strategy.currentText(),
-            "save_stl": self.window.save_stl.isChecked()
+            "save_stl": self.window.save_stl.isChecked(),
+            "worker_count": self.window.worker_count_slider.value(),  # User-selected worker count
+            "ansys_mode": self.window.ansys_mode.currentText(),  # CFD/FEA export mode
+            "element_order": 2 if "Tet10" in self.window.element_order.currentText() else 1,  # 1=Tet4, 2=Tet10
+            "defer_quality": self.window.defer_quality.isChecked(),  # Skip quality calculation initially
+            # FAST MODE: Skip winding filters for single-body geometry (2-3x faster)
+            "fast_mode": getattr(self.window, 'fast_mode', None) and self.window.fast_mode.isChecked() if hasattr(self.window, 'fast_mode') else False
         }
 
         # Paintbrush

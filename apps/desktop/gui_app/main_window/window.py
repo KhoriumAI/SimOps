@@ -92,6 +92,10 @@ class ModernMeshGenGUI(QMainWindow):
             self.left_container.layout().addWidget(self.chatbox)
         except ImportError:
             print("Chatbox not available")
+            
+        # Initialize UI State
+        # Trigger visibility update for Fast Mode checkbox based on initial strategy
+        self.on_mesh_strategy_changed(self.mesh_strategy.currentText())
 
     # Delegate to Helpers
     def load_cad_file(self): self.events.load_cad_file()
@@ -109,7 +113,9 @@ class ModernMeshGenGUI(QMainWindow):
     def on_viz_metric_changed(self, t): self.events.on_viz_metric_changed(t)
     def on_viz_opacity_changed(self, v): self.events.on_viz_opacity_changed(v)
     def copy_console_to_clipboard(self): self.events.copy_console_to_clipboard()
+    def on_worker_count_changed(self, v): self.events.on_worker_count_changed(v)
     def toggle_hex_visualization(self): self.events.toggle_hex_visualization()
+    def on_mesh_strategy_changed(self, t): self.events.on_mesh_strategy_changed(t)
 
     def add_log(self, message):
         self.console.append(message)

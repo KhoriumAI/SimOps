@@ -4,34 +4,21 @@ Subprocess-based mesh generation worker
 
 Runs mesh generation in a separate process to avoid gmsh threading issues.
 Gmsh uses signals internally which only work in the main thread.
-
-OPTIMIZATION: Heavy imports are done at module load time so subsequent
-calls are faster. The GUI subprocess inherits cached imports.
 """
 
-import sys
 import shutil
 import os
 import json
 from pathlib import Path
 from typing import Dict
 import time
+import numpy as np
 
-# Add project root to path FIRST
+# Add project root to path
 # From apps/cli/, go up 2 levels to MeshPackageLean/
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# ==============================================================================
-# HEAVY IMPORTS - Done at module load to reduce per-call delay
-# ==============================================================================
-print("[INIT] Loading NumPy...", flush=True)
-import numpy as np
-
-print("[INIT] Loading Gmsh...", flush=True)
-import gmsh
-
-print("[INIT] Loading strategies...", flush=True)
 from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
 from strategies.hex_dominant_strategy import (
     HighFidelityDiscretization,
@@ -39,70 +26,9 @@ from strategies.hex_dominant_strategy import (
 )
 from strategies.conformal_hex_glue import generate_conformal_hex_mesh
 from strategies.polyhedral_strategy import PolyhedralMeshGenerator
-from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
 from core.config import Config
 import tempfile
-
-# Pre-load GPU mesher if available (this is the main delay)
-print("[INIT] Loading GPU mesher...", flush=True)
-try:
-    from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
-    print(f"[INIT] GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
-except ImportError as e:
-    GPU_AVAILABLE = False
-    print(f"[INIT] GPU mesher not available: {e}", flush=True)
-
-print("[INIT] Ready.", flush=True)
-# ==============================================================================
-
-def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
-    """
-    Wrapper for OpenFOAM cfMesh hex generation.
-    
-    Converts STEP to STL first, then runs cfMesh.
-    """
-    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
-    
-    try:
-        # Step 1: Convert STEP to STL
-        print("[OpenFOAM-HEX] Step 1: Converting STEP to STL...")
-        discretizer = HighFidelityDiscretization(verbose=True)
-        temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
-        
-        success = discretizer.convert_step_to_stl(
-            cad_file, temp_stl,
-            deviation=0.01,
-            min_size=0.5,
-            max_size=10.0
-        )
-        
-        if not success:
-            return {'success': False, 'message': 'Failed to convert STEP to STL'}
-        
-        # Step 2: Get cell size from quality params
-        cell_size = quality_params.get('max_element_size', 2.0) if quality_params else 2.0
-        
-        # Step 3: Determine output path
-        mesh_folder = Path(__file__).parent / "generated_meshes"
-        mesh_folder.mkdir(exist_ok=True)
-        mesh_name = Path(cad_file).stem
-        output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
-        
-        # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
-        result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
-        
-        if not result['success']:
-            return result
-        
-        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
-        
-        return result
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {'success': False, 'message': f'OpenFOAM hex failed: {str(e)}'}
+import gmsh
 
 
 def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -147,23 +73,15 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         
         print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)))
         
-        # Step 3: Generate ADAPTIVE conformal hex mesh (STRICT QUALITY MODE)
-        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...")
+        # Step 3: Generate conformal hex mesh
+        print("[CONFORMAL-HEX] Step 3: Generating conformal hex mesh...")
+        divisions = quality_params.get('hex_divisions', 4) if quality_params else 4
+        epsilon = quality_params.get('interface_epsilon', 0.5) if quality_params else 0.5
         
-        # Strict adaptive parameters for high-quality curved surface meshing
-        quality_target = quality_params.get('quality_target', 0.98) if quality_params else 0.98  # 98% valid!
-        max_elements = quality_params.get('max_elements', 5000) if quality_params else 5000  # Allow finer mesh
-        min_divisions = quality_params.get('min_divisions', 8) if quality_params else 8  # Start finer
-        max_divisions = quality_params.get('max_divisions', 20) if quality_params else 20  # Go very fine
-        
-        from strategies.conformal_hex_glue import generate_adaptive_hex_mesh
-        
-        result = generate_adaptive_hex_mesh(
-            parts,
-            quality_target=quality_target,
-            max_elements=max_elements,
-            min_divisions=min_divisions,
-            max_divisions=max_divisions,
+        result = generate_conformal_hex_mesh(
+            parts, 
+            divisions=divisions,
+            epsilon=epsilon,
             reference_stl=temp_stl,
             verbose=True
         )
@@ -286,7 +204,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
             'metrics': {
                 'num_hexes': len(hexes),
                 'num_parts': len(parts),
-                'num_interfaces': result.get('adjacency_stats', {}).get('num_interfaces', 0),
+                'num_interfaces': result['adjacency_stats'].get('num_interfaces', 0),
                 'volume_error_pct': stats.get('volume_error_pct', 0)
             },
             'quality_metrics': {
@@ -325,11 +243,10 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
     2. Extract surface vertices and triangles
     3. Run GPU Fill & Filter pipeline
     4. Save result as Gmsh-compatible mesh
-    
-    NOTE: gpu_mesher is pre-loaded at module level for faster startup.
     """
     try:
-        # GPU_AVAILABLE and gpu_delaunay_fill_and_filter are imported at module level
+        from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
+        
         if not GPU_AVAILABLE:
             print("[GPU Mesher] GPU not available, falling back to CPU", flush=True)
             return {'success': False, 'message': 'GPU Mesher not available. Falling back to CPU meshing.'}
@@ -358,39 +275,18 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         bbox_min = np.array([bbox[0], bbox[1], bbox[2]])
         bbox_max = np.array([bbox[3], bbox[4], bbox[5]])
         
-        # Get sizing from quality params - user-specified takes priority
-        # CRITICAL: GUI uses 'max_size_mm' key, not 'max_element_size'
+        # Calculate appropriate mesh size based on target elements
         target_elements = quality_params.get('target_elements', 10000) if quality_params else 10000
-        max_element_size = quality_params.get('max_size_mm', None) if quality_params else None
-        # Fallback to old key for backwards compatibility
-        if max_element_size is None:
-            max_element_size = quality_params.get('max_element_size', None) if quality_params else None
-        min_element_size = quality_params.get('min_element_size', None) if quality_params else None
+        volume = np.prod(bbox_max - bbox_min)
+        # Rough estimate: target_elements ~= volume / (element_size^3 / 6)
+        mesh_size = (volume / (target_elements / 6)) ** (1/3)
+        mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)  # Don't go too small
         
         print(f"[GPU Mesher] Bounding box: {bbox_min} to {bbox_max}", flush=True)
+        print(f"[GPU Mesher] Target elements: {target_elements}, Mesh size: {mesh_size:.3f}", flush=True)
         
-        # Determine mesh size: user-specified max_size_mm takes priority
-        if max_element_size is not None:
-            mesh_size = float(max_element_size)
-            print(f"[GPU Mesher] Using user-specified max element size: {mesh_size:.3f} mm", flush=True)
-        else:
-            # Calculate from target_elements if not specified
-            volume = np.prod(bbox_max - bbox_min)
-            # Rough estimate: target_elements ~= volume / (element_size^3 / 6)
-            mesh_size = (volume / (target_elements / 6)) ** (1/3)
-            mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)  # Don't go too small
-            print(f"[GPU Mesher] Auto-calculated mesh size from target {target_elements}: {mesh_size:.3f}", flush=True)
-        
-        # Determine min size
-        if min_element_size is not None:
-            min_mesh_size = float(min_element_size)
-        else:
-            min_mesh_size = mesh_size * 0.5
-        
-        print(f"[GPU Mesher] Element size range: {min_mesh_size:.3f} to {mesh_size:.3f} mm", flush=True)
-        
-        # Set mesh size for surface mesh
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_mesh_size)
+        # Set mesh size
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.5)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
         
         # Generate 2D surface mesh only
@@ -419,11 +315,6 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         print(f"[GPU Mesher] Surface mesh: {len(surface_verts)} vertices, {len(surface_faces)} triangles", flush=True)
         
-        # INTERMEDIATE UPDATE: Surface Mesh
-        surface_temp = str(mesh_folder / f"{mesh_name}_surface_temp.msh")
-        gmsh.write(surface_temp)
-        print(f"[DISPLAY_UPDATE] phase=surface file={surface_temp}", flush=True)
-
         gmsh.finalize()
         
         # Step 2: Run GPU Fill & Filter pipeline
@@ -435,23 +326,28 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         resolution = min(resolution, 100)  # Cap at 100 for memory
         
         # ==========================================
-        # USE ALREADY-DETERMINED SIZING (respects user input)
+        # 1. AUTO-CALCULATE SIZING
         # ==========================================
-        # mesh_size and min_mesh_size were set above from quality_params
-        # Use them directly for the GPU mesher
-        min_spacing = min_mesh_size  # User-specified or calculated min
-        max_spacing = mesh_size * 1.5  # Limit grading to 1.5x max (TIGHTER constraint)
-        grading = 1.5  # Reduced grading for tighter element size control
-        target_sicn = 0.10  # Lowered target - skip refinement faster if already acceptable
+        # Get volume of the bounding box (Approximation of shape volume)
+        bbox_size = bbox_max - bbox_min
+        volume_approx = np.prod(bbox_size)
         
-        # FAST MODE: Skip expensive winding filters for single-body geometry
-        fast_mode = quality_params.get('fast_mode', False) if quality_params else False
+        # Theoretical relationship: Volume ≈ N_tets * (L^3 / (6*sqrt(2)))
+        # Inverted to find L (Target Edge Length):
+        target_L = (volume_approx / target_elements * 6 * np.sqrt(2)) ** (1/3)
         
-        print(f"[GPU Mesher] Using resolution: {resolution}", flush=True)
-        print(f"[GPU Mesher] Sizing: min={min_spacing:.3f}, max={max_spacing:.3f}, grading={grading}", flush=True)
+        print(f"[Auto-Sizing] Target: {target_elements} elements for Volume {volume_approx:.2f}")
+        print(f"[Auto-Sizing] Calculated ideal edge length: {target_L:.4f}")
+        
+        # Set Sizing Parameters
+        min_spacing = target_L 
+        max_spacing = target_L * 3.0
+        grading = 1.8 
+        target_sicn = 0.15
+        
+        print(f"[GPU Mesher] Using resolution: {resolution} (fallback)", flush=True)
+        print(f"[GPU Mesher] Adaptive Sizing: min={min_spacing:.3f}, max={max_spacing:.3f}, grading={grading}", flush=True)
         print(f"[GPU Mesher] Refinement Target SICN: {target_sicn}", flush=True)
-        if fast_mode:
-            print(f"[GPU Mesher] FAST MODE ENABLED: Skipping winding filters & validation", flush=True)
         
         def progress_callback(msg, pct):
             print(f"[GPU Mesher] {msg} ({pct}%)", flush=True)
@@ -464,8 +360,7 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
             grading=grading,
             resolution=resolution,
             target_sicn=target_sicn,
-            progress_callback=progress_callback,
-            fast_mode=fast_mode
+            progress_callback=progress_callback
         )
         
         elapsed = time.time() - start_total
@@ -827,11 +722,8 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
                 'strategy': 'polyhedral_dual',
                 'message': f'Polyhedral mesh generated: {num_cells} cells',
                 'total_elements': num_cells,
-                'visualization_mode': 'polyhedral',  # Tell GUI to use polyhedral loader
-                'polyhedral_data_file': json_file,  # Path to JSON data
                 'metrics': {
-                    'num_cells': num_cells,
-                    'num_polyhedra': num_cells  # For GUI display
+                    'num_cells': num_cells
                 }
             }
         else:
@@ -866,14 +758,10 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
-            # Try OpenFOAM (cfMesh or snappy) first
-            if check_any_openfoam_available():
-                print("[DEBUG] OpenFOAM available - using robust hex pipeline")
-                return generate_openfoam_hex_wrapper(cad_file, output_dir, quality_params)
-            else:
-                print("[DEBUG] OpenFOAM not available - falling back to experimental CoACD pipeline")
-                return generate_conformal_hex_test(cad_file, output_dir, quality_params)
+        # Hex Dominant Testing = Conformal hex with validation
+        if 'Hex Dominant Testing' in mesh_strategy:
+            print("[DEBUG] Hex Dominant Testing detected - using conformal hex pipeline")
+            return generate_conformal_hex_test(cad_file, output_dir, quality_params)
         
         # Regular Hex Dominant (subdivision approach)
         if 'Hex Dominant' in mesh_strategy:
@@ -895,17 +783,6 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         
         # Apply quality params to config
         if quality_params:
-            # DEBUG: Print all keys to diagnose missing parameters
-            print(f"[DEBUG] quality_params keys: {list(quality_params.keys())}")
-            if 'element_order' in quality_params:
-                print(f"[DEBUG] element_order value: {quality_params['element_order']}")
-            else:
-                print(f"[DEBUG] element_order NOT in quality_params - using default")
-            if 'defer_quality' in quality_params:
-                print(f"[DEBUG] defer_quality value: {quality_params['defer_quality']}")
-            else:
-                print(f"[DEBUG] defer_quality NOT in quality_params - using default")
-            
             # Inject painted regions directly into config object (monkey-patching)
             # This allows the generator to access it without changing Config structure definition
             if 'painted_regions' in quality_params:
@@ -916,46 +793,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             if 'quality_preset' in quality_params:
                 print(f"[DEBUG] Using quality preset: {quality_params['quality_preset']}")
                 
-            # Update target elements if present (used by adaptive sizing in strategies)
+            # Update target elements if present (could be used by generator)
             if 'target_elements' in quality_params:
-                config.mesh_params.target_elements = int(quality_params['target_elements'])
-                print(f"[DEBUG] Set target_elements to: {quality_params['target_elements']}")
-            
-            # Update max size if present (used by adaptive sizing in strategies)
-            if 'max_size_mm' in quality_params:
-                config.mesh_params.max_size_mm = float(quality_params['max_size_mm'])
-                print(f"[DEBUG] Set max_size_mm to: {quality_params['max_size_mm']}")
-            
-            # Update min size if present (used by adaptive sizing in strategies)
-            if 'min_size_mm' in quality_params:
-                config.mesh_params.min_size_mm = float(quality_params['min_size_mm'])
-                print(f"[DEBUG] Set min_size_mm to: {quality_params['min_size_mm']}")
+                config.target_elements = quality_params['target_elements']
             
             # Update ansys_mode for CFD/FEA export
             if 'ansys_mode' in quality_params:
                 config.mesh_params.ansys_mode = quality_params['ansys_mode']
                 print(f"[DEBUG] Set ansys_mode to: {quality_params['ansys_mode']}")
-            
-            # Update exhaustive strategy parameters
-            if 'score_threshold' in quality_params:
-                config.mesh_params.score_threshold = float(quality_params['score_threshold'])
-                print(f"[DEBUG] Set score_threshold to: {quality_params['score_threshold']}")
-            
-            if 'strategy_order' in quality_params and quality_params['strategy_order']:
-                config.mesh_params.strategy_order = quality_params['strategy_order']
-                print(f"[DEBUG] Set strategy_order to: {quality_params['strategy_order']}")
-            
-            # Update element order (1=Tet4 linear, 2=Tet10 quadratic)
-            if 'element_order' in quality_params:
-                config.mesh_params.element_order = int(quality_params['element_order'])
-                print(f"[DEBUG] Set element_order to: {quality_params['element_order']} ({'Tet10 quadratic' if quality_params['element_order'] == 2 else 'Tet4 linear'})")
-            
-            # Defer quality calculation (show mesh faster)
-            if 'defer_quality' in quality_params:
-                config.defer_quality = bool(quality_params['defer_quality'])
-            else:
-                config.defer_quality = False  # Default to full quality analysis
-            print(f"[DEBUG] defer_quality = {config.defer_quality}")
 
         generator = ExhaustiveMeshGenerator(config)
 
@@ -1119,8 +964,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 'score': best_attempt.get('score', 0),
                 'message': result.message,
                 'total_elements': metrics.get('total_elements', 0),
-                'total_nodes': metrics.get('total_nodes', 0),
-                'deferred': metrics.get('deferred', False)  # Propagate deferred flag for background quality calc
+                'total_nodes': metrics.get('total_nodes', 0)
             }
         else:
             return {

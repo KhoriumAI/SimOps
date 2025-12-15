@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QWidget, QSlider, QSpinBox,
     QPushButton, QCheckBox, QComboBox
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont, QColor
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
@@ -28,8 +28,125 @@ from .interactor import CustomInteractorStyle
 from .utils import hsl_to_rgb
 
 
+class HQMeshWorker(QThread):
+    """Background worker for high-quality visualization mesh generation"""
+    finished = pyqtSignal(str, dict, str) # stl_path, geom_info, original_cad_path
+
+    def __init__(self, cad_path: str):
+        super().__init__()
+        self.cad_path = cad_path
+        self.process = None
+        
+    def stop(self):
+        """Force kill the worker and its subprocess"""
+        if self.process:
+            try:
+                self.process.kill()
+            except:
+                pass
+        self.quit()
+        self.wait() # Quickly clean up thread resources
+
+    def run(self):
+        try:
+            # Create temp file for HQ mesh
+            fd, tmp_stl = tempfile.mkstemp(suffix=".stl")
+            os.close(fd)
+            
+            # --- HQ TESSELLATION SETTINGS ---
+            # Using the "User Approved" high-fidelity settings
+            gmsh_script = f"""
+import gmsh
+import json
+import sys
+import os
+
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Verbosity", 1) # Less spam
+
+    # Open config
+    gmsh.open(r"{self.cad_path}")
+
+    # --- GEOMETRY ANALYSIS (Fast, BBox only) ---
+    bbox = gmsh.model.getBoundingBox(-1, -1)
+    bbox_dims = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
+    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5
+    
+    # Estimate volume from bbox to avoid OCC getMass hang
+    bbox_volume = bbox_dims[0] * bbox_dims[1] * bbox_dims[2]
+        
+    # Heuristic unit detection
+    # If it's big (> 10), it's likely mm. If it's tiny (< 1), it's likely m.
+    unit_name = "m"
+    if max(bbox_dims) > 10 or bbox_volume > 1000:
+        unit_name = "mm"
+        
+    geom_info = {{
+        "volume": bbox_volume * 0.5, # Rough estimate (50% fill)
+        "bbox_diagonal": bbox_diag,
+        "units_detected": unit_name
+    }}
+    print("GEOM_INFO:" + json.dumps(geom_info))
+
+    # --- HIGH QUALITY TESSELLATION ---
+    # "Perfect Circle" Logic using Curvature
+    # 100 nodes per full circle = 3.6 degrees per segment.
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 100) 
+    
+    # Constrain max element size based on scale
+    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 20.0)
+    
+    # Generate 2D mesh
+    gmsh.model.mesh.generate(2)
+    gmsh.write(r"{tmp_stl}")
+    gmsh.finalize()
+    print("SUCCESS_MARKER")
+
+except Exception as e:
+    print("GMSH_ERROR:" + str(e))
+    sys.exit(1)
+"""
+            # Run subprocess
+            current_env = os.environ.copy()
+            
+            # Use same python executable
+            # Use same python executable
+            # Use Popen to allow killing
+            self.process = subprocess.Popen(
+                [sys.executable, "-c", gmsh_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=current_env
+            )
+            
+            # Wait for result (blocking this thread only, not UI)
+            stdout, stderr = self.process.communicate(timeout=180)
+            
+            if self.process.returncode != 0 or "SUCCESS_MARKER" not in stdout:
+                print(f"[HQ WORKER] Failed: {stderr}")
+                return
+
+            # Parse info
+            geom_info = {}
+            for line in stdout.splitlines():
+                if line.startswith("GEOM_INFO:"):
+                    geom_info = json.loads(line[10:])
+                    break
+            
+            self.finished.emit(tmp_stl, geom_info, self.cad_path)
+            
+        except Exception as e:
+            print(f"[HQ WORKER] Exception: {e}")
+
+
 class VTK3DViewer(QFrame):
     """3D viewer with quality report overlay"""
+    
+    # Signal to request application exit
+    exit_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,6 +227,10 @@ class VTK3DViewer(QFrame):
         self.cross_section_mode = "layered"  # Always use layered mode (show complete volume cells)
         self.cross_section_element_mode = "auto"  # Auto-switch between tet/hex slicing
 
+        # Progressive loading state
+        self.hq_worker = None
+        self.current_cad_path = None
+
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
         self.brush_cursor_visible = False
@@ -117,26 +238,64 @@ class VTK3DViewer(QFrame):
         self.paint_colors = vtk.vtkUnsignedCharArray()  # RGB colors per cell
         self.paint_colors.SetNumberOfComponents(3)
         self.paint_colors.SetName("PaintColors")
+        
+        # Fullscreen state
+        self.is_fullscreen = False
+        self.saved_parent_layout = None
+
+        # Info overlay (top-left) - FIXED WIDTH to prevent truncation
+        # Create BEFORE vtk_widget.Initialize() to avoid resizeEvent errors
+        self.info_label = QLabel(self)
+        self.info_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(255, 255, 255, 255);
+                padding: 10px;
+                border-radius: 5px;
+                font-family: Arial;
+                font-size: 12px;
+                border: 1px solid #dee2e6;
+            }
+        """)
+        self.info_label.setText("<b>3D Preview</b><br>No model loaded")
+        self.info_label.setWordWrap(True)
+        self.info_label.setFixedWidth(450)
+        self.info_label.setMinimumHeight(80)
+        self.info_label.setMaximumHeight(300)
+        self.info_label.move(10, 10)
+        self.info_label.show()
 
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
+        
+        # Enable double-click to enter fullscreen
+        self.vtk_widget.mouseDoubleClickEvent = self._on_double_click
+    
 
-        # Info overlay (top-left) - FIXED WIDTH to prevent truncation
-        self.info_label = QLabel("No CAD file loaded", self)
-        self.info_label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(255, 255, 255, 230);
-                padding: 12px 16px;
-                border-radius: 6px;
+        # Exit Button (Top-right overlay)
+        self.exit_btn = QPushButton("Exit", self)
+        self.exit_btn.setCursor(Qt.PointingHandCursor)
+        self.exit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 0, 0, 0.1); 
+                color: #555;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 4px 12px;
                 font-size: 11px;
-                color: #212529;
-                font-weight: 500;
-                border: 1px solid rgba(0,0,0,0.1);
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(220, 53, 69, 0.9);
+                color: white;
+                border: 1px solid #dc3545;
             }
         """)
-        self.info_label.setFixedWidth(450)  # Increased from 400 to 450
-        self.info_label.setMinimumHeight(80)  # Minimum height to prevent vertical truncation
-        self.info_label.setMaximumHeight(300)  # Increased from 200 to 300px for iterations
+        self.exit_btn.clicked.connect(self.exit_requested.emit)
+        self.exit_btn.resize(60, 24)
+        self.exit_btn.show()
+
+        # Initial Camera Setup
+        self.renderer.SetBackground(0.95, 0.95, 0.97) # Reverted to original background color
         self.info_label.setWordWrap(True)
         self.info_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.info_label.move(15, 15)
@@ -214,7 +373,14 @@ class VTK3DViewer(QFrame):
         self.iteration_container.setVisible(False)  # Hidden until we have iterations
 
     def resizeEvent(self, event):
-        """Reposition quality label and iteration buttons on resize"""
+        """Handle resize to update overlay positions"""
+        # Keep info label top-left
+        self.info_label.move(10, 10)
+        
+        # Keep Exit button top-right
+        if hasattr(self, 'exit_btn'):
+            self.exit_btn.move(self.width() - self.exit_btn.width() - 10, 10)
+            
         super().resizeEvent(event)
         if self.quality_label.isVisible():
             self.quality_label.move(
@@ -254,6 +420,77 @@ class VTK3DViewer(QFrame):
         self.current_actor = None
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
+    
+    def _on_double_click(self, event):
+        """Handle double-click to toggle fullscreen"""
+        self.toggle_fullscreen()
+
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode - hides all GUI except VTK viewer, ESC to exit"""
+        if not self.is_fullscreen:
+            # Save parent window BEFORE detaching
+            self.saved_main_window = self.window()
+            
+            # Enter fullscreen
+            self.is_fullscreen = True
+            
+            # Hide info label (top-left overlay)
+            if hasattr(self, 'info_label') and self.info_label:
+                self.info_label.hide()
+            
+            # Detach from current layout and show as standalone fullscreen window
+            self.setParent(None)
+            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            self.showFullScreen()
+            
+            # Install event filter to catch ESC key
+            self.installEventFilter(self)
+            
+            print("[Fullscreen] Entered - press ESC to exit")
+        else:
+            # Exit fullscreen
+            self.exit_fullscreen()
+    
+    def exit_fullscreen(self):
+        """Exit fullscreen mode and restore to main window"""
+        if not self.is_fullscreen:
+            return
+            
+        self.is_fullscreen = False
+        
+        # Remove event filter
+        self.removeEventFilter(self)
+        
+        # Show info label again
+        if hasattr(self, 'info_label') and self.info_label:
+            self.info_label.show()
+        
+        # Return to normal windowed mode
+        self.showNormal()
+        self.setWindowFlags(Qt.Widget)
+        
+        # Re-parent to main window
+        if hasattr(self, 'saved_main_window') and self.saved_main_window:
+            main_window = self.saved_main_window
+            
+            # Find the right panel and re-add to it
+            if hasattr(main_window, 'right_panel_layout'):
+                # Insert at index 1 (between controls and console) with stretch 2
+                main_window.right_panel_layout.insertWidget(1, self, 2)
+                print("[Fullscreen] Re-attached to main window layout")
+            else:
+                 print("[Fullscreen] WARNING: Could not find right_panel_layout to re-attach")
+        
+        self.show()
+        print("[Fullscreen] Exited")
+    
+    def eventFilter(self, obj, event):
+        """Event filter to catch ESC key for exiting fullscreen"""
+        if self.is_fullscreen and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self.exit_fullscreen()
+                return True
+        return super().eventFilter(obj, event)
 
     def show_quality_report(self, metrics: Dict):
         """Show quality metrics overlay in top-right"""
@@ -387,13 +624,14 @@ class VTK3DViewer(QFrame):
 
         report_html += "</div>"
 
-        self.quality_label.setText(report_html)
-        self.quality_label.adjustSize()
-        self.quality_label.move(
-            self.width() - self.quality_label.width() - 15,
-            15
-        )
-        self.quality_label.setVisible(True)
+        # Quality overlay disabled per user request - metrics shown in console instead
+        # self.quality_label.setText(report_html)
+        # self.quality_label.adjustSize()
+        # self.quality_label.move(
+        #     self.width() - self.quality_label.width() - 15,
+        #     15
+        # )
+        # self.quality_label.setVisible(True)
 
     def add_iteration_mesh(self, mesh_path: str, metrics: Dict = None):
         """Add a new iteration mesh and display it"""
@@ -697,7 +935,7 @@ class VTK3DViewer(QFrame):
     def load_polyhedral_file(self, json_path: str):
         """Load polyhedral mesh from JSON file"""
         # DEBUG: Write to file to prove function is running
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/poly_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write(f"=== POLYHEDRAL LOAD DEBUG ===\n")
             f.write(f"Function called at: {json_path}\n")
@@ -805,40 +1043,22 @@ class VTK3DViewer(QFrame):
                 print("[POLY-VIZ ERROR] No cells were created!")
                 return "FAILED"
             
-            # 4. Manual Surface Extraction
-            # VTK's vtkDataSetMapper cannot render VTK_POLYHEDRON cells.
-            # Extract all faces from the JSON and create a surface mesh.
-            print("[POLY-VIZ] Manually extracting faces for visualization...")
+            # 4. Extract Surface Using VTK's Geometry Filter
+            # This automatically finds the boundary of the VTK_POLYHEDRON cells
+            print("[POLY-VIZ v2.0] Extracting surface using vtkGeometryFilter...")
             
-            all_faces = []
-            for elem in elements:
-                if elem['type'] != 'polyhedron':
-                    continue
-                for face in elem['faces']:
-                    try:
-                        vtk_face = [node_map[nid] for nid in face]
-                        all_faces.append(vtk_face)
-                    except KeyError:
-                        continue
-            
-            # Create PolyData from extracted faces
-            polydata = vtk.vtkPolyData()
-            polydata.SetPoints(points)
-            
-            polys = vtk.vtkCellArray()
-            for face_indices in all_faces:
-                polys.InsertNextCell(len(face_indices))
-                for idx in face_indices:
-                    polys.InsertCellPoint(idx)
-            
-            polydata.SetPolys(polys)
+            geometry_filter = vtk.vtkGeometryFilter()
+            geometry_filter.SetInputData(ugrid)
+            geometry_filter.Update()
+            polydata = geometry_filter.GetOutput()
             
             with open(debug_log, 'a') as f:
-                f.write(f"=== MANUAL SURFACE ===\n")
-                f.write(f"Faces extracted: {len(all_faces)}\n")
-                f.write(f"PolyData cells: {polydata.GetNumberOfCells()}\n")
+                f.write(f"=== SURFACE EXTRACTION (vtkGeometryFilter) ===\n")
+                f.write(f"Input cells: {ugrid.GetNumberOfCells()}\n")
+                f.write(f"Output surface cells: {polydata.GetNumberOfCells()}\n")
+                f.write(f"Output points: {polydata.GetNumberOfPoints()}\n")
             
-            print(f"[POLY-VIZ] Extracted {polydata.GetNumberOfCells()} face polygons")
+            print(f"[POLY-VIZ] Extracted {polydata.GetNumberOfCells()} surface cells")
             
             # 5. Mapper/Actor
             print("[POLY-VIZ] Creating mapper and actor...")
@@ -908,7 +1128,7 @@ class VTK3DViewer(QFrame):
             
             self.vtk_widget.GetRenderWindow().Render()
             
-            self.info_label.setText(f"Polyhedral Mesh: {ugrid.GetNumberOfCells()} cells")
+            self.info_label.setText(f"<b>Polyhedral Mesh</b><br>{ugrid.GetNumberOfCells()} polyhedra")
             print("[POLY-VIZ] SUCCESS!")
             
             with open(debug_log, 'a') as f:
@@ -1176,6 +1396,23 @@ class VTK3DViewer(QFrame):
         clipper_below.Update()
         
         # Update main actor with below-cut mesh (fully visible)
+        
+        # SAFETY: Handle LODActor (which doesn't support GetMapper easily for clipping)
+        if self.current_actor.IsA("vtkLODActor"):
+            print("[DEBUG] Swapping LODActor for vtkActor to support clipping")
+            new_actor = vtk.vtkActor()
+            # Copy properties (color, lighting, etc.)
+            new_actor.SetProperty(self.current_actor.GetProperty())
+            
+            # Create new mapper for this standard actor
+            new_mapper = vtk.vtkPolyDataMapper()
+            new_actor.SetMapper(new_mapper)
+            
+            # Swap in renderer
+            self.renderer.RemoveActor(self.current_actor)
+            self.renderer.AddActor(new_actor)
+            self.current_actor = new_actor
+            
         mapper = self.current_actor.GetMapper()
         mapper.SetInputData(clipper_below.GetOutput())
         self.current_actor.GetProperty().SetOpacity(1.0)  # Fully visible
@@ -1296,6 +1533,15 @@ class VTK3DViewer(QFrame):
         """
         if not self.current_poly_data or not self.current_actor:
             return
+        
+        # SAFETY: Check for polyhedral meshes (no quality switching support yet)
+        if self.current_volumetric_grid is not None and hasattr(self, 'current_volumetric_grid'):
+            # This is a polyhedral mesh - quality switching not supported
+            print("[WARN] Quality metric switching not supported for polyhedral meshes")
+            # Just update opacity and return
+            self.current_actor.GetProperty().SetOpacity(opacity)
+            self.vtk_widget.GetRenderWindow().Render()
+            return
             
         # Update opacity
         self.current_actor.GetProperty().SetOpacity(opacity)
@@ -1315,6 +1561,8 @@ class VTK3DViewer(QFrame):
             metric_key = 'per_element_skewness'
         elif "Aspect" in metric:
             metric_key = 'per_element_aspect_ratio'
+        elif "Jacobian" in metric:
+            metric_key = 'per_element_quality'
             
         if metric_key in self.current_quality_data:
             quality_map = self.current_quality_data[metric_key]
@@ -1323,6 +1571,11 @@ class VTK3DViewer(QFrame):
             quality_map = self.current_quality_data.get('per_element_quality', {})
             
         if not quality_map:
+            return
+
+        # SAFETY: Ensure mesh elements exist
+        if not self.current_mesh_elements:
+            print("[WARN] Cannot update quality visualization: mesh elements not loaded")
             return
 
         # Create new PolyData for filtered mesh
@@ -1352,10 +1605,6 @@ class VTK3DViewer(QFrame):
                 g = hue_to_rgb(p, q, h)
                 b = hue_to_rgb(p, q, h - 1/3)
             return int(r * 255), int(g * 255), int(b * 255)
-
-        # Iterate through ORIGINAL elements to filter
-        if not self.current_mesh_elements:
-            return
             
         visible_count = 0
         filtered_count = 0
@@ -1402,24 +1651,55 @@ class VTK3DViewer(QFrame):
                         new_cells.InsertNextCell(tri)
                         
                         # Calculate color
-                        # Normalize to 0-1 based on global range
-                        norm = (val - global_min) / val_range
-                        norm = max(0.0, min(1.0, norm))
+                        # ABSOLUTE THRESHOLD COLORING
                         
-                        # Color map: Red (0.0) -> Green (0.33)
-                        # For Skewness/Aspect Ratio, lower is better (Green), higher is worse (Red)
-                        # For SICN/Gamma, higher is better (Green), lower is worse (Red)
+                        # Initialize values
+                        r, g, b = 150, 150, 150
                         
-                        if "Skewness" in metric or "Aspect" in metric:
-                            # 0 (Good/Green) -> 1 (Bad/Red)
-                            # Invert norm so 0->Green, 1->Red
-                            hue = (1.0 - norm) * 0.33
+                        if "Skewness" in metric:
+                            # Lower is better. Bad > 0.7
+                            if val > 0.7:
+                                # FAIL: Crimson Red
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: Green (0) -> Yellow/Orange (0.7)
+                                # Map 0.0 -> 0.7 range to Hue 0.33 (Green) -> 0.05 (Orange)
+                                # Actually standard gradient: 0=Best(Green), 0.7=Worst(Red)
+                                # But we want to avoid pure Red for passing elements.
+                                
+                                # Let's say 0.0 -> Green (0.33), 0.7 -> Orange (0.05)
+                                normalized_badness = max(0.0, min(1.0, val / 0.7))
+                                hue = (1.0 - normalized_badness) * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                                
+                        elif "Aspect" in metric:
+                            # Lower is better. Bad > 10.0 (per plan) or > 20? 
+                            # Let's say Bad > 10.0
+                            if val > 10.0:
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: 1.0 (Best) -> 10.0 (Worst)
+                                # Map 1.0->10.0 to Green->Orange
+                                normalized_badness = max(0.0, min(1.0, (val - 1.0) / 9.0))
+                                hue = (1.0 - normalized_badness) * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+
                         else:
-                            # 0 (Bad/Red) -> 1 (Good/Green)
-                            hue = norm * 0.33
-                            
-                        r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                        colors.InsertNextTuple3(r, g, b)
+                            # Higher is better (SICN, Gamma, Quality). Bad < 0.2
+                            if val < 0.2:
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: 1.0 (Best) -> 0.2 (Worst)
+                                # Map 0.2->1.0 to Orange->Green
+                                # Quality 1.0 -> 0.33 Hue
+                                # Quality 0.2 -> 0.05 Hue
+                                normalized = max(0.0, min(1.0, (val - 0.2) / 0.8))
+                                hue = normalized * 0.28 + 0.05
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                                
                         visible_count += 1
                     else:
                         filtered_count += 1
@@ -1616,8 +1896,100 @@ class VTK3DViewer(QFrame):
 
             self.vtk_widget.GetRenderWindow().Render()
 
+    def on_hq_mesh_ready(self, stl_path: str, geom_info: dict, original_cad_path: str):
+        """Callback when background HQ mesh generation finishes"""
+        try:
+            # RACE CONDITION CHECK: user might have loaded a different file
+            if original_cad_path != self.current_cad_path:
+                print(f"[HQ UPDATE] Stale update ignored. Current: {self.current_cad_path}, Received: {original_cad_path}")
+                if os.path.exists(stl_path):
+                    os.unlink(stl_path)
+                return
+
+            print(f"[HQ UPDATE] Swapping to high-fidelity mesh...")
+            
+            # Load the HQ mesh
+            if not os.path.exists(stl_path) or os.path.getsize(stl_path) < 100:
+                print("[HQ UPDATE ERROR] STL file missing or empty")
+                return
+                
+            mesh = pv.read(stl_path)
+            os.unlink(stl_path) # Cleanup
+            
+            if mesh.n_points == 0:
+                print("[HQ UPDATE ERROR] Empty mesh")
+                return
+
+            poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+            self.current_poly_data = poly_data # Update stored data for operations
+            
+            # Remove old actor
+            if self.current_actor:
+                self.renderer.RemoveActor(self.current_actor)
+            
+            # --- APPLY VISUALIZATION PIPELINE (Same as fast load but on HQ data) ---
+            # 1. Smooth Normals (No subdivision needed for HQ mesh usually)
+            normals_gen = vtk.vtkPolyDataNormals()
+            normals_gen.SetInputData(poly_data)
+            normals_gen.ComputePointNormalsOn()
+            normals_gen.ComputeCellNormalsOff()
+            normals_gen.SplittingOn() 
+            normals_gen.SetFeatureAngle(60.0)
+            normals_gen.Update()
+            smooth_poly_data = normals_gen.GetOutput()
+            
+            # 2. LOD Setup (Still good for performance even on HQ mesh)
+            mapper_high = vtk.vtkPolyDataMapper()
+            mapper_high.SetInputData(smooth_poly_data)
+            
+            decimator = vtk.vtkQuadricDecimation()
+            decimator.SetInputData(smooth_poly_data)
+            decimator.SetTargetReduction(0.9)
+            decimator.Update()
+            
+            mapper_low = vtk.vtkPolyDataMapper()
+            mapper_low.SetInputData(decimator.GetOutput())
+            
+            self.current_actor = vtk.vtkLODActor()
+            self.current_actor.AddLODMapper(mapper_high)
+            self.current_actor.AddLODMapper(mapper_low)
+            self.current_actor.SetDesiredUpdateRate(15.0) # Actor property, safe to set
+            
+            # 3. Styling
+            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
+            self.current_actor.GetProperty().SetInterpolationToPhong() 
+            self.current_actor.GetProperty().BackfaceCullingOn()       
+            self.current_actor.GetProperty().ShadingOn()
+            self.current_actor.GetProperty().SetAmbient(0.3)
+            self.current_actor.GetProperty().SetDiffuse(0.7)
+            self.current_actor.GetProperty().SetSpecular(0.5)          
+            self.current_actor.GetProperty().SetSpecularPower(40.0)
+            self.current_actor.GetProperty().EdgeVisibilityOff()
+            
+            self.renderer.AddActor(self.current_actor)
+            
+            # Flash informative text
+            self.info_label.setText(
+                self.info_label.text().replace(
+                    "<span style='color: #6c757d;'>", 
+                    "<span style='color: #198754; font-weight:bold;'>HQ READY: "
+                )
+            )
+            
+            self.vtk_widget.GetRenderWindow().Render()
+            print("[HQ UPDATE] Success!")
+            
+        except Exception as e:
+            print(f"[HQ UPDATE ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+
     def load_step_file(self, filepath: str):
-        self.clear_view()
+        print(f"[CAD PREVIEW DEBUG] load_step_file called: {filepath}", flush=True)
+        try:
+            self.clear_view()
+        except Exception as ee:
+            print(f"[CAD PREVIEW DEBUG] clear_view failed: {ee}", flush=True)
         self.quality_label.setVisible(False)
         self.info_label.setText(f"Loading: {Path(filepath).name}")
 
@@ -1637,51 +2009,40 @@ import gmsh
 import json
 import sys
 
-# Redirect stdout/stderr to ensure we capture errors
+# FAST PREVIEW SCRIPT - Minimal operations for speed
 try:
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 1) # Enable terminal output for debugging
-    gmsh.option.setNumber("General.Verbosity", 2) # Reduce spam, keep errors
+    gmsh.option.setNumber("General.Terminal", 0) # Silent mode for speed
+    gmsh.option.setNumber("General.Verbosity", 0)
 
-    gmsh.open(r"{filepath}") # Use raw string for Windows paths
+    gmsh.open(r"{filepath}")
 
-    # --- GEOMETRY ANALYSIS (Volume & Units) ---
+    # --- FAST GEOMETRY ANALYSIS (Bbox only) ---
     bbox = gmsh.model.getBoundingBox(-1, -1)
+    # We only need bbox for mesh sizing now, volume comes from VTK later
     bbox_dims = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
+    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5
 
-    volumes_3d = gmsh.model.getEntities(dim=3)
-    total_volume_raw = 0.0
-    for vol_dim, vol_tag in volumes_3d:
-        total_volume_raw += gmsh.model.occ.getMass(vol_dim, vol_tag)
 
-    bbox_volume_raw = bbox_dims[0] * bbox_dims[1] * bbox_dims[2]
-
-    # Heuristic unit detection
-    unit_name = "m"
-    unit_scale = 1.0
-    if total_volume_raw > 10000: # Likely mm^3
-        unit_scale = 0.001
-        unit_name = "mm"
-    elif max(bbox_dims) > 1000: # Large dimensions
-        unit_scale = 0.001
-        unit_name = "mm"
-
-    total_volume = total_volume_raw * (unit_scale ** 3)
-    bbox_volume = bbox_volume_raw * (unit_scale ** 3)
-    bbox_diag = (bbox_dims[0]**2 + bbox_dims[1]**2 + bbox_dims[2]**2)**0.5 * unit_scale
-
-    if total_volume > bbox_volume or total_volume <= 0:
-        total_volume = bbox_volume * 0.4
-
-    geom_info = {{
-        "volume": total_volume, 
-        "bbox_diagonal": bbox_diag, 
-        "units_detected": unit_name
-    }}
-    print("GEOM_INFO:" + json.dumps(geom_info))
-
-    # --- TESSELLATION ---
-    # Generate 2D mesh for visualization
+    # --- FAST TESSELLATION (Original Logic) ---
+    # Priority: Stability & Speed. 
+    # Reverting to the logic that worked (<5s for Impeller).
+    
+    # 1. No Multi-threading (Simple is stable)
+    # gmsh.option.setNumber("General.NumThreads", 1) # Default
+    
+    # 2. Basic Coarse Constraints
+    gmsh.option.setNumber("Mesh.MeshSizeMin", bbox_diag / 100.0)
+    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 20.0)
+    
+    # 3. Disable curvature (speed)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    
+    # 4. Standard Algorithm (Let Gmsh decide, usually Algo 6 or 2)
+    # Reverting to defaults which worked best for Impeller (<5s).
+    # Removed forced Algorithm 1/6.
+    
     gmsh.model.mesh.generate(2)
     gmsh.write(r"{tmp_stl}")
     gmsh.finalize()
@@ -1689,19 +2050,20 @@ try:
 
 except Exception as e:
     print("GMSH_ERROR:" + str(e))
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 """
 
             # WINDOWS FIX 2: Environment Variables
-            # Conda environments rely on PATH to find DLLs. We must pass the current env.
             current_env = os.environ.copy()
 
             result = subprocess.run(
                 [sys.executable, "-c", gmsh_script],
                 capture_output=True,
                 text=True,
-                timeout=45,
-                env=current_env  # CRITICAL: Passes DLL paths to subprocess
+                timeout=120, # Increased to 120s for complex assemblies (Impeller, etc)
+                env=current_env
             )
 
             # Debugging Output
@@ -1711,12 +2073,9 @@ except Exception as e:
                 print(f"STDERR: {result.stderr}")
                 raise Exception(f"CAD conversion subprocess failed. See console for details.")
 
-            # Parse geometry info
-            geom_info = None
-            for line in result.stdout.split('\n'):
-                if line.startswith("GEOM_INFO:"):
-                    geom_info = json.loads(line[10:])
-                    break
+            # Parse geometry info (REMOVED - we calculate in VTK now)
+            # geom_info = None
+
 
             # Check if file actually exists and has content
             if not os.path.exists(tmp_stl) or os.path.getsize(tmp_stl) < 100:
@@ -1726,46 +2085,133 @@ except Exception as e:
             mesh = pv.read(tmp_stl)
             os.unlink(tmp_stl) # Cleanup temp file
 
+            print(f"[CAD PREVIEW DEBUG] STL loaded: {mesh.n_points} points, {mesh.n_cells} cells", flush=True)
+
             # --- VTK VISUALIZATION SETUP ---
             if mesh.n_points == 0:
                 raise Exception("Empty mesh - no geometry in CAD file")
 
             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+            print(f"[CAD PREVIEW DEBUG] Surface extracted: {poly_data.GetNumberOfPoints()} pts, {poly_data.GetNumberOfCells()} cells", flush=True)
             self.current_poly_data = poly_data # Store for clipping
 
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(poly_data)
+            # --- IMPROVED CAD VISUALIZATION PIPELINE ---
+            try:
+                # 0. Subdivision (The "Quality Boost")
+                # Even for the fast mesh, one level of subdivision helps it look less awful
+                processing_poly_data = poly_data
+                cell_count = poly_data.GetNumberOfCells()
+                
+                # Only apply light subdivision for the preview to keep it fast
+                if cell_count < 10000:
+                    print(f"[CAD VIS] Applying Fast Subdivision to {cell_count} cells...")
+                    subdivision = vtk.vtkLinearSubdivisionFilter()
+                    subdivision.SetInputData(poly_data)
+                    subdivision.SetNumberOfSubdivisions(1)
+                    subdivision.Update()
+                    processing_poly_data = subdivision.GetOutput()
+                
+                # 1. Generate Smooth Normals 
+                print("[CAD VIS] Generating smooth normals...")
+                normals_gen = vtk.vtkPolyDataNormals()
+                normals_gen.SetInputData(processing_poly_data)
+                normals_gen.ComputePointNormalsOn()
+                normals_gen.ComputeCellNormalsOff()
+                normals_gen.SplittingOn() 
+                normals_gen.SetFeatureAngle(60.0)
+                normals_gen.Update()
+                smooth_poly_data = normals_gen.GetOutput()
+                
+                # Update stored data
+                self.current_poly_data = smooth_poly_data 
+                
+                # 2. Simple Actor for fast load (No LOD needed for fast preview usually)
+                mapper = vtk.vtkPolyDataMapper()
+                mapper.SetInputData(smooth_poly_data)
+                self.current_actor = vtk.vtkActor()
+                self.current_actor.SetMapper(mapper)
+                
+                # 3. Styling
+                self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
+                self.current_actor.GetProperty().SetInterpolationToPhong() 
+                # DISABLED Backface Culling to fix visibility on complex manifolds (rocket nozzle)
+                self.current_actor.GetProperty().BackfaceCullingOff()       
+                self.current_actor.GetProperty().ShadingOn()
+                self.current_actor.GetProperty().SetAmbient(0.3)
+                self.current_actor.GetProperty().SetDiffuse(0.7)
+                self.current_actor.GetProperty().SetSpecular(0.5)          
+                self.current_actor.GetProperty().SetSpecularPower(40.0)
+                self.current_actor.GetProperty().EdgeVisibilityOff()
 
-            self.current_actor = vtk.vtkActor()
-            self.current_actor.SetMapper(mapper)
-            
-            # Styling: Smooth Blue CAD look
-            self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
-            self.current_actor.GetProperty().SetInterpolationToPhong()
-            self.current_actor.GetProperty().EdgeVisibilityOff()
-            self.current_actor.GetProperty().SetAmbient(0.3)
-            self.current_actor.GetProperty().SetDiffuse(0.7)
-            self.current_actor.GetProperty().SetSpecular(0.2)
+            except Exception as e:
+                print(f"[CAD VIS ERROR] Fast pipeline failed: {e}. Falling back.")
+                import traceback
+                traceback.print_exc()
+                
+                # Basic fallback
+                mapper = vtk.vtkPolyDataMapper()
+                mapper.SetInputData(poly_data)
+                self.current_actor = vtk.vtkActor()
+                self.current_actor.SetMapper(mapper)
+                self.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
 
             self.renderer.AddActor(self.current_actor)
             self.renderer.ResetCamera()
             self.vtk_widget.GetRenderWindow().Render()
 
-            # Update Info Label
-            volume_text = ""
-            if geom_info and 'volume' in geom_info:
-                v = geom_info['volume']
-                if v > 0.001: 
-                    volume_text = f"<br>Volume: {v:.4f} m³"
-                else: 
-                    volume_text = f"<br>Volume: {v*1e9:.0f} mm³"
+            # Accurate Volume Calculation via VTK
+            mass = vtk.vtkMassProperties()
+            mass.SetInputData(smooth_poly_data)
+            mass.Update()
+            volume = mass.GetVolume()
+            
+            # Unit Heuristic: If bounds > 5.0, assume mm
+            bounds = smooth_poly_data.GetBounds()
+            dim_x = bounds[1]-bounds[0]
+            dim_y = bounds[3]-bounds[2]
+            dim_z = bounds[5]-bounds[4]
+            max_dim = max(dim_x, dim_y, dim_z)
+            bbox_diag = (dim_x**2 + dim_y**2 + dim_z**2)**0.5
+            
+            unit_scale = 1.0
+            unit_name = 'm'
+            
+            if max_dim > 5.0:
+                 # Likely mm
+                 unit_name = 'mm'
+                 unit_scale = 0.001 # Convert mm to m for internal calculations
+                 # FIXED: Format as float (1234.56) instead of thousand-sep (1,234)
+                 volume_text = f"<br>Volume: {volume:.2f} mm³"
+            else:
+                 # Likely m
+                 volume_text = f"<br>Volume: {volume:.6f} m³"
 
             self.info_label.setText(
                 f"<b>CAD Preview</b><br>"
                 f"{Path(filepath).name}<br>"
                 f"<span style='color: #6c757d;'>{poly_data.GetNumberOfPoints():,} nodes{volume_text}</span>"
             )
+            
+            # --- PROGRESSIVE LOADING DISABLED ---
+            # Ensure any previous worker is dead
+            if self.hq_worker: 
+                try:
+                    self.hq_worker.finished.disconnect()
+                    self.hq_worker.stop()
+                except:
+                    pass
+            
+            # --- PROGRESSIVE LOADING DISABLED ---
+            # User requested "Fast" mode only. No background HQ worker.
+            self.hq_worker = None 
+            self.current_cad_path = filepath
 
+            # Construct standardized geom_info for main.py (expects meters)
+            geom_info = {
+                "volume": volume * (unit_scale ** 3), # Convert to m³
+                "bbox_diagonal": bbox_diag * unit_scale, # Convert to m
+                "units_detected": unit_name
+            }
             return geom_info
 
         except Exception as e:
@@ -1773,8 +2219,112 @@ except Exception as e:
             print(f"Load Error: {e}")
             import traceback
             traceback.print_exc()
-            self.info_label.setText(f"CAD Loaded<br><small>(Preview Unavailable)</small><br>Click 'Generate Mesh'")
+            self.info_label.setText(f"CAD Load Error<br><small>{str(e)[:50]}...</small><br>Click 'Generate Mesh'")
             return None
+
+    def apply_quality_coloring(self, result: dict):
+        """
+        Apply quality coloring to the EXISTING mesh without reloading geometry.
+        This provides a smooth transition when background quality analysis finishes.
+        """
+        if not self.current_poly_data or not self.current_actor:
+            print("[DEBUG] Cannot apply quality coloring: No mesh loaded")
+            return
+
+        if not result or not result.get('per_element_quality'):
+            print("[DEBUG] Cannot apply quality coloring: No quality data")
+            return
+
+        print(f"[DEBUG] Applying quality coloring to existing mesh...")
+        
+        # Store quality data for cross-section and other uses
+        self.current_quality_data = result
+        
+        try:
+            per_elem_quality = result['per_element_quality']
+            
+            # Helper function for HSL to RGB conversion (if not imported)
+            def hsl_to_rgb(h, s, l):
+                def hue_to_rgb(p, q, t):
+                    if t < 0: t += 1
+                    if t > 1: t -= 1
+                    if t < 1/6: return p + (q - p) * 6 * t
+                    if t < 1/2: return q
+                    if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                    return p
+                
+                if s == 0:
+                    r = g = b = l
+                else:
+                    q = l * (1 + s) if l < 0.5 else l + s - l * s
+                    p = 2 * l - q
+                    r = hue_to_rgb(p, q, h + 1/3)
+                    g = hue_to_rgb(p, q, h)
+                    b = hue_to_rgb(p, q, h - 1/3)
+                
+                return int(r * 255), int(g * 255), int(b * 255)
+
+            # Create color array for cells
+            colors = vtk.vtkUnsignedCharArray()
+            colors.SetNumberOfComponents(3)
+            colors.SetName("Colors")
+
+            colored_count = 0
+            has_extracted_surface = hasattr(self, 'surface_to_volume_map') and self.surface_to_volume_map
+            
+            # Reconstruct element list reference if needed (for direct indexing)
+            # We assume self.current_mesh_elements is available
+            surface_elements = []
+            if not has_extracted_surface and self.current_mesh_elements:
+                surface_elements = [e for e in self.current_mesh_elements if e['type'] in ('triangle', 'quadrilateral')]
+
+            for i in range(self.current_poly_data.GetNumberOfCells()):
+                elem_id = None
+                if has_extracted_surface:
+                    elem_id = self.surface_to_volume_map.get(i)
+                elif i < len(surface_elements):
+                    elem_id = str(surface_elements[i]['id'])
+                
+                quality = per_elem_quality.get(elem_id) if elem_id else None
+
+                if quality is None:
+                    colors.InsertNextTuple3(150, 150, 150)
+                else:
+                    if quality < 0.2:
+                        colors.InsertNextTuple3(220, 20, 60) # Crimson
+                    else:
+                        normalized = max(0.0, min(1.0, quality))
+                        hue = normalized * 0.33
+                        r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                        colors.InsertNextTuple3(r, g, b)
+                    colored_count += 1
+
+            # Apply colors to PolyData
+            self.current_poly_data.GetCellData().SetScalars(colors)
+            
+            # valid_scalars = self.current_poly_data.GetCellData().GetScalars()
+            # if valid_scalars:
+            #     print(f"[DEBUG] Scalars set correctly on PolyData: {valid_scalars.GetNumberOfTuples()} tuples")
+
+            # Update Mapper
+            mapper = self.current_actor.GetMapper()
+            mapper.SetScalarModeToUseCellData()
+            mapper.ScalarVisibilityOn()
+            mapper.SetColorModeToDirectScalars()
+            
+            # Update Actor Lighting properties for better colored visibility
+            self.current_actor.GetProperty().SetAmbient(0.8)
+            self.current_actor.GetProperty().SetDiffuse(0.5)
+            self.current_actor.GetProperty().SetSpecular(0.0)
+            
+            # Trigger Render
+            self.vtk_widget.GetRenderWindow().Render()
+            print(f"[DEBUG] Quality coloring applied to {colored_count} cells. View updated.")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to apply quality coloring: {e}")
+            import traceback
+            traceback.print_exc()
 
     def load_mesh_file(self, filepath: str, result: dict = None):
         """Load and display mesh file with optional result dict for counts"""
@@ -1800,6 +2350,9 @@ except Exception as e:
         self.info_label.setText("Loading mesh...")
 
         try:
+            # Store filepath for update_info_label method
+            self.current_mesh_file = filepath
+            
             print(f"[DEBUG] Parsing .msh file...")
             nodes, elements = self._parse_msh_file(filepath)
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
@@ -1837,78 +2390,85 @@ except Exception as e:
                         traceback.print_exc()
                 else:
                     # Compute quality from mesh file using Gmsh
-                    print(f"[DEBUG] No quality file found, computing quality from mesh using Gmsh...")
-                    try:
-                        import gmsh
-                        gmsh.initialize()
-                        gmsh.option.setNumber("General.Terminal", 0)
-                        gmsh.merge(str(filepath))
-                        
-                        per_element_quality = {}
-                        per_element_gamma = {}
-                        per_element_skewness = {}
-                        per_element_aspect_ratio = {}
-                        
-                        # Get surface elements (triangles)
-                        tri_types, tri_tags, tri_nodes = gmsh.model.mesh.getElements(2)
-                        all_qualities = []
-                        
-                        for elem_type, tags in zip(tri_types, tri_tags):
-                            if elem_type in [2, 9]:  # Linear & Quadratic Triangles
-                                try:
-                                    # Extract SICN quality for surface triangles
-                                    sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                                    gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
-                                    
-                                    for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
-                                        tag_int = int(tag)
-                                        per_element_quality[tag_int] = float(sicn)
-                                        per_element_gamma[tag_int] = float(gamma)
-                                        per_element_skewness[tag_int] = 1.0 - float(sicn)
-                                        per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
-                                        all_qualities.append(sicn)
-                                    
-                                    print(f"[DEBUG] Computed quality for {len(tags)} surface triangles (type {elem_type})")
-                                except Exception as e:
-                                    print(f"[DEBUG] Error computing surface triangle qualities: {e}")
-                        
-                        gmsh.finalize()
-                        
-                        if per_element_quality:
-                            # Calculate statistics
-                            sorted_q = sorted(all_qualities)
-                            idx_10 = max(0, int(len(sorted_q) * 0.10))
+                    # Skip for very large meshes (> 100k elements) to avoid hang
+                    print(f"[DEBUG] No quality file found")
+                    
+                    if len(elements) > 100000:
+                        print(f"[DEBUG] Large mesh ({len(elements)} elements) - skipping quality computation to improve load time")
+                        print(f"[DEBUG] Tip: Use quality overlay button after loading")
+                    else:
+                        print(f"[DEBUG] Computing quality from mesh using Gmsh...")
+                        try:
+                            import gmsh
+                            gmsh.initialize()
+                            gmsh.option.setNumber("General.Terminal", 0)
+                            gmsh.merge(str(filepath))
                             
-                            avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma) if per_element_gamma else 0
-                            avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness) if per_element_skewness else 0
-                            avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio) if per_element_aspect_ratio else 1.0
+                            per_element_quality = {}
+                            per_element_gamma = {}
+                            per_element_skewness = {}
+                            per_element_aspect_ratio = {}
                             
-                            if not result:
-                                result = {}
-                            result['per_element_quality'] = per_element_quality
-                            result['per_element_gamma'] = per_element_gamma
-                            result['per_element_skewness'] = per_element_skewness
-                            result['per_element_aspect_ratio'] = per_element_aspect_ratio
-                            result['quality_metrics'] = {
-                                'sicn_min': min(all_qualities),
-                                'sicn_avg': sum(all_qualities) / len(all_qualities),
-                                'sicn_max': max(all_qualities),
-                                'sicn_10_percentile': sorted_q[idx_10],
-                                'gamma_avg': avg_gamma,
-                                'avg_skewness': avg_skewness,
-                                'avg_aspect_ratio': avg_aspect_ratio,
-                            }
+                            # Get surface elements (triangles)
+                            tri_types, tri_tags, tri_nodes = gmsh.model.mesh.getElements(2)
+                            all_qualities = []
                             
-                            self.current_quality_data = result
+                            for elem_type, tags in zip(tri_types, tri_tags):
+                                if elem_type in [2, 9]:  # Linear & Quadratic Triangles
+                                    try:
+                                        # Extract SICN quality for surface triangles
+                                        sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                                        gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                                        
+                                        for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                            tag_int = int(tag)
+                                            per_element_quality[tag_int] = float(sicn)
+                                            per_element_gamma[tag_int] = float(gamma)
+                                            per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                            per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                            all_qualities.append(sicn)
+                                        
+                                        print(f"[DEBUG] Computed quality for {len(tags)} surface triangles (type {elem_type})")
+                                    except Exception as e:
+                                        print(f"[DEBUG] Error computing surface triangle qualities: {e}")
                             
-                            print(f"[DEBUG] [OK][OK] Computed quality for {len(per_element_quality)} surface elements")
-                            print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
-                            print(f"[DEBUG] Gamma avg: {avg_gamma:.3f}, Skew avg: {avg_skewness:.3f}, AR avg: {avg_aspect_ratio:.2f}")
-                        
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to compute quality from mesh: {e}")
-                        import traceback
-                        traceback.print_exc()
+                            gmsh.finalize()
+                            
+                            if per_element_quality:
+                                # Calculate statistics
+                                sorted_q = sorted(all_qualities)
+                                idx_10 = max(0, int(len(sorted_q) * 0.10))
+                                
+                                avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma) if per_element_gamma else 0
+                                avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness) if per_element_skewness else 0
+                                avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio) if per_element_aspect_ratio else 1.0
+                                
+                                if not result:
+                                    result = {}
+                                result['per_element_quality'] = per_element_quality
+                                result['per_element_gamma'] = per_element_gamma
+                                result['per_element_skewness'] = per_element_skewness
+                                result['per_element_aspect_ratio'] = per_element_aspect_ratio
+                                result['quality_metrics'] = {
+                                    'sicn_min': min(all_qualities),
+                                    'sicn_avg': sum(all_qualities) / len(all_qualities),
+                                    'sicn_max': max(all_qualities),
+                                    'sicn_10_percentile': sorted_q[idx_10],
+                                    'gamma_avg': avg_gamma,
+                                    'avg_skewness': avg_skewness,
+                                    'avg_aspect_ratio': avg_aspect_ratio,
+                                }
+                                
+                                self.current_quality_data = result
+                                
+                                print(f"[DEBUG] [OK][OK] Computed quality for {len(per_element_quality)} surface elements")
+                                print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
+                                print(f"[DEBUG] Gamma avg: {avg_gamma:.3f}, Skew avg: {avg_skewness:.3f}, AR avg: {avg_aspect_ratio:.2f}")
+                            
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to compute quality from mesh: {e}")
+                            import traceback
+                            traceback.print_exc()
             else:
                 print(f"[DEBUG] Quality data already in result dict")
                 # Ensure we store it for visualization
@@ -2086,14 +2646,8 @@ except Exception as e:
                     else:
                         print(f"[DEBUG] Using direct surface element IDs")
 
-                    # Calculate global quality range for color mapping
+                    # Calculate global quality range for color mapping (UNUSED but kept for reference)
                     all_qualities = [q for q in per_elem_quality.values() if q is not None]
-                    if all_qualities:
-                        global_min = min(all_qualities)
-                        global_max = max(all_qualities)
-                        print(f"[DEBUG] Global quality range: {global_min:.3f} to {global_max:.3f}")
-                    else:
-                        global_min, global_max = 0.0, 1.0
                     
                     # Create color array for cells
                     colors = vtk.vtkUnsignedCharArray()
@@ -2124,6 +2678,11 @@ except Exception as e:
 
                     # Color each surface cell based on its quality
                     colored_count = 0
+                    
+                    # Default to SICN logic if not specified (since this is initial load)
+                    # "Lower is better" metrics logic will be handled if we detect them later, 
+                    # but usually initial load is SICN or generic "Quality"
+                    
                     for i in range(poly_data.GetNumberOfCells()):
                         # Get element ID - either from mapping (extracted surface) or direct (explicit surface)
                         elem_id = None
@@ -2142,21 +2701,35 @@ except Exception as e:
                         if quality is None:
                             colors.InsertNextTuple3(150, 150, 150)  # Gray for unknown
                         else:
-                            quality_range = global_max - global_min
-                            if quality_range > 0.0001:
-                                normalized = (quality - global_min) / quality_range
-                            else:
-                                normalized = 1.0
+                            # ABSOLUTE THRESHOLD COLORING
+                            # For SICN/Quality: Higher is better. 0.0 (Worst) -> 1.0 (Best)
+                            # Threshold: < 0.2 is BAD (Crimson)
                             
-                            normalized = max(0.0, min(1.0, normalized))
-                            hue = normalized * 0.33  # 0 (red) to 0.33 (green)
-                            r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
-                            colors.InsertNextTuple3(r, g, b)
+                            if quality < 0.2:
+                                # FAIL: Crimson Red
+                                colors.InsertNextTuple3(220, 20, 60)
+                            else:
+                                # PASS: Gradient Green -> Yellow
+                                # Remap 0.2-1.0 to 0.0-1.0 for color calculation
+                                # We want 1.0 -> Green (0.33 Hue), 0.2 -> Yellow/Orange (0.05 Hue)
+                                # Actually standard is 0=Red, 0.33=Green. 
+                                # Let's map 0.2 -> 0.0 (Reddish/Orange start of gradient) to 1.0 -> 0.33 (Green)
+                                # But we want to avoid pure Red for "Pass but low", so maybe start at Orange (0.08)
+                                
+                                # Simpler: Map 0.0 -> 1.0 quality to 0.0 -> 0.33 hue, 
+                                # but override anything < 0.2 to Crimson.
+                                # So 0.2 element gets Hue 0.06 (Orange-ish) which distinguishes it from Crimson.
+                                
+                                normalized = max(0.0, min(1.0, quality))
+                                hue = normalized * 0.33
+                                r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                                colors.InsertNextTuple3(r, g, b)
+                            
                             colored_count += 1
 
                     poly_data.GetCellData().SetScalars(colors)
-                    print(f"[DEBUG] [OK][OK]Applied smooth quality gradient colors")
-                    print(f"[DEBUG] [OK][OK]Quality range: {global_min:.3f} (red) to {global_max:.3f} (green)")
+                    print(f"[DEBUG] [OK][OK]Applied ABSOLUTE THRESHOLD quality colors")
+                    print(f"[DEBUG] [OK][OK]Threshold: Elements < 0.2 marked CRIMSON RED")
                     print(f"[DEBUG] [OK][OK]Total colored surface cells: {colored_count}/{poly_data.GetNumberOfCells()}")
 
                     # Verify scalars were set
@@ -2245,6 +2818,17 @@ except Exception as e:
                 f"Nodes: {display_nodes:,} * Elements: {display_elements:,}<br>",
                 f"Tetrahedra: {tet_count:,} * Triangles: {tri_count:,}"
             ]
+            
+            # Add bounding box dimensions if available
+            if result and result.get('bounding_box'):
+                bb = result['bounding_box']
+                dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+                info_lines.append(f"<br><b>Bounds:</b> {dims[0]:.1f} x {dims[1]:.1f} x {dims[2]:.1f} mm")
+            
+            # Add volume if available
+            if result and result.get('volume'):
+                vol = result['volume']
+                info_lines.append(f" | <b>Vol:</b> {vol:,.0f} mm³")
 
             # Add quality metrics if available in result
             if result and result.get('quality_metrics'):
@@ -2290,139 +2874,227 @@ except Exception as e:
             traceback.print_exc()
             self.info_label.setText(error_msg)
             return f"ERROR: {e}"
+    
+    def update_info_label(self, result: dict = None):
+        """Update info label header with quality metrics after background calculation
+        
+        Args:
+            result: Dictionary containing quality_metrics, total_nodes, total_elements, etc.
+        """
+        if not result:
+            return
+            
+        # Build info text with quality metrics
+        display_nodes = result.get('total_nodes', 0)
+        display_elements = result.get('total_elements', 0)
+        tet_count = sum(1 for e in self.current_mesh_elements if e.get('type') == 'tetrahedron') if self.current_mesh_elements else 0
+        tri_count = sum(1 for e in self.current_mesh_elements if e.get('type') == 'triangle') if self.current_mesh_elements else 0
+        
+        # Extract mesh filename from current state (set during load_mesh_file or from result)
+        mesh_name = "Mesh"
+        if hasattr(self, 'current_mesh_file') and self.current_mesh_file:
+            mesh_name = Path(self.current_mesh_file).name
+        
+        info_lines = [
+            f"<b>Mesh Generated</b><br>",
+            f"{mesh_name}<br>",
+            f"<span style='color: #6c757d;'>",
+            f"Nodes: {display_nodes:,} * Elements: {display_elements:,}<br>",
+            f"Tetrahedra: {tet_count:,} * Triangles: {tri_count:,}"
+        ]
+        
+        # Add bounding box dimensions if available
+        if result.get('bounding_box'):
+            bb = result['bounding_box']
+            dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+            info_lines.append(f"<br><b>Bounds:</b> {dims[0]:.1f} x {dims[1]:.1f} x {dims[2]:.1f} mm")
+        
+        # Add volume if available
+        if result.get('volume'):
+            vol = result['volume']
+            info_lines.append(f" | <b>Vol:</b> {vol:,.0f} mm³")
+        
+        # Add quality metrics if available
+        if result.get('quality_metrics'):
+            metrics = result['quality_metrics']
+            info_lines.append("<br><b>Quality Metrics (avg):</b><br>")
+            
+            # SICN (primary gmsh metric) - use AVERAGE
+            if 'sicn_avg' in metrics:
+                sicn = metrics['sicn_avg']
+                sicn_color = "#198754" if sicn >= 0.7 else "#ffc107" if sicn >= 0.5 else "#dc3545"
+                info_lines.append(f"<span style='color: {sicn_color};'>SICN: {sicn:.3f}</span> ")
+            
+            # Gamma - use AVERAGE
+            if 'gamma_avg' in metrics:
+                gamma = metrics['gamma_avg']
+                gamma_color = "#198754" if gamma >= 0.6 else "#ffc107" if gamma >= 0.4 else "#dc3545"
+                info_lines.append(f"<span style='color: {gamma_color};'>γ: {gamma:.3f}</span><br>")
+            
+            # Skewness - use AVERAGE
+            if 'skewness_avg' in metrics:
+                skew = metrics['skewness_avg']
+                skew_color = "#198754" if skew <= 0.3 else "#ffc107" if skew <= 0.5 else "#dc3545"
+                info_lines.append(f"<span style='color: {skew_color};'>Skew: {skew:.3f}</span> ")
+            
+            # Aspect Ratio - use AVERAGE
+            if 'aspect_ratio_avg' in metrics:
+                ar = metrics['aspect_ratio_avg']
+                ar_color = "#198754" if ar <= 2.0 else "#ffc107" if ar <= 3.0 else "#dc3545"
+                info_lines.append(f"<span style='color: {ar_color};'>AR: {ar:.2f}</span>")
+        
+        info_lines.append("</span>")
+        info_text = "".join(info_lines)
+        self.info_label.setText(info_text)
+        self.info_label.adjustSize()
+        print(f"[DEBUG] Info label updated with quality metrics")
 
     def _parse_msh_file(self, filepath: str):
         nodes = {}
         elements = []
 
         with open(filepath, 'r') as f:
-            lines = f.readlines()
+            lines = [l.strip() for l in f.readlines()]
+
+        # Detect version
+        version = 4.1 
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line == "$MeshFormat":
+                i += 1
+                if i < len(lines):
+                    parts = lines[i].split()
+                    if len(parts) >= 1:
+                        try:
+                            version = float(parts[0])
+                        except:
+                            pass
+                break
+            i += 1
+            
+        print(f"[MESH_LOADER DEBUG] Detected Gmsh version: {version}")
 
         i = 0
         while i < len(lines):
-            line = lines[i].strip()
+            line = lines[i]
 
             if line == "$Nodes":
-                i += 2
-                while lines[i].strip() != "$EndNodes":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        num_nodes = int(parts[3])
+                i += 1
+                if i >= len(lines): break
+                
+                if version < 3.0:
+                    # Gmsh 2.2
+                    try:
+                        num_nodes = int(lines[i])
                         i += 1
-                        node_tags = []
                         for _ in range(num_nodes):
-                            node_tags.append(int(lines[i].strip()))
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            if len(parts) >= 4:
+                                nid = int(parts[0])
+                                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                                nodes[nid] = [x, y, z]
                             i += 1
-                        for tag in node_tags:
-                            coords = lines[i].strip().split()
-                            nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                        if i < len(lines) and lines[i] == "$EndNodes":
                             i += 1
-                    else:
-                        i += 1
-
-            elif line == "$Elements":
-                i += 2
-                while lines[i].strip() != "$EndElements":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        element_type = int(parts[2])
-                        num_elements = int(parts[3])
-                        i += 1
-
-                        # Handle linear tetrahedra (4-node)
-                        if element_type == 4:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "tetrahedron",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                        continue
+                    except ValueError:
+                         i += 1
+                         continue
+                else:
+                    # Gmsh 4.1
+                    i += 1 
+                    while i < len(lines) and lines[i] != "$EndNodes":
+                        parts = lines[i].split()
+                        if len(parts) == 4:
+                            try:
+                                num_nodes_in_block = int(parts[3])
                                 i += 1
-                        # Handle quadratic tetrahedra (10-node) - use first 4 corner nodes
-                        elif element_type == 11:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 11:  # 10 nodes + element tag
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "tetrahedron",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
-                                i += 1
-                        # Handle linear hexahedra (8-node)
-                        elif element_type == 5:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        # Handle quadratic hexahedra (20-node) - use first 8 corner nodes
-                        elif element_type == 12:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 13:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        # Handle linear triangles (3-node)
-                        elif element_type == 2:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 4:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "triangle",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        # Handle quadratic triangles (6-node) - use first 3 corner nodes
-                        elif element_type == 9:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 7:  # 6 nodes + element tag
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "triangle",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        # Handle linear quads (4-node)
-                        elif element_type == 3:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
-                                i += 1
-                        # Handle quadratic quads (8-node) - use first 4 corners
-                        elif element_type == 10:
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                                node_tags = []
+                                for _ in range(num_nodes_in_block):
+                                    node_tags.append(int(lines[i]))
+                                    i += 1
+                                for tag in node_tags:
+                                    coords = lines[i].split()
+                                    nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                                    i += 1
+                            except ValueError:
                                 i += 1
                         else:
-                            # Skip other element types (edges, points, etc.)
-                            for _ in range(num_elements):
-                                i += 1
-                    else:
+                            i += 1
+                    if i < len(lines) and lines[i] == "$EndNodes":
                         i += 1
+                    continue
+
+            elif line == "$Elements":
+                i += 1
+                if i >= len(lines): break
+                
+                if version < 3.0:
+                    # Gmsh 2.2
+                    try:
+                        num_elements = int(lines[i])
+                        i += 1
+                        for _ in range(num_elements):
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            if len(parts) >= 3:
+                                eid = int(parts[0])
+                                etype = int(parts[1])
+                                num_tags = int(parts[2])
+                                node_start_idx = 3 + num_tags
+                                node_ids = [int(n) for n in parts[node_start_idx:]]
+                                
+                                elem_data = None
+                                if etype == 2: elem_data = {"id": eid, "type": "triangle", "nodes": node_ids}
+                                elif etype == 3: elem_data = {"id": eid, "type": "quadrilateral", "nodes": node_ids}
+                                elif etype == 4: elem_data = {"id": eid, "type": "tetrahedron", "nodes": node_ids}
+                                elif etype == 5: elem_data = {"id": eid, "type": "hexahedron", "nodes": node_ids}
+                                
+                                if elem_data:
+                                    elements.append(elem_data)
+                            i += 1
+                        if i < len(lines) and lines[i] == "$EndElements":
+                             i += 1
+                        continue
+                    except ValueError:
+                         i += 1
+                         continue
+                else:
+                    # Gmsh 4.1
+                    i += 1 
+                    while i < len(lines) and lines[i] != "$EndElements":
+                        parts = lines[i].split()
+                        if len(parts) == 4:
+                            element_type = int(parts[2])
+                            num_elements_in_block = int(parts[3])
+                            i += 1
+                            
+                            type_str = None
+                            expected_nodes = 0
+                            if element_type == 2: type_str = "triangle"; expected_nodes = 3
+                            elif element_type == 3: type_str = "quadrilateral"; expected_nodes = 4
+                            elif element_type == 4: type_str = "tetrahedron"; expected_nodes = 4
+                            elif element_type == 5: type_str = "hexahedron"; expected_nodes = 8
+                            elif element_type == 11: type_str = "tetrahedron"; expected_nodes = 4
+                                
+                            if type_str:
+                                for _ in range(num_elements_in_block):
+                                    data = lines[i].split()
+                                    if len(data) >= 1 + expected_nodes:
+                                        eid = int(data[0])
+                                        enodes = [int(x) for x in data[1:1+expected_nodes]]
+                                        elements.append({"id": eid, "type": type_str, "nodes": enodes})
+                                    i += 1
+                            else:
+                                i += num_elements_in_block
+                        else:
+                            i += 1
+                    if i < len(lines) and lines[i] == "$EndElements":
+                        i += 1
+                    continue
+
             else:
                 i += 1
 
@@ -2430,7 +3102,7 @@ except Exception as e:
     def load_component_visualization(self, result: Dict):
         """Load and display CoACD components with PyVista"""
         from pathlib import Path
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/component_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write("=== COMPONENT VIZ DEBUG (Fixed) ===\n")
             f.write(f"Function called\n")

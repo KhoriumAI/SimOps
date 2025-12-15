@@ -16,7 +16,7 @@ class PolyhedralVisualizer:
 
     def load_file(self, json_path: str):
         """Load polyhedral mesh from JSON file using proper VTK_POLYHEDRON cells"""
-        debug_log = Path("C:/Users/Owner/Downloads/MeshPackageLean/poly_debug.txt")
+        debug_log = Path("poly_debug.txt")
         with open(debug_log, 'w') as f:
             f.write(f"=== POLYHEDRAL LOAD DEBUG (Refactored) ===\n")
             f.write(f"JSON: {json_path}\n")

@@ -14,7 +14,7 @@ import tempfile
 import re
 from pathlib import Path
 from multiprocessing import cpu_count
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
 
 class WorkerSignals(QObject):
@@ -22,6 +22,7 @@ class WorkerSignals(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str, int)  # (phase, percentage)
     phase_complete = pyqtSignal(str)  # Signal when phase is 100% done
+    intermediate_update = pyqtSignal(str, str) # (phase, file_path)
     finished = pyqtSignal(bool, dict)
 
 
@@ -178,6 +179,21 @@ class MeshWorker:
             # Debug: Show lines that look like they might be JSON
             if line.startswith('{') or ('"success"' in line and not line.startswith('Info')):
                 print(f"[GUI-WORKER] Potential JSON line (didn't match): {line[:100]}")
+            
+            # Check for display updates
+            if "[DISPLAY_UPDATE]" in line:
+                try:
+                    # Parse: [DISPLAY_UPDATE] phase=surface file=...
+                    phase_match = re.search(r'phase=(\w+)', line)
+                    file_match = re.search(r'file=(.+)', line)
+                    if phase_match and file_match:
+                        phase = phase_match.group(1)
+                        file_path = file_match.group(1).strip()
+                        self.signals.intermediate_update.emit(phase, file_path)
+                        print(f"[GUI-WORKER] Emitting intermediate update: {phase} -> {file_path}")
+                except Exception as e:
+                    print(f"[GUI-WORKER] Failed to parse intermediate update: {e}")
+
             self.signals.log.emit(line)
 
     def _run(self, cad_file: str, quality_params: dict = None):
@@ -232,12 +248,29 @@ class MeshWorker:
             # Start subprocess with PIPE
             self.signals.log.emit("[DEBUG] Starting subprocess with PIPE...")
             
+            # CRITICAL FIX: Pass PYTHONPATH to subprocess
+            # macOS/Linux spawn method needs explicit path to find modules
+            env = os.environ.copy()
+            python_path = env.get("PYTHONPATH", "")
+            if python_path:
+                env["PYTHONPATH"] = f"{project_root}{os.pathsep}{python_path}"
+            else:
+                env["PYTHONPATH"] = str(project_root)
+                
+            # Set worker count from GUI slider
+            if quality_params and "worker_count" in quality_params:
+                env["MESH_MAX_WORKERS"] = str(quality_params["worker_count"])
+                self.signals.log.emit(f"[DEBUG] Set MESH_MAX_WORKERS={quality_params['worker_count']}")
+                
+            self.signals.log.emit(f"[DEBUG] PYTHONPATH set to: {env['PYTHONPATH']}")
+
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1  # Line buffered
+                bufsize=1,  # Line buffered
+                env=env     # Pass environment with PYTHONPATH
             )
             self.signals.log.emit(f"[DEBUG] Subprocess started with PID: {self.process.pid}")
 
@@ -280,3 +313,139 @@ class MeshWorker:
             except Exception as e:
                 pass  # Best effort
         self.is_running = False
+
+
+class QualityAnalysisWorker(QThread):
+    """Background worker for deferred quality analysis"""
+    finished = pyqtSignal(bool, dict)
+    log = pyqtSignal(str)
+
+    def __init__(self, mesh_file: str):
+        super().__init__()
+        self.mesh_file = mesh_file
+        self.is_running = True
+
+    def run(self):
+        try:
+            self.log.emit(f"Starting background quality analysis for: {Path(self.mesh_file).name}")
+            
+            # Helper script to compute quality using Gmsh
+            script = f"""
+import gmsh
+import json
+import sys
+
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.merge(r"{self.mesh_file}")
+    
+    per_element_quality = {{}}
+    per_element_gamma = {{}}
+    per_element_skewness = {{}}
+    per_element_aspect_ratio = {{}}
+    
+    # Get 3D elements (tetrahedra) - this is a volume mesh
+    tet_types, tet_tags, tet_nodes = gmsh.model.mesh.getElements(3)
+    all_qualities = []
+    
+    for elem_type, tags in zip(tet_types, tet_tags):
+        if elem_type in [4, 11]:  # Linear & Quadratic Tets
+            # Extract SICN quality (Inverse condition number)
+            sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+            gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
+            
+            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                tag_int = int(tag)
+                per_element_quality[tag_int] = float(sicn)
+                per_element_gamma[tag_int] = float(gamma)
+                per_element_skewness[tag_int] = 1.0 - float(sicn)
+                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                all_qualities.append(sicn)
+                
+    gmsh.finalize()
+    
+    if not per_element_quality:
+        print(json.dumps({{"error": "No tetrahedral elements found"}}))
+        sys.exit(0)
+        
+    # Calculate statistics
+    sorted_q = sorted(all_qualities)
+    idx_10 = max(0, int(len(sorted_q) * 0.10))
+    
+    avg_gamma = sum(per_element_gamma.values()) / len(per_element_gamma)
+    avg_skewness = sum(per_element_skewness.values()) / len(per_element_skewness)
+    avg_aspect_ratio = sum(per_element_aspect_ratio.values()) / len(per_element_aspect_ratio)
+
+    result = {{
+        "success": True,
+        "per_element_quality": per_element_quality,
+        "per_element_gamma": per_element_gamma,
+        "per_element_skewness": per_element_skewness,
+        "per_element_aspect_ratio": per_element_aspect_ratio,
+        "quality_metrics": {{
+            "sicn_min": min(all_qualities),
+            "sicn_avg": sum(all_qualities) / len(all_qualities),
+            "sicn_max": max(all_qualities),
+            "sicn_10_percentile": sorted_q[idx_10],
+            "gamma_avg": avg_gamma,
+            "skewness_avg": avg_skewness,
+            "aspect_ratio_avg": avg_aspect_ratio,
+        }}
+    }}
+    
+    print("JSON_RESULT:" + json.dumps(result))
+
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+    sys.exit(1)
+"""
+            # Set PYTHONPATH to ensure imports work if run from source
+            # Go up 3 levels from gui_app/workers.py to project root
+            project_root = Path(__file__).parent.parent.parent
+            env = os.environ.copy()
+            python_path = env.get("PYTHONPATH", "")
+            if python_path:
+                env["PYTHONPATH"] = f"{project_root}{os.pathsep}{python_path}"
+            else:
+                env["PYTHONPATH"] = str(project_root)
+
+            # Run using same python environment
+            process = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                self.log.emit(f"Quality analysis failed: {stderr}")
+                self.finished.emit(False, {"error": stderr})
+                return
+
+            # Parse output
+            result = None
+            for line in stdout.splitlines():
+                if line.startswith("JSON_RESULT:"):
+                    result = json.loads(line[12:])
+                    break
+            
+            if result and result.get("success"):
+                self.log.emit("Quality analysis completed successfully")
+                self.finished.emit(True, result)
+            else:
+                error = result.get("error") if result else "Unknown error"
+                self.log.emit(f"Quality analysis failed: {error}")
+                self.finished.emit(False, {"error": error})
+
+        except Exception as e:
+            self.log.emit(f"Worker exception: {e}")
+            self.finished.emit(False, {"error": str(e)})
+
+    def stop(self):
+        self.is_running = False
+        self.quit()
+        self.wait()

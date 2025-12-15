@@ -175,6 +175,22 @@ class EventHandler:
         clipboard.setText(self.window.console.toPlainText())
         self.window.add_log("[INFO] Console output copied to clipboard")
 
+    def on_worker_count_changed(self, value):
+        """Handle worker count slider change"""
+        self.window.worker_value_label.setText(f"{value} workers")
+    
     def toggle_hex_visualization(self):
         # Placeholder for secret hex mode
         pass
+
+    def on_mesh_strategy_changed(self, text: str):
+        """Show/Hide Fast Mode checkbox based on strategy."""
+        if hasattr(self.window, 'fast_mode'):
+            # Only show Fast Mode for GPU Delaunay strategy
+            is_gpu_strategy = "GPU" in text
+            print(f"[DEBUG] Strategy changed to: {text} | GPU={is_gpu_strategy}")
+            self.window.fast_mode.setVisible(is_gpu_strategy)
+            
+            # Auto-uncheck if hidden to avoid accidental fast mode in non-supported strategies
+            if not is_gpu_strategy:
+                self.window.fast_mode.setChecked(False)

@@ -109,17 +109,38 @@ except Exception as e:
             if not os.path.exists(tmp_stl) or os.path.getsize(tmp_stl) < 100:
                 raise Exception("STL file was not created or is empty.")
 
+            print(f"[CAD PREVIEW] Loading STL: {tmp_stl}")
             mesh = pv.read(tmp_stl)
             os.unlink(tmp_stl)
 
+            print(f"[CAD PREVIEW] Mesh stats: {mesh.n_points} points, {mesh.n_cells} cells")
+            
             if mesh.n_points == 0:
                 raise Exception("Empty mesh - no geometry in CAD file")
 
             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
-            self.viewer.current_poly_data = poly_data
+            print(f"[CAD PREVIEW] Surface extracted: {poly_data.GetNumberOfPoints()} points, {poly_data.GetNumberOfCells()} cells")
+            
+            # Apply smooth normals for better CAD visualization
+            try:
+                import vtk
+                normals_gen = vtk.vtkPolyDataNormals()
+                normals_gen.SetInputData(poly_data)
+                normals_gen.ComputePointNormalsOn()
+                normals_gen.ComputeCellNormalsOff()
+                normals_gen.SplittingOn()
+                normals_gen.SetFeatureAngle(60.0)
+                normals_gen.Update()
+                smooth_poly_data = normals_gen.GetOutput()
+                print(f"[CAD PREVIEW] Smooth normals generated")
+                self.viewer.current_poly_data = smooth_poly_data
+            except Exception as e:
+                print(f"[CAD PREVIEW] Normals failed: {e}, using raw mesh")
+                smooth_poly_data = poly_data
+                self.viewer.current_poly_data = poly_data
 
             mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(poly_data)
+            mapper.SetInputData(smooth_poly_data)
 
             self.viewer.current_actor = vtk.vtkActor()
             self.viewer.current_actor.SetMapper(mapper)
@@ -127,13 +148,18 @@ except Exception as e:
             self.viewer.current_actor.GetProperty().SetColor(0.3, 0.5, 0.8)
             self.viewer.current_actor.GetProperty().SetInterpolationToPhong()
             self.viewer.current_actor.GetProperty().EdgeVisibilityOff()
+            self.viewer.current_actor.GetProperty().BackfaceCullingOff()  # Fix for complex manifolds
+            self.viewer.current_actor.GetProperty().ShadingOn()
             self.viewer.current_actor.GetProperty().SetAmbient(0.3)
             self.viewer.current_actor.GetProperty().SetDiffuse(0.7)
-            self.viewer.current_actor.GetProperty().SetSpecular(0.2)
+            self.viewer.current_actor.GetProperty().SetSpecular(0.5)
+            self.viewer.current_actor.GetProperty().SetSpecularPower(40.0)
 
+            print(f"[CAD PREVIEW] Adding actor to renderer")
             self.viewer.renderer.AddActor(self.viewer.current_actor)
             self.viewer.renderer.ResetCamera()
             self.viewer.vtk_widget.GetRenderWindow().Render()
+            print(f"[CAD PREVIEW] Render complete")
 
             volume_text = ""
             if geom_info and 'volume' in geom_info:
@@ -158,18 +184,88 @@ except Exception as e:
             self.viewer.info_label.setText(f"CAD Loaded<br><small>(Preview Unavailable)</small><br>Click 'Generate Mesh'")
             return None
 
+    def log_debug(self, msg):
+        try:
+            with open("C:/Users/Owner/Downloads/MeshPackageLean/loader_debug.txt", "a") as f:
+                f.write(f"{msg}\n")
+        except:
+            pass
+
     def load_mesh_file(self, filepath: str, result: dict = None):
+        self.log_debug(f"\n{'='*50}")
+        self.log_debug(f"LOAD_MESH_FILE CALLED: {filepath}")
+        self.log_debug(f"Result keys: {list(result.keys()) if result else 'None'}")
+        if result:
+            self.log_debug(f"Total Nodes in Result: {result.get('total_nodes')}")
+            self.log_debug(f"Total Elements in Result: {result.get('total_elements')}")
+
         print(f"\n{'='*70}")
         print(f"[MESH_LOADER DEBUG] load_mesh_file called: {filepath}")
-        print(f"[MESH_LOADER DEBUG] result keys: {list(result.keys()) if result else 'None'}")
-        print(f"[MESH_LOADER DEBUG] Viewer: {self.viewer}")
-        print(f"[MESH_LOADER DEBUG] Renderer: {self.viewer.renderer}")
         
         self.viewer.clear_view()
         self.viewer.info_label.setText("Loading mesh...")
-
+        
         try:
-            nodes, elements = self._parse_msh_file(filepath)
+            nodes, elements = {}, []
+            try:
+                nodes, elements = self._parse_msh_file(filepath)
+            except Exception:
+                pass 
+                
+            if not nodes or not elements:
+                self.log_debug("Parsing .msh failed/empty. Checking fallback...")
+                
+                vtu_path = Path(filepath).with_suffix('.vtu')
+                vtk_path = Path(filepath).with_suffix('.vtk')
+                
+                fallback_path = None
+                if vtu_path.exists():
+                    fallback_path = vtu_path
+                    self.log_debug(f"Found VTU: {vtu_path}")
+                elif vtk_path.exists():
+                    fallback_path = vtk_path
+                    self.log_debug(f"Found VTK: {vtk_path}")
+                     
+                if not fallback_path:
+                     self.log_debug("No fallback file found.")
+                else:
+                    self.log_debug(f"Attempting to load fallback: {fallback_path}")
+                    import pyvista as pv
+                    try:
+                        mesh = pv.read(str(fallback_path))
+                        self.log_debug(f"PyVista read success. Points: {mesh.n_points}")
+                        
+                        if mesh.n_points > 0:
+                            poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+                            self.viewer.current_poly_data = poly_data
+                            
+                            mapper = vtk.vtkPolyDataMapper()
+                            mapper.SetInputData(poly_data)
+                            
+                            self.viewer.current_actor = vtk.vtkActor()
+                            self.viewer.current_actor.SetMapper(mapper)
+                            self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
+                            self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
+                            
+                            self.viewer.renderer.AddActor(self.viewer.current_actor)
+                            self.viewer.renderer.ResetCamera()
+                            self.viewer.vtk_widget.GetRenderWindow().Render()
+                            
+                            self.log_debug("Render setup complete. Updating label.")
+                            self.viewer.info_label.setText(
+                                f"<b>Mesh Loaded (VTK)</b><br>"
+                                f"{fallback_path.name}<br>"
+                                f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
+                            )
+                            return "SUCCESS"
+                        else:
+                            self.log_debug("Mesh has 0 points.")
+                    except Exception as e:
+                        self.log_debug(f"PyVista Exception: {e}")
+                        import traceback
+                        self.log_debug(traceback.format_exc())
+
+            self.log_debug("Falling through to legacy loader...")
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
 
             # Try to load surface quality data if not provided
@@ -363,16 +459,22 @@ except Exception as e:
                 f"{Path(filepath).name}<br>",
                 f"<span style='color: #6c757d;'>",
                 f"Nodes: {display_nodes:,} * Elements: {display_elements:,}<br>",
-                f"Tetrahedra: {tet_count:,} * Triangles: {tri_count:,}"
+                f"Hexes: {hex_count:,} * Tets: {tet_count:,} * Tris: {tri_count:,}"
             ]
 
             if result and result.get('quality_metrics'):
                 metrics = result['quality_metrics']
                 info_lines.append("<br><b>Quality Metrics (avg):</b><br>")
-                if 'sicn_avg' in metrics:
+                
+                if 'jacobian_avg' in metrics:
+                    jac = metrics['jacobian_avg']
+                    jac_color = "#198754" if jac >= 0.7 else "#ffc107" if jac >= 0.3 else "#dc3545"
+                    info_lines.append(f"<span style='color: {jac_color};'>Jacobian: {jac:.3f}</span><br>")
+                elif 'sicn_avg' in metrics:
                     sicn = metrics['sicn_avg']
                     sicn_color = "#198754" if sicn >= 0.7 else "#ffc107" if sicn >= 0.5 else "#dc3545"
                     info_lines.append(f"<span style='color: {sicn_color};'>SICN: {sicn:.3f}</span> ")
+                
                 if 'gamma_avg' in metrics:
                     gamma = metrics['gamma_avg']
                     gamma_color = "#198754" if gamma >= 0.6 else "#ffc107" if gamma >= 0.4 else "#dc3545"
@@ -394,86 +496,201 @@ except Exception as e:
     def _parse_msh_file(self, filepath: str):
         nodes = {}
         elements = []
-
+        
         with open(filepath, 'r') as f:
-            lines = f.readlines()
+            lines = [l.strip() for l in f.readlines()]
+            
+        # Detect version
+        version = 4.1 # Default assumption if no header (though standard requires it)
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line == "$MeshFormat":
+                i += 1
+                if i < len(lines):
+                    parts = lines[i].split()
+                    if len(parts) >= 1:
+                        try:
+                            version = float(parts[0])
+                        except:
+                            pass
+                break
+            i += 1
+            
+        print(f"[MESH_LOADER DEBUG] Detected Gmsh version: {version}")
 
         i = 0
         while i < len(lines):
-            line = lines[i].strip()
+            line = lines[i]
 
             if line == "$Nodes":
-                i += 2
-                while lines[i].strip() != "$EndNodes":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        num_nodes = int(parts[3])
+                i += 1
+                if i >= len(lines): break
+                
+                # Gmsh 2.2: 
+                # num_nodes
+                # id x y z
+                # ...
+                
+                # Gmsh 4.1:
+                # num_blocks num_nodes ...
+                # block_header
+                # ...
+                
+                if version < 3.0:
+                    # Gmsh 2.x parsing
+                    try:
+                        num_nodes = int(lines[i])
                         i += 1
-                        node_tags = []
                         for _ in range(num_nodes):
-                            node_tags.append(int(lines[i].strip()))
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            if len(parts) >= 4:
+                                nid = int(parts[0])
+                                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                                nodes[nid] = [x, y, z]
                             i += 1
-                        for tag in node_tags:
-                            coords = lines[i].strip().split()
-                            nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                        # Skip $EndNodes
+                        if i < len(lines) and lines[i] == "$EndNodes":
                             i += 1
-                    else:
+                        continue # loop back
+                    except ValueError:
+                        print("[MESH_LOADER ERROR] Failed parsing Gmsh 2.2 Nodes")
                         i += 1
-
-            elif line == "$Elements":
-                i += 2
-                while lines[i].strip() != "$EndElements":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4:
-                        element_type = int(parts[2])
-                        num_elements = int(parts[3])
-                        i += 1
-
-                        if element_type == 4: # Tet4
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "tetrahedron",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                        continue
+                else:
+                    # Gmsh 4.x parsing (Existing logic was 4.x based)
+                    # existing logic skipped the count line: i += 2 (current i is at Header)
+                    # Let's adjust to be robust using the detected logic
+                    
+                    # Original code skipped 2 lines from $Nodes.
+                    # line[i] is now at num_blocks... (after $Nodes)
+                    i += 1 # Skip num_blocks line
+                    
+                    while i < len(lines) and lines[i] != "$EndNodes":
+                        parts = lines[i].split()
+                        if len(parts) == 4: # Block header
+                            try:
+                                num_nodes_in_block = int(parts[3])
                                 i += 1
-                        elif element_type == 5: # Hex8
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 9:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "hexahedron",
-                                        "nodes": [int(data[j]) for j in range(1, 9)]
-                                    })
-                                i += 1
-                        elif element_type == 2: # Tri3
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 4:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "triangle",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3])]
-                                    })
-                                i += 1
-                        elif element_type == 3: # Quad4
-                            for _ in range(num_elements):
-                                data = lines[i].strip().split()
-                                if len(data) >= 5:
-                                    elements.append({
-                                        "id": int(data[0]),
-                                        "type": "quadrilateral",
-                                        "nodes": [int(data[1]), int(data[2]), int(data[3]), int(data[4])]
-                                    })
+                                node_tags = []
+                                for _ in range(num_nodes_in_block):
+                                    node_tags.append(int(lines[i]))
+                                    i += 1
+                                for tag in node_tags:
+                                    coords = lines[i].split()
+                                    nodes[tag] = [float(coords[0]), float(coords[1]), float(coords[2])]
+                                    i += 1
+                            except ValueError:
                                 i += 1
                         else:
-                            for _ in range(num_elements):
-                                i += 1
-                    else:
+                            i += 1
+                    
+                    if i < len(lines) and lines[i] == "$EndNodes":
                         i += 1
+                    continue
+
+            elif line == "$Elements":
+                i += 1
+                if i >= len(lines): break
+                
+                if version < 3.0:
+                    # Gmsh 2.2 Elements
+                    # num_elements
+                    # id type num_tags tag1 ... node1 ...
+                    try:
+                        num_elements = int(lines[i])
+                        i += 1
+                        for _ in range(num_elements):
+                            if i >= len(lines): break
+                            parts = lines[i].split()
+                            # id, type, num_tags, ...
+                            if len(parts) >= 3:
+                                eid = int(parts[0])
+                                etype = int(parts[1])
+                                num_tags = int(parts[2])
+                                # nodes start after tags
+                                # parts index: 0=id, 1=type, 2=num_tags, 3..3+num_tags-1=tags, 3+num_tags...=nodes
+                                node_start_idx = 3 + num_tags
+                                node_ids = [int(n) for n in parts[node_start_idx:]]
+                                
+                                elem_data = None
+                                if etype == 2: # Triangle 3-node
+                                    elem_data = {"id": eid, "type": "triangle", "nodes": node_ids}
+                                elif etype == 3: # Quad 4-node
+                                    elem_data = {"id": eid, "type": "quadrilateral", "nodes": node_ids}
+                                elif etype == 4: # Tet 4-node
+                                    elem_data = {"id": eid, "type": "tetrahedron", "nodes": node_ids}
+                                elif etype == 5: # Hex 8-node
+                                    elem_data = {"id": eid, "type": "hexahedron", "nodes": node_ids}
+                                
+                                if elem_data:
+                                    elements.append(elem_data)
+                            i += 1
+                        if i < len(lines) and lines[i] == "$EndElements":
+                             i += 1
+                        continue
+                    except ValueError:
+                         print("[MESH_LOADER ERROR] Failed parsing Gmsh 2.2 Elements")
+                         i += 1
+                         continue
+
+                else:
+                    # Gmsh 4.x Elements
+                    # Original logic was:
+                    # i += 2 (skip header and counts?)
+                    # while != $EndElements
+                    #   parts[2] is type, parts[3] is num
+                    
+                    # line[i] is num_blocks...
+                    i += 1 
+                    
+                    while i < len(lines) and lines[i] != "$EndElements":
+                        parts = lines[i].split()
+                        if len(parts) == 4:
+                            element_type = int(parts[2])
+                            num_elements_in_block = int(parts[3])
+                            i += 1
+                            
+                            type_str = None
+                            expected_nodes = 0
+                            if element_type == 2: 
+                                type_str = "triangle"
+                                expected_nodes = 3
+                            elif element_type == 3: 
+                                type_str = "quadrilateral"
+                                expected_nodes = 4
+                            elif element_type == 4: 
+                                type_str = "tetrahedron"
+                                expected_nodes = 4
+                            elif element_type == 5: 
+                                type_str = "hexahedron"
+                                expected_nodes = 8
+                                
+                            if type_str:
+                                for _ in range(num_elements_in_block):
+                                    data = lines[i].split()
+                                    # Gmsh 4.1: tag is first? No, ID is first.
+                                    # Actually 4.1 format in blocks usually just lists node tags?
+                                    # Format: elementTag nodeTag1 ... nodeTagN
+                                    if len(data) >= 1 + expected_nodes:
+                                        eid = int(data[0])
+                                        enodes = [int(x) for x in data[1:1+expected_nodes]]
+                                        elements.append({
+                                            "id": eid,
+                                            "type": type_str,
+                                            "nodes": enodes
+                                        })
+                                    i += 1
+                            else:
+                                i += num_elements_in_block
+                        else:
+                            i += 1
+                    
+                    if i < len(lines) and lines[i] == "$EndElements":
+                        i += 1
+                    continue
+
             else:
                 i += 1
 

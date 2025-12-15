@@ -250,8 +250,8 @@ def compute_fast_winding_grid(vertices, faces, query_points, verbose=True, theta
     if verbose:
         print(f"[Fast Winding] {n_nodes} spatial clusters", flush=True)
     
-    # Process in point batches
-    batch_size = min(500, n_points)
+    # Process in point batches (increased from 500 to 10k for large meshes)
+    batch_size = min(10000, n_points)
     results = np.zeros(n_points)
     
     for bi in range(0, n_points, batch_size):
