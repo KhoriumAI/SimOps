@@ -62,6 +62,12 @@ output/
 *.quality.json
 *_exhaustive_report.txt
 
+# User uploads and sample files (don't commit these)
+backend/uploads/
+backend/samplefiles/
+backend/outputs/
+backend/instance/
+
 # Logs
 *.log
 
