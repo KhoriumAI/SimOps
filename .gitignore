@@ -27,6 +27,20 @@ wheels/
 .venv
 meshing/
 
+# Node.js
+node_modules/
+dist/
+.pnpm-store/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+
 # IDE
 .vscode/
 .idea/

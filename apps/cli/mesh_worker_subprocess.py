@@ -448,7 +448,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        if 'Hex Dominant' in mesh_strategy:
+        if 'Hex Dominant' in mesh_strategy or 'Hex-Dominant' in mesh_strategy:
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
