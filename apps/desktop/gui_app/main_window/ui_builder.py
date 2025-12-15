@@ -305,6 +305,17 @@ class UIBuilder:
         self.window.export_ansys.setToolTip("Exports .cgns file with Physical Groups for boundary conditions")
         group_layout.addWidget(self.window.export_ansys)
         
+        # FAST MODE Checkbox (Hidden by default, shown for GPU strategy)
+        self.window.fast_mode = QCheckBox("Fast Mode (Skip Winding Checks)")
+        self.window.fast_mode.setStyleSheet("color: #d63384; font-weight: bold; font-size: 11px;")
+        self.window.fast_mode.setToolTip("Skips expensive winding number checks. 2-3x FASTER. \n"
+                                         "Only use for single-body geometry with NO voids/gaps.")
+        self.window.fast_mode.setVisible(False) # Hidden initially
+        group_layout.addWidget(self.window.fast_mode)
+        
+        # Connect strategy change signal
+        self.window.mesh_strategy.currentTextChanged.connect(self.window.on_mesh_strategy_changed)
+        
         # Worker Count Slider
         from multiprocessing import cpu_count
         total_cores = cpu_count()

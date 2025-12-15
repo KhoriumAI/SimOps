@@ -547,15 +547,22 @@ def generate_openfoam_hex_mesh(
                     c_match = re.search(r'''NumberOfCells=['"](\d+)['"]''', content)
                     if p_match: total_nodes = int(p_match.group(1))
                     if c_match: total_elements = int(c_match.group(1))
-            except:
+                    print(f"[OpenFOAM] Stats from VTU: {total_nodes} nodes, {total_elements} elements")
+            except Exception as e:
+                print(f"[OpenFOAM] Error parsing VTU stats: {e}")
                 pass
+
+        # CRITICAL FIX: Return the VTU file as the 'output_file'
+        # This forces the GUI (even if stale) to pass the valid VTU file to the loader.
+        # The loader will try to parse it as .msh, fail, and then fall back to loading it as VTU.
+        primary_output = output_vtk_path if vtk_file else output_path
 
         if verbose:
             print(f"[OpenFOAM] SUCCESS: Mesh saved to {output_path}")
         
         return {
             'success': True,
-            'output_file': output_path,
+            'output_file': primary_output,
             'visualization_file': output_vtk_path if vtk_file else None,
             'strategy': f'OpenFOAM {mesher}',
             'message': 'Hex-dominant mesh generated successfully',

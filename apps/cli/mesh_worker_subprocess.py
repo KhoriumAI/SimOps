@@ -97,14 +97,7 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         
         print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
         
-        return {
-            'success': True,
-            'output_file': output_file,
-            'strategy': 'OpenFOAM cfMesh',
-            'message': 'Hex-dominant mesh generated via cfMesh',
-            'total_elements': 0,  # Will be populated by mesh loader
-            'total_nodes': 0
-        }
+        return result
         
     except Exception as e:
         import traceback
@@ -365,18 +358,39 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         bbox_min = np.array([bbox[0], bbox[1], bbox[2]])
         bbox_max = np.array([bbox[3], bbox[4], bbox[5]])
         
-        # Calculate appropriate mesh size based on target elements
+        # Get sizing from quality params - user-specified takes priority
+        # CRITICAL: GUI uses 'max_size_mm' key, not 'max_element_size'
         target_elements = quality_params.get('target_elements', 10000) if quality_params else 10000
-        volume = np.prod(bbox_max - bbox_min)
-        # Rough estimate: target_elements ~= volume / (element_size^3 / 6)
-        mesh_size = (volume / (target_elements / 6)) ** (1/3)
-        mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)  # Don't go too small
+        max_element_size = quality_params.get('max_size_mm', None) if quality_params else None
+        # Fallback to old key for backwards compatibility
+        if max_element_size is None:
+            max_element_size = quality_params.get('max_element_size', None) if quality_params else None
+        min_element_size = quality_params.get('min_element_size', None) if quality_params else None
         
         print(f"[GPU Mesher] Bounding box: {bbox_min} to {bbox_max}", flush=True)
-        print(f"[GPU Mesher] Target elements: {target_elements}, Mesh size: {mesh_size:.3f}", flush=True)
         
-        # Set mesh size
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.5)
+        # Determine mesh size: user-specified max_size_mm takes priority
+        if max_element_size is not None:
+            mesh_size = float(max_element_size)
+            print(f"[GPU Mesher] Using user-specified max element size: {mesh_size:.3f} mm", flush=True)
+        else:
+            # Calculate from target_elements if not specified
+            volume = np.prod(bbox_max - bbox_min)
+            # Rough estimate: target_elements ~= volume / (element_size^3 / 6)
+            mesh_size = (volume / (target_elements / 6)) ** (1/3)
+            mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)  # Don't go too small
+            print(f"[GPU Mesher] Auto-calculated mesh size from target {target_elements}: {mesh_size:.3f}", flush=True)
+        
+        # Determine min size
+        if min_element_size is not None:
+            min_mesh_size = float(min_element_size)
+        else:
+            min_mesh_size = mesh_size * 0.5
+        
+        print(f"[GPU Mesher] Element size range: {min_mesh_size:.3f} to {mesh_size:.3f} mm", flush=True)
+        
+        # Set mesh size for surface mesh
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_mesh_size)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
         
         # Generate 2D surface mesh only
@@ -421,28 +435,23 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         resolution = min(resolution, 100)  # Cap at 100 for memory
         
         # ==========================================
-        # 1. AUTO-CALCULATE SIZING
+        # USE ALREADY-DETERMINED SIZING (respects user input)
         # ==========================================
-        # Get volume of the bounding box (Approximation of shape volume)
-        bbox_size = bbox_max - bbox_min
-        volume_approx = np.prod(bbox_size)
+        # mesh_size and min_mesh_size were set above from quality_params
+        # Use them directly for the GPU mesher
+        min_spacing = min_mesh_size  # User-specified or calculated min
+        max_spacing = mesh_size * 1.5  # Limit grading to 1.5x max (TIGHTER constraint)
+        grading = 1.5  # Reduced grading for tighter element size control
+        target_sicn = 0.10  # Lowered target - skip refinement faster if already acceptable
         
-        # Theoretical relationship: Volume ≈ N_tets * (L^3 / (6*sqrt(2)))
-        # Inverted to find L (Target Edge Length):
-        target_L = (volume_approx / target_elements * 6 * np.sqrt(2)) ** (1/3)
+        # FAST MODE: Skip expensive winding filters for single-body geometry
+        fast_mode = quality_params.get('fast_mode', False) if quality_params else False
         
-        print(f"[Auto-Sizing] Target: {target_elements} elements for Volume {volume_approx:.2f}")
-        print(f"[Auto-Sizing] Calculated ideal edge length: {target_L:.4f}")
-        
-        # Set Sizing Parameters
-        min_spacing = target_L 
-        max_spacing = target_L * 3.0
-        grading = 1.8 
-        target_sicn = 0.15
-        
-        print(f"[GPU Mesher] Using resolution: {resolution} (fallback)", flush=True)
-        print(f"[GPU Mesher] Adaptive Sizing: min={min_spacing:.3f}, max={max_spacing:.3f}, grading={grading}", flush=True)
+        print(f"[GPU Mesher] Using resolution: {resolution}", flush=True)
+        print(f"[GPU Mesher] Sizing: min={min_spacing:.3f}, max={max_spacing:.3f}, grading={grading}", flush=True)
         print(f"[GPU Mesher] Refinement Target SICN: {target_sicn}", flush=True)
+        if fast_mode:
+            print(f"[GPU Mesher] FAST MODE ENABLED: Skipping winding filters & validation", flush=True)
         
         def progress_callback(msg, pct):
             print(f"[GPU Mesher] {msg} ({pct}%)", flush=True)
@@ -455,7 +464,8 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
             grading=grading,
             resolution=resolution,
             target_sicn=target_sicn,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            fast_mode=fast_mode
         )
         
         elapsed = time.time() - start_total

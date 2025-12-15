@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QWidget, QSlider, QSpinBox,
     QPushButton, QCheckBox, QComboBox
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont, QColor
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
@@ -238,12 +238,13 @@ class VTK3DViewer(QFrame):
         self.paint_colors = vtk.vtkUnsignedCharArray()  # RGB colors per cell
         self.paint_colors.SetNumberOfComponents(3)
         self.paint_colors.SetName("PaintColors")
-
-        self.vtk_widget.Initialize()
-        self.vtk_widget.Start()
+        
+        # Fullscreen state
+        self.is_fullscreen = False
+        self.saved_parent_layout = None
 
         # Info overlay (top-left) - FIXED WIDTH to prevent truncation
-        # Info label (Top-left overlay)
+        # Create BEFORE vtk_widget.Initialize() to avoid resizeEvent errors
         self.info_label = QLabel(self)
         self.info_label.setStyleSheet("""
             QLabel {
@@ -256,12 +257,19 @@ class VTK3DViewer(QFrame):
             }
         """)
         self.info_label.setText("<b>3D Preview</b><br>No model loaded")
-        self.info_label.setWordWrap(True) # Restore word wrap
-        self.info_label.setFixedWidth(450)  # Restore fixed width
-        self.info_label.setMinimumHeight(80)  # Restore minimum height
-        self.info_label.setMaximumHeight(300)  # Restore max height
+        self.info_label.setWordWrap(True)
+        self.info_label.setFixedWidth(450)
+        self.info_label.setMinimumHeight(80)
+        self.info_label.setMaximumHeight(300)
         self.info_label.move(10, 10)
         self.info_label.show()
+
+        self.vtk_widget.Initialize()
+        self.vtk_widget.Start()
+        
+        # Enable double-click to enter fullscreen
+        self.vtk_widget.mouseDoubleClickEvent = self._on_double_click
+    
 
         # Exit Button (Top-right overlay)
         self.exit_btn = QPushButton("Exit", self)
@@ -412,6 +420,77 @@ class VTK3DViewer(QFrame):
         self.current_actor = None
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
+    
+    def _on_double_click(self, event):
+        """Handle double-click to toggle fullscreen"""
+        self.toggle_fullscreen()
+
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode - hides all GUI except VTK viewer, ESC to exit"""
+        if not self.is_fullscreen:
+            # Save parent window BEFORE detaching
+            self.saved_main_window = self.window()
+            
+            # Enter fullscreen
+            self.is_fullscreen = True
+            
+            # Hide info label (top-left overlay)
+            if hasattr(self, 'info_label') and self.info_label:
+                self.info_label.hide()
+            
+            # Detach from current layout and show as standalone fullscreen window
+            self.setParent(None)
+            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            self.showFullScreen()
+            
+            # Install event filter to catch ESC key
+            self.installEventFilter(self)
+            
+            print("[Fullscreen] Entered - press ESC to exit")
+        else:
+            # Exit fullscreen
+            self.exit_fullscreen()
+    
+    def exit_fullscreen(self):
+        """Exit fullscreen mode and restore to main window"""
+        if not self.is_fullscreen:
+            return
+            
+        self.is_fullscreen = False
+        
+        # Remove event filter
+        self.removeEventFilter(self)
+        
+        # Show info label again
+        if hasattr(self, 'info_label') and self.info_label:
+            self.info_label.show()
+        
+        # Return to normal windowed mode
+        self.showNormal()
+        self.setWindowFlags(Qt.Widget)
+        
+        # Re-parent to main window
+        if hasattr(self, 'saved_main_window') and self.saved_main_window:
+            main_window = self.saved_main_window
+            
+            # Find the right panel and re-add to it
+            if hasattr(main_window, 'right_panel_layout'):
+                # Insert at index 1 (between controls and console) with stretch 2
+                main_window.right_panel_layout.insertWidget(1, self, 2)
+                print("[Fullscreen] Re-attached to main window layout")
+            else:
+                 print("[Fullscreen] WARNING: Could not find right_panel_layout to re-attach")
+        
+        self.show()
+        print("[Fullscreen] Exited")
+    
+    def eventFilter(self, obj, event):
+        """Event filter to catch ESC key for exiting fullscreen"""
+        if self.is_fullscreen and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self.exit_fullscreen()
+                return True
+        return super().eventFilter(obj, event)
 
     def show_quality_report(self, metrics: Dict):
         """Show quality metrics overlay in top-right"""
@@ -2143,6 +2222,110 @@ except Exception as e:
             self.info_label.setText(f"CAD Load Error<br><small>{str(e)[:50]}...</small><br>Click 'Generate Mesh'")
             return None
 
+    def apply_quality_coloring(self, result: dict):
+        """
+        Apply quality coloring to the EXISTING mesh without reloading geometry.
+        This provides a smooth transition when background quality analysis finishes.
+        """
+        if not self.current_poly_data or not self.current_actor:
+            print("[DEBUG] Cannot apply quality coloring: No mesh loaded")
+            return
+
+        if not result or not result.get('per_element_quality'):
+            print("[DEBUG] Cannot apply quality coloring: No quality data")
+            return
+
+        print(f"[DEBUG] Applying quality coloring to existing mesh...")
+        
+        # Store quality data for cross-section and other uses
+        self.current_quality_data = result
+        
+        try:
+            per_elem_quality = result['per_element_quality']
+            
+            # Helper function for HSL to RGB conversion (if not imported)
+            def hsl_to_rgb(h, s, l):
+                def hue_to_rgb(p, q, t):
+                    if t < 0: t += 1
+                    if t > 1: t -= 1
+                    if t < 1/6: return p + (q - p) * 6 * t
+                    if t < 1/2: return q
+                    if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                    return p
+                
+                if s == 0:
+                    r = g = b = l
+                else:
+                    q = l * (1 + s) if l < 0.5 else l + s - l * s
+                    p = 2 * l - q
+                    r = hue_to_rgb(p, q, h + 1/3)
+                    g = hue_to_rgb(p, q, h)
+                    b = hue_to_rgb(p, q, h - 1/3)
+                
+                return int(r * 255), int(g * 255), int(b * 255)
+
+            # Create color array for cells
+            colors = vtk.vtkUnsignedCharArray()
+            colors.SetNumberOfComponents(3)
+            colors.SetName("Colors")
+
+            colored_count = 0
+            has_extracted_surface = hasattr(self, 'surface_to_volume_map') and self.surface_to_volume_map
+            
+            # Reconstruct element list reference if needed (for direct indexing)
+            # We assume self.current_mesh_elements is available
+            surface_elements = []
+            if not has_extracted_surface and self.current_mesh_elements:
+                surface_elements = [e for e in self.current_mesh_elements if e['type'] in ('triangle', 'quadrilateral')]
+
+            for i in range(self.current_poly_data.GetNumberOfCells()):
+                elem_id = None
+                if has_extracted_surface:
+                    elem_id = self.surface_to_volume_map.get(i)
+                elif i < len(surface_elements):
+                    elem_id = str(surface_elements[i]['id'])
+                
+                quality = per_elem_quality.get(elem_id) if elem_id else None
+
+                if quality is None:
+                    colors.InsertNextTuple3(150, 150, 150)
+                else:
+                    if quality < 0.2:
+                        colors.InsertNextTuple3(220, 20, 60) # Crimson
+                    else:
+                        normalized = max(0.0, min(1.0, quality))
+                        hue = normalized * 0.33
+                        r, g, b = hsl_to_rgb(hue, 1.0, 0.5)
+                        colors.InsertNextTuple3(r, g, b)
+                    colored_count += 1
+
+            # Apply colors to PolyData
+            self.current_poly_data.GetCellData().SetScalars(colors)
+            
+            # valid_scalars = self.current_poly_data.GetCellData().GetScalars()
+            # if valid_scalars:
+            #     print(f"[DEBUG] Scalars set correctly on PolyData: {valid_scalars.GetNumberOfTuples()} tuples")
+
+            # Update Mapper
+            mapper = self.current_actor.GetMapper()
+            mapper.SetScalarModeToUseCellData()
+            mapper.ScalarVisibilityOn()
+            mapper.SetColorModeToDirectScalars()
+            
+            # Update Actor Lighting properties for better colored visibility
+            self.current_actor.GetProperty().SetAmbient(0.8)
+            self.current_actor.GetProperty().SetDiffuse(0.5)
+            self.current_actor.GetProperty().SetSpecular(0.0)
+            
+            # Trigger Render
+            self.vtk_widget.GetRenderWindow().Render()
+            print(f"[DEBUG] Quality coloring applied to {colored_count} cells. View updated.")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to apply quality coloring: {e}")
+            import traceback
+            traceback.print_exc()
+
     def load_mesh_file(self, filepath: str, result: dict = None):
         """Load and display mesh file with optional result dict for counts"""
         print(f"\n{'='*70}")
@@ -2167,6 +2350,9 @@ except Exception as e:
         self.info_label.setText("Loading mesh...")
 
         try:
+            # Store filepath for update_info_label method
+            self.current_mesh_file = filepath
+            
             print(f"[DEBUG] Parsing .msh file...")
             nodes, elements = self._parse_msh_file(filepath)
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
@@ -2688,6 +2874,80 @@ except Exception as e:
             traceback.print_exc()
             self.info_label.setText(error_msg)
             return f"ERROR: {e}"
+    
+    def update_info_label(self, result: dict = None):
+        """Update info label header with quality metrics after background calculation
+        
+        Args:
+            result: Dictionary containing quality_metrics, total_nodes, total_elements, etc.
+        """
+        if not result:
+            return
+            
+        # Build info text with quality metrics
+        display_nodes = result.get('total_nodes', 0)
+        display_elements = result.get('total_elements', 0)
+        tet_count = sum(1 for e in self.current_mesh_elements if e.get('type') == 'tetrahedron') if self.current_mesh_elements else 0
+        tri_count = sum(1 for e in self.current_mesh_elements if e.get('type') == 'triangle') if self.current_mesh_elements else 0
+        
+        # Extract mesh filename from current state (set during load_mesh_file or from result)
+        mesh_name = "Mesh"
+        if hasattr(self, 'current_mesh_file') and self.current_mesh_file:
+            mesh_name = Path(self.current_mesh_file).name
+        
+        info_lines = [
+            f"<b>Mesh Generated</b><br>",
+            f"{mesh_name}<br>",
+            f"<span style='color: #6c757d;'>",
+            f"Nodes: {display_nodes:,} * Elements: {display_elements:,}<br>",
+            f"Tetrahedra: {tet_count:,} * Triangles: {tri_count:,}"
+        ]
+        
+        # Add bounding box dimensions if available
+        if result.get('bounding_box'):
+            bb = result['bounding_box']
+            dims = [bb['max'][i] - bb['min'][i] for i in range(3)]
+            info_lines.append(f"<br><b>Bounds:</b> {dims[0]:.1f} x {dims[1]:.1f} x {dims[2]:.1f} mm")
+        
+        # Add volume if available
+        if result.get('volume'):
+            vol = result['volume']
+            info_lines.append(f" | <b>Vol:</b> {vol:,.0f} mm³")
+        
+        # Add quality metrics if available
+        if result.get('quality_metrics'):
+            metrics = result['quality_metrics']
+            info_lines.append("<br><b>Quality Metrics (avg):</b><br>")
+            
+            # SICN (primary gmsh metric) - use AVERAGE
+            if 'sicn_avg' in metrics:
+                sicn = metrics['sicn_avg']
+                sicn_color = "#198754" if sicn >= 0.7 else "#ffc107" if sicn >= 0.5 else "#dc3545"
+                info_lines.append(f"<span style='color: {sicn_color};'>SICN: {sicn:.3f}</span> ")
+            
+            # Gamma - use AVERAGE
+            if 'gamma_avg' in metrics:
+                gamma = metrics['gamma_avg']
+                gamma_color = "#198754" if gamma >= 0.6 else "#ffc107" if gamma >= 0.4 else "#dc3545"
+                info_lines.append(f"<span style='color: {gamma_color};'>γ: {gamma:.3f}</span><br>")
+            
+            # Skewness - use AVERAGE
+            if 'skewness_avg' in metrics:
+                skew = metrics['skewness_avg']
+                skew_color = "#198754" if skew <= 0.3 else "#ffc107" if skew <= 0.5 else "#dc3545"
+                info_lines.append(f"<span style='color: {skew_color};'>Skew: {skew:.3f}</span> ")
+            
+            # Aspect Ratio - use AVERAGE
+            if 'aspect_ratio_avg' in metrics:
+                ar = metrics['aspect_ratio_avg']
+                ar_color = "#198754" if ar <= 2.0 else "#ffc107" if ar <= 3.0 else "#dc3545"
+                info_lines.append(f"<span style='color: {ar_color};'>AR: {ar:.2f}</span>")
+        
+        info_lines.append("</span>")
+        info_text = "".join(info_lines)
+        self.info_label.setText(info_text)
+        self.info_label.adjustSize()
+        print(f"[DEBUG] Info label updated with quality metrics")
 
     def _parse_msh_file(self, filepath: str):
         nodes = {}

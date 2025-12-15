@@ -184,47 +184,57 @@ except Exception as e:
             self.viewer.info_label.setText(f"CAD Loaded<br><small>(Preview Unavailable)</small><br>Click 'Generate Mesh'")
             return None
 
+    def log_debug(self, msg):
+        try:
+            with open("C:/Users/Owner/Downloads/MeshPackageLean/loader_debug.txt", "a") as f:
+                f.write(f"{msg}\n")
+        except:
+            pass
+
     def load_mesh_file(self, filepath: str, result: dict = None):
+        self.log_debug(f"\n{'='*50}")
+        self.log_debug(f"LOAD_MESH_FILE CALLED: {filepath}")
+        self.log_debug(f"Result keys: {list(result.keys()) if result else 'None'}")
+        if result:
+            self.log_debug(f"Total Nodes in Result: {result.get('total_nodes')}")
+            self.log_debug(f"Total Elements in Result: {result.get('total_elements')}")
+
         print(f"\n{'='*70}")
         print(f"[MESH_LOADER DEBUG] load_mesh_file called: {filepath}")
-        print(f"[MESH_LOADER DEBUG] result keys: {list(result.keys()) if result else 'None'}")
-        print(f"[MESH_LOADER DEBUG] Viewer: {self.viewer}")
-        print(f"[MESH_LOADER DEBUG] Renderer: {self.viewer.renderer}")
         
         self.viewer.clear_view()
         self.viewer.info_label.setText("Loading mesh...")
-
+        
         try:
-            # Parse mesh file
-            # If it's a Fluent .msh, _parse_msh_file (Gmsh) will return empty or error.
-            # We add a fallback to check for a sibling .vtk file.
-            
             nodes, elements = {}, []
             try:
                 nodes, elements = self._parse_msh_file(filepath)
             except Exception:
-                pass # Fallback to VTK check
+                pass 
                 
             if not nodes or not elements:
-                print(f"[MESH_LOADER DEBUG] Parsing returned empty/none. Nodes: {len(nodes) if nodes else 0}, Elements: {len(elements) if elements else 0}")
-                # Check for sibling .vtk file (e.g. model.vtk or model_fluent.vtk)
-                # If filepath is model.msh, check model.vtk or model.vtu
+                self.log_debug("Parsing .msh failed/empty. Checking fallback...")
+                
+                vtu_path = Path(filepath).with_suffix('.vtu')
                 vtk_path = Path(filepath).with_suffix('.vtk')
-                if not vtk_path.exists():
-                     vtk_path = Path(filepath).with_suffix('.vtu')
+                
+                fallback_path = None
+                if vtu_path.exists():
+                    fallback_path = vtu_path
+                    self.log_debug(f"Found VTU: {vtu_path}")
+                elif vtk_path.exists():
+                    fallback_path = vtk_path
+                    self.log_debug(f"Found VTK: {vtk_path}")
                      
-                if not vtk_path.exists():
-                     print(f"[MESH_LOADER DEBUG] Fallback VTK/VTU not found at {vtk_path}")
-                     pass 
+                if not fallback_path:
+                     self.log_debug("No fallback file found.")
                 else:
-                    print(f"[MESH_LOADER] Loading VTK fallback: {vtk_path}")
+                    self.log_debug(f"Attempting to load fallback: {fallback_path}")
                     import pyvista as pv
                     try:
-                        mesh = pv.read(str(vtk_path))
-                        print(f"[MESH_LOADER DEBUG] PyVista loaded mesh: {type(mesh)}, Points: {mesh.n_points}, Cells: {mesh.n_cells}")
+                        mesh = pv.read(str(fallback_path))
+                        self.log_debug(f"PyVista read success. Points: {mesh.n_points}")
                         
-                        # Convert PyVista mesh to VTK Generic
-                        # For rendering, we can just use the polydata directly
                         if mesh.n_points > 0:
                             poly_data = mesh.cast_to_unstructured_grid().extract_surface()
                             self.viewer.current_poly_data = poly_data
@@ -234,8 +244,6 @@ except Exception as e:
                             
                             self.viewer.current_actor = vtk.vtkActor()
                             self.viewer.current_actor.SetMapper(mapper)
-                            
-                            # Set default style
                             self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
                             self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
                             
@@ -243,17 +251,21 @@ except Exception as e:
                             self.viewer.renderer.ResetCamera()
                             self.viewer.vtk_widget.GetRenderWindow().Render()
                             
+                            self.log_debug("Render setup complete. Updating label.")
                             self.viewer.info_label.setText(
                                 f"<b>Mesh Loaded (VTK)</b><br>"
-                                f"{vtk_path.name}<br>"
+                                f"{fallback_path.name}<br>"
                                 f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
                             )
                             return "SUCCESS"
                         else:
-                            print("[MESH_LOADER DEBUG] PyVista mesh has 0 points!")
+                            self.log_debug("Mesh has 0 points.")
                     except Exception as e:
-                        print(f"[MESH_LOADER DEBUG] Failed to load PyVista fallback: {e}")
-            
+                        self.log_debug(f"PyVista Exception: {e}")
+                        import traceback
+                        self.log_debug(traceback.format_exc())
+
+            self.log_debug("Falling through to legacy loader...")
             print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
 
             # Try to load surface quality data if not provided

@@ -376,7 +376,7 @@ class ModernMeshGenGUI(QMainWindow):
         preset_layout.addWidget(preset_label)
 
         self.quality_preset = NoScrollComboBox()
-        self.quality_preset.addItems(["Coarse", "Medium", "Fine", "Very Fine", "Custom"])
+        self.quality_preset.addItems(["Coarse", "Medium", "Fine", "Very Fine", "Ultra Fine", "Custom"])
         self.quality_preset.setCurrentIndex(1)  # Default to Medium
         self.quality_preset.setStyleSheet("""
             QComboBox {
@@ -506,6 +506,14 @@ class ModernMeshGenGUI(QMainWindow):
         self.save_stl.setChecked(False)  # Default off
         quality_layout.addWidget(self.save_stl)
 
+        # FAST MODE Checkbox (Hidden by default, shown for GPU strategy)
+        self.fast_mode = QCheckBox("Fast Mode (Skip Winding Checks)")
+        self.fast_mode.setStyleSheet("color: #d63384; font-weight: bold; font-size: 11px;")
+        self.fast_mode.setToolTip("Skips expensive winding number checks. 2-3x FASTER. \n"
+                                         "Only use for single-body geometry with NO voids/gaps.")
+        self.fast_mode.setVisible(False) # Hidden initially
+        quality_layout.addWidget(self.fast_mode)
+
         # ANSYS Export mode selector
         ansys_layout = QHBoxLayout()
         ansys_label = QLabel("ANSYS Export:")
@@ -546,6 +554,17 @@ class ModernMeshGenGUI(QMainWindow):
         )
         self.defer_quality.setChecked(False)  # Default off
         quality_layout.addWidget(self.defer_quality)
+
+        # Aggressive Geometry Healing checkbox (for complex geometries like gyroids)
+        self.aggressive_healing = QCheckBox("Aggressive Geometry Healing")
+        self.aggressive_healing.setStyleSheet("color: black; font-size: 11px;")
+        self.aggressive_healing.setToolTip(
+            "Enable aggressive defeaturing for complex geometries (gyroid, TPMS).\n"
+            "Increases tolerance and fixes small edges/faces.\n"
+            "SLOWER but necessary for problematic intersections."
+        )
+        self.aggressive_healing.setChecked(False)  # Default off for speed
+        quality_layout.addWidget(self.aggressive_healing)
 
         # === EXHAUSTIVE STRATEGY CONTROLS (initially hidden) ===
         self.exhaustive_controls = QWidget()
@@ -1281,9 +1300,12 @@ class ModernMeshGenGUI(QMainWindow):
         """Load GUI settings from JSON file"""
         try:
             if self.settings_file.exists():
+                print(f"[Settings] Loading settings from {self.settings_file}")
                 with open(self.settings_file, 'r') as f:
                     settings = json.load(f)
                 
+                print(f"[Settings] Loaded: {settings}")
+
                 # Restore settings
                 if 'max_size' in settings:
                     self.max_size.setValue(settings['max_size'])
@@ -1298,9 +1320,14 @@ class ModernMeshGenGUI(QMainWindow):
                     if index >= 0:
                         self.mesh_strategy.setCurrentIndex(index)
                 if 'worker_count' in settings:
+                    print(f"[Settings] Restoring worker count: {settings['worker_count']}")
                     self.worker_count_slider.setValue(settings['worker_count'])
                 if 'defer_quality' in settings:
                     self.defer_quality.setChecked(settings['defer_quality'])
+                if 'aggressive_healing' in settings:
+                    self.aggressive_healing.setChecked(settings['aggressive_healing'])
+            else:
+                print(f"[Settings] No settings file found at {self.settings_file}")
         except Exception as e:
             print(f"[Warning] Could not load settings: {e}")
     
@@ -1313,19 +1340,22 @@ class ModernMeshGenGUI(QMainWindow):
                 'quality_preset': self.quality_preset.currentText(),
                 'mesh_strategy': self.mesh_strategy.currentText(),
                 'worker_count': self.worker_count_slider.value(),
-                'defer_quality': self.defer_quality.isChecked()
+                'defer_quality': self.defer_quality.isChecked(),
+                'aggressive_healing': self.aggressive_healing.isChecked()
             }
             
+            print(f"[Settings] Saving settings: {settings}")
             with open(self.settings_file, 'w') as f:
                 json.dump(settings, f, indent=2)
+            print(f"[Settings] Saved to {self.settings_file}")
         except Exception as e:
             print(f"[Warning] Could not save settings: {e}")
 
     def create_right_panel(self):
         panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self.right_panel_layout = QVBoxLayout(panel)
+        self.right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_panel_layout.setSpacing(0)
 
         # Viewer controls
         controls = QFrame()
@@ -1350,13 +1380,13 @@ class ModernMeshGenGUI(QMainWindow):
         
         controls_layout.addStretch()
 
-        layout.addWidget(controls)
+        self.right_panel_layout.addWidget(controls)
 
         # 3D Viewer - Pass self as parent so CustomInteractorStyle can access main GUI
         self.viewer = VTK3DViewer(parent=self)
         # Connect explicit exit signal from viewer overlay
         self.viewer.exit_requested.connect(self.exit_application)
-        layout.addWidget(self.viewer, 2)
+        self.right_panel_layout.addWidget(self.viewer, 2)
 
         # Console
         console_frame = QFrame()
@@ -1409,7 +1439,7 @@ class ModernMeshGenGUI(QMainWindow):
         """)
         console_layout.addWidget(self.console)
 
-        layout.addWidget(console_frame)
+        self.right_panel_layout.addWidget(console_frame)
         return panel
 
     # ===================================
@@ -1579,7 +1609,17 @@ class ModernMeshGenGUI(QMainWindow):
     def closeEvent(self, event):
         """Handle window close - save settings."""
         self.save_settings()
-        
+        super().closeEvent(event)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        # F11 to toggle fullscreen viewer
+        if event.key() == Qt.Key_F11:
+            if hasattr(self, 'viewer') and self.viewer:
+                self.viewer.toggle_fullscreen()
+                event.accept()
+                return
+        super().keyPressEvent(event)
         # Stop any running mesh generation
         if hasattr(self, 'worker') and self.worker and self.worker.is_running:
             self.worker.stop()
@@ -1604,7 +1644,7 @@ class ModernMeshGenGUI(QMainWindow):
             min_mm = max(0.1, avg_size_mm * 0.7)
             max_mm = max(0.5, avg_size_mm * 1.3)
 
-            return int(target_elements), int(round(min_mm)), int(round(max_mm))
+            return int(target_elements), round(min_mm, 2), round(max_mm, 2)
 
         # Coarse: ~500-2000 elements (fast preview)
         target_coarse = max(500, min(2000, int(volume * 1e6)))  # ~1mm³ per element
@@ -1622,53 +1662,43 @@ class ModernMeshGenGUI(QMainWindow):
         target_vfine = max(30000, min(100000, int(volume * 64e6)))  # ~0.015625mm³ per element
         count_vf, min_vf, max_vf = calc_sizes(target_vfine)
 
-        presets = {
-            "Coarse": {"target": count_c, "max": max_c},
-            "Medium": {"target": count_m, "max": max_m},
-            "Fine": {"target": count_f, "max": max_f},
-            "Very Fine": {"target": count_vf, "max": max_vf}
-        }
+        # Ultra Fine: ~100000-500000 elements (maximum detail)
+        target_ufine = max(100000, min(500000, int(volume * 256e6)))
+        count_uf, min_uf, max_uf = calc_sizes(target_ufine)
 
-        # Store calculated presets for future use
-        self.calculated_presets = presets
 
-        # Update current preset values
-        current_preset = self.quality_preset.currentText()
-        if current_preset in presets:
-            values = presets[current_preset]
-            self.target_elements.setValue(values["target"])
-            self.max_size.setValue(values["max"])
-            self.add_log(f"Calculated element counts for geometry (volume={volume:.6f} m³):")
-            self.add_log(f"   Coarse: ~{count_c:,} elements (max size: {max_c:.1f} mm)")
-            self.add_log(f"   Medium: ~{count_m:,} elements (max size: {max_m:.1f} mm)")
-            self.add_log(f"   Fine: ~{count_f:,} elements (max size: {max_f:.1f} mm)")
-            self.add_log(f"   Very Fine: ~{count_vf:,} elements (max size: {max_vf:.1f} mm)")
+        # Log suggestions only (don't override fixed presets)
+        self.add_log(f"Suggested mesh sizes for geometry (volume={volume:.6f} m³):")
+        self.add_log(f"   Coarse: ~{count_c:,} elements (size: {min_c:.1f}-{max_c:.1f} mm)")
+        self.add_log(f"   Medium: ~{count_m:,} elements (size: {min_m:.1f}-{max_m:.1f} mm)")
+        self.add_log(f"   Fine: ~{count_f:,} elements (size: {min_f:.1f}-{max_f:.1f} mm)")
+        self.add_log(f"   Very Fine: ~{count_vf:,} elements (size: {min_vf:.2f}-{max_vf:.2f} mm)")
+        self.add_log(f"   Ultra Fine: ~{count_uf:,} elements (size: {min_uf:.2f}-{max_uf:.2f} mm)")
 
     def on_quality_preset_changed(self, preset: str):
         """Update mesh quality settings based on preset"""
-        # Use calculated presets if available, otherwise use defaults
-        if hasattr(self, 'calculated_presets') and preset in self.calculated_presets:
-            presets = self.calculated_presets
-        else:
-            presets = {
-                "Coarse": {"target": 5000, "max": 200},
-                "Medium": {"target": 10000, "max": 100},
-                "Fine": {"target": 50000, "max": 50},
-                "Very Fine": {"target": 200000, "max": 20}
-            }
+        # Always use fixed presets (geometry suggestions are logged separately)
+        # New min/max size presets (in mm)
+        presets = {
+            "Coarse": {"min": 5.0, "max": 25.0},
+            "Medium": {"min": 2.0, "max": 10.0},      # Interpolated
+            "Fine": {"min": 1.0, "max": 5.0},
+            "Very Fine": {"min": 0.5, "max": 1.0},
+            "Ultra Fine": {"min": 0.25, "max": 0.75}
+        }
 
         presets["Custom"] = None  # Don't change values for custom
 
         if preset in presets and presets[preset]:
             values = presets[preset]
             # Block signals to prevent triggering set_custom_preset loop
-            self.target_elements.blockSignals(True)
+            self.min_size.blockSignals(True)
             self.max_size.blockSignals(True)
             try:
-                self.target_elements.setValue(values["target"])
+                self.min_size.setValue(values["min"])
                 self.max_size.setValue(values["max"])
             finally:
-                self.target_elements.blockSignals(False)
+                self.min_size.blockSignals(False)
                 self.max_size.blockSignals(False)
 
     def set_custom_preset(self):
@@ -1882,6 +1912,14 @@ class ModernMeshGenGUI(QMainWindow):
             # Show controls for Tetrahedral (Delaunay) which now serves as the exhaustive mode
             is_exhaustive = "Tetrahedral (Delaunay)" in text
             self.exhaustive_controls.setVisible(is_exhaustive)
+        
+        # Fast Mode visibility
+        if hasattr(self, 'fast_mode'):
+            is_gpu = "GPU" in text
+            self.fast_mode.setVisible(is_gpu)
+            # Auto-uncheck if hidden
+            if not is_gpu:
+                self.fast_mode.setChecked(False)
     
     def on_score_threshold_changed(self, value):
         """Update score threshold label"""
@@ -2035,6 +2073,10 @@ class ModernMeshGenGUI(QMainWindow):
     
     def update_eta(self, current_progress):
         """Update ETA display on master progress bar"""
+        # Don't update ETA if complete (let on_mesh_finished handle the final message)
+        if current_progress >= 100:
+            return
+
         if not self.mesh_start_time or current_progress < 5:
             return  # Wait for meaningful data
         
@@ -2101,6 +2143,7 @@ class ModernMeshGenGUI(QMainWindow):
             "min_size_mm": self.min_size.value(),  # User-specified minimum size (decoupled from max)
             "curvature_adaptive": self.curvature_adaptive.isChecked(),
             "mesh_strategy": self.mesh_strategy.currentText(),
+            "fast_mode": self.fast_mode.isChecked() if hasattr(self, 'fast_mode') else False,
             "save_stl": self.save_stl.isChecked(),  # Export intermediate STL files
             "ansys_mode": self.ansys_mode.currentText(),  # ANSYS export mode
             "worker_count": self.worker_count_slider.value(),  # User-selected worker count
@@ -2109,6 +2152,7 @@ class ModernMeshGenGUI(QMainWindow):
             "strategy_order": self.get_selected_strategies() if hasattr(self, 'strategy_order_list') else None,
             "element_order": 2 if hasattr(self, 'element_order') and "Tet10" in self.element_order.currentText() else 1,
             "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
+            "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
         }
 
         # Add painted regions if any exist
@@ -2577,7 +2621,7 @@ class ModernMeshGenGUI(QMainWindow):
             if hasattr(self, 'viz_group'):
                 self.viz_group.setVisible(True)
             
-            # Force progress bar to 100% and show total time
+            # Force progress bar to 100% and show total time IMMEDIATELY
             import time
             if self.mesh_start_time:
                 total_time = time.time() - self.mesh_start_time
@@ -2590,9 +2634,13 @@ class ModernMeshGenGUI(QMainWindow):
                 
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat(f"100% - Complete! (Total: {time_str})")
+                self.add_log(f"[DEBUG] *** PROGRESS BAR SET TO 100% COMPLETE at {time.time():.3f} ***")
             else:
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat("100% - Complete!")
+            
+            # Force UI update immediately before mesh loading
+            QApplication.processEvents()
             
             # Mark current process as complete
             self.current_process_bar.setValue(100)
@@ -2671,7 +2719,9 @@ class ModernMeshGenGUI(QMainWindow):
                 else:
                     # Standard mesh loading
                     self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
+                    self.add_log(f"[DEBUG] *** STARTING MESH LOAD at {time.time():.3f} ***")
                     load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
+                    self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} ***")
                     self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
             
             # Check for hex testing component visualization
@@ -2752,10 +2802,13 @@ class ModernMeshGenGUI(QMainWindow):
             
             # Merge metrics into viewer's current data
             if hasattr(self, 'viewer') and self.viewer:
-                # Reload mesh with full quality data
-                # This ensures colors are applied correctly
+                # Update mesh with full quality data WITHOUT reloading
+                # This ensures colors are applied without resetting the view
                 self.add_log("[Status] Applying quality metrics to visualization...")
-                self.viewer.load_mesh_file(self.mesh_file, result)
+                self.viewer.apply_quality_coloring(result)
+                
+                # Update viewer info label with quality metrics
+                self.viewer.update_info_label(result)
                 
                 # Show quality report (top-right overlay disabled per user request)
                 if 'quality_metrics' in result:
