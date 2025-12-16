@@ -4,7 +4,8 @@ import MeshViewer from './components/MeshViewer'
 import FileUpload from './components/FileUpload'
 import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
-import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock } from 'lucide-react'
+import BatchMode from './components/BatchMode'
+import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File } from 'lucide-react'
 
 // API base URL - uses proxy in development, full URL in production
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -31,6 +32,9 @@ function App() {
   const [consoleOpen, setConsoleOpen] = useState(true)
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
+  
+  // Mode: 'single' or 'batch'
+  const [mode, setMode] = useState('single')
 
   const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
   const meshStrategies = [
@@ -372,9 +376,37 @@ function App() {
     <div className="h-screen flex flex-col bg-gray-100 text-gray-900">
       {/* Compact Header Bar - Light Theme */}
       <header className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-3 text-gray-800">
-        <div className="flex items-center gap-2">
-          <img src="/img/Khorium_logo.jpg" alt="Khorium" className="h-6 w-auto" />
-          <span className="font-semibold text-sm">MeshGen</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <img src="/img/Khorium_logo.jpg" alt="Khorium" className="h-6 w-auto" />
+            <span className="font-semibold text-sm">MeshGen</span>
+          </div>
+          
+          {/* Mode Toggle */}
+          <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+            <button
+              onClick={() => setMode('single')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                mode === 'single'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-600 hover:text-gray-800'
+              }`}
+            >
+              <File className="w-3.5 h-3.5" />
+              Single
+            </button>
+            <button
+              onClick={() => setMode('batch')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                mode === 'batch'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-600 hover:text-gray-800'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Batch
+            </button>
+          </div>
         </div>
         
         {/* Center toolbar */}
@@ -425,10 +457,22 @@ function App() {
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Compact Sidebar */}
-        <div className="w-56 border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto">
+        <div className={`${mode === 'batch' ? 'w-80' : 'w-56'} border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300`}>
+          
+          {/* Batch Mode */}
+          {mode === 'batch' ? (
+            <BatchMode 
+              onBatchComplete={(batch) => {
+                console.log('Batch completed:', batch)
+                setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
+              }}
+              onLog={(msg) => setLogs(prev => [...prev, msg])}
+            />
+          ) : (
+          /* Single File Mode */
           <div className="p-3 space-y-3">
             {/* File Upload - Compact */}
-            <FileUpload onFileUpload={handleFileUpload} compact={true} />
+            <FileUpload onFileUpload={handleFileUpload} />
 
             {/* Mesh Settings - Collapsible style */}
             <div className="bg-white rounded-lg border border-gray-200 text-sm">
@@ -560,6 +604,7 @@ function App() {
               </div>
             )}
           </div>
+          )}
         </div>
 
         {/* Center Panel - Viewer + Console */}

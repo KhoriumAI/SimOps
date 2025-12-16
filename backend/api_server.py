@@ -23,6 +23,7 @@ from config import get_config
 from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
+from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
 
 
@@ -80,7 +81,8 @@ def create_app(config_class=None):
     
     # Register blueprints
     app.register_blueprint(auth_bp)
-    
+    app.register_blueprint(batch_bp)
+
     # Create database tables
     with app.app_context():
         db.create_all()
