@@ -60,26 +60,30 @@ def create_app(config_class=None):
     
     @jwt.expired_token_loader
     def expired_token_callback(jwt_header, jwt_payload):
-        print(f"[JWT ERROR] Token expired - Header: {jwt_header}, Payload: {jwt_payload}")
+        # Token expired - don't log payload details
         return jsonify({'error': 'Token has expired'}), 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        print(f"[JWT ERROR] Invalid token - Error: {error}")
+        # Invalid token
         return jsonify({'error': f'Invalid token: {error}'}), 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        print(f"[JWT ERROR] Missing token - Error: {error}")
+        # Missing token
         return jsonify({'error': 'Authorization token required'}), 401
     
     @jwt.token_verification_failed_loader
     def token_verification_failed_callback(jwt_header, jwt_payload):
-        print(f"[JWT ERROR] Token verification failed - Header: {jwt_header}, Payload: {jwt_payload}")
+        # Token verification failed
         return jsonify({'error': 'Token verification failed'}), 401
     
     # Register blueprints
     app.register_blueprint(auth_bp)
+    
+    # Ensure instance folder exists for SQLite database
+    instance_dir = Path(__file__).parent / 'instance'
+    instance_dir.mkdir(parents=True, exist_ok=True)
     
     # Create database tables
     with app.app_context():
@@ -288,20 +292,78 @@ def register_routes(app):
     @app.before_request
     def log_request_info():
         # Debug: Log Authorization header for all requests
-        if request.path.startswith('/api/'):
-            auth = request.headers.get('Authorization', 'MISSING')
-            print(f"[DEBUG] {request.method} {request.path} - Auth: {auth[:50] if auth != 'MISSING' else 'MISSING'}...")
+        # Request logging (without sensitive auth data)
+        if request.path.startswith('/api/') and os.environ.get('FLASK_DEBUG'):
+            print(f"[API] {request.method} {request.path}")
 
     @app.route('/api/health', methods=['GET'])
     def health_check():
         return jsonify({"status": "healthy", "service": "mesh-generation-api", "version": "2.0"})
 
+    @app.route('/api/strategies', methods=['GET'])
+    def get_mesh_strategies():
+        """
+        Return available mesh generation strategies.
+        Frontend should fetch this on load instead of hardcoding.
+        """
+        strategies = [
+            {
+                'id': 'tetrahedral_delaunay',
+                'name': 'Tetrahedral (Delaunay)',
+                'description': 'Classic Delaunay triangulation - reliable for most geometries',
+                'element_type': 'tet',
+                'recommended': True
+            },
+            {
+                'id': 'tetrahedral_frontal',
+                'name': 'Tetrahedral (Frontal)',
+                'description': 'Advancing front method - good for boundary layers',
+                'element_type': 'tet',
+                'recommended': False
+            },
+            {
+                'id': 'tetrahedral_hxt',
+                'name': 'Tetrahedral (HXT)',
+                'description': 'High-performance parallel meshing',
+                'element_type': 'tet',
+                'recommended': False
+            },
+            {
+                'id': 'hex_dominant',
+                'name': 'Hex-Dominant',
+                'description': 'Hexahedral mesh with tet fill - best for CFD',
+                'element_type': 'hex',
+                'recommended': False
+            },
+            {
+                'id': 'gpu_delaunay',
+                'name': 'GPU Delaunay',
+                'description': 'GPU-accelerated meshing (requires CUDA)',
+                'element_type': 'tet',
+                'recommended': False,
+                'requires': 'cuda'
+            },
+            {
+                'id': 'polyhedral',
+                'name': 'Polyhedral',
+                'description': 'Polyhedral cells - experimental',
+                'element_type': 'poly',
+                'recommended': False,
+                'experimental': True
+            }
+        ]
+        
+        # Return list of strategy names for simple dropdown use
+        # and full details for advanced UI
+        return jsonify({
+            'strategies': strategies,
+            'names': [s['name'] for s in strategies],
+            'default': 'Tetrahedral (Delaunay)'
+        })
+
     @app.route('/api/upload', methods=['POST'])
     @jwt_required()
     def upload_cad_file():
-        # Debug: Log the authorization header
-        auth_header = request.headers.get('Authorization', 'MISSING')
-        print(f"[DEBUG] Upload request - Auth header: {auth_header[:50]}..." if len(auth_header) > 50 else f"[DEBUG] Upload request - Auth header: {auth_header}")
 
         current_user_id = int(get_jwt_identity())
         user = User.query.get(current_user_id)
@@ -1268,7 +1330,7 @@ if __name__ == '__main__':
     print("=" * 70)
     print(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
     print(f"Output folder: {app.config['OUTPUT_FOLDER']}")
-    print(f"JWT_SECRET_KEY: {app.config.get('JWT_SECRET_KEY', 'NOT SET')[:30]}...")
+    print(f"JWT_SECRET_KEY: {'[SET]' if app.config.get('JWT_SECRET_KEY') else '[NOT SET - USING DEFAULT]'}")
     print("\nStarting server on http://localhost:5000")
     print("=" * 70)
 

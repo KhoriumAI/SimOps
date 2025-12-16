@@ -33,13 +33,29 @@ function App() {
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
 
   const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
-  const meshStrategies = [
-    'Tetrahedral (Delaunay)',
-    'Tetrahedral (Frontal)',
-    'Tetrahedral (HXT)',
-    'Hex-Dominant',
-    'GPU Delaunay'
-  ]
+  const [meshStrategies, setMeshStrategies] = useState([
+    'Tetrahedral (Delaunay)',  // Fallback default
+  ])
+
+  // Fetch available strategies from backend on mount
+  useEffect(() => {
+    const fetchStrategies = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/strategies`)
+        if (response.ok) {
+          const data = await response.json()
+          setMeshStrategies(data.names || [])
+          // Set default strategy if current selection isn't in the list
+          if (data.default && !data.names.includes(meshSettings.strategy)) {
+            setMeshSettings(prev => ({ ...prev, strategy: data.default }))
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch strategies, using defaults:', err)
+      }
+    }
+    fetchStrategies()
+  }, [])
 
   // Poll project status
   useEffect(() => {

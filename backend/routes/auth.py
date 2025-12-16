@@ -164,12 +164,12 @@ def logout():
 def check_if_token_revoked(jwt_header, jwt_payload) -> bool:
     """Check if token is revoked"""
     jti = jwt_payload.get('jti')
-    print(f"[BLOCKLIST CHECK] Checking token JTI: {jti}, Type: {jwt_payload.get('type')}, Sub: {jwt_payload.get('sub')}")
+    # Check token blocklist
     
     try:
         token = TokenBlocklist.query.filter_by(jti=jti).first()
         is_revoked = token is not None
-        print(f"[BLOCKLIST CHECK] Token revoked: {is_revoked}")
+        # Token revocation check complete
         return is_revoked
     except Exception as e:
         print(f"[BLOCKLIST CHECK] Error: {e}")
