@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { 
   Play, Pause, Download, Trash2, ChevronDown, ChevronRight,
-  CheckCircle, AlertCircle, Clock, Loader2, FileText, Settings
+  CheckCircle, AlertCircle, Clock, Loader2, FileText, Settings,
+  Box, BarChart2, Ruler, Activity, X
 } from 'lucide-react'
 
 /**
@@ -16,9 +17,12 @@ export default function BatchDashboard({
   onCancel,
   onDownload,
   onDelete,
+  onFileSelect,
   isLoading = false
 }) {
   const [expandedFiles, setExpandedFiles] = useState({})
+  const [selectedJob, setSelectedJob] = useState(null)  // For detail modal
+  const [selectedFileId, setSelectedFileId] = useState(null)  // For highlighting selected file
 
   if (!batch) {
     return (
@@ -86,6 +90,267 @@ export default function BatchDashboard({
   const canCancel = batch.status === 'processing'
   const canDownload = batch.completed_jobs > 0
   const canDelete = !['processing', 'uploading'].includes(batch.status)
+
+  // Format quality metrics for display
+  const formatMetric = (value, decimals = 3) => {
+    if (value === null || value === undefined) return '-'
+    return typeof value === 'number' ? value.toFixed(decimals) : value
+  }
+
+  // Job Detail Modal
+  const JobDetailModal = ({ job, file, onClose }) => {
+    if (!job) return null
+    
+    const metrics = job.quality_metrics || {}
+    
+    return (
+      <div 
+        className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+        onClick={onClose}
+      >
+        <div 
+          className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Modal Header */}
+          <div className="px-5 py-4 bg-gradient-to-r from-blue-600 to-blue-700 text-white">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-lg">
+                  {file?.original_filename || 'Mesh Details'}
+                </h3>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                    job.quality_preset === 'coarse' ? 'bg-yellow-400/20 text-yellow-100' :
+                    job.quality_preset === 'fine' ? 'bg-purple-400/20 text-purple-100' :
+                    'bg-white/20 text-white'
+                  }`}>
+                    {job.quality_preset?.toUpperCase()}
+                  </span>
+                  <span className={`px-2 py-0.5 rounded text-xs ${
+                    job.status === 'completed' ? 'bg-green-400/20 text-green-100' :
+                    job.status === 'failed' ? 'bg-red-400/20 text-red-100' :
+                    'bg-white/20'
+                  }`}>
+                    {job.status}
+                  </span>
+                </div>
+              </div>
+              <button 
+                onClick={onClose}
+                className="p-1 hover:bg-white/20 rounded-full transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+          
+          {/* Modal Content */}
+          <div className="overflow-y-auto max-h-[calc(90vh-120px)]">
+            {/* Summary Stats */}
+            <div className="grid grid-cols-4 gap-4 p-5 bg-gray-50 border-b">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-gray-800">
+                  {job.element_count?.toLocaleString() || '-'}
+                </div>
+                <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
+                  <Box className="w-3 h-3" />
+                  Elements
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-gray-800">
+                  {job.node_count?.toLocaleString() || '-'}
+                </div>
+                <div className="text-xs text-gray-500">Nodes</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-blue-600">
+                  {job.score?.toFixed(1) || '-'}
+                </div>
+                <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
+                  <BarChart2 className="w-3 h-3" />
+                  Quality Score
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-gray-800">
+                  {formatDuration(job.processing_time)}
+                </div>
+                <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Processing Time
+                </div>
+              </div>
+            </div>
+
+            {/* Quality Metrics */}
+            {job.status === 'completed' && (
+              <div className="p-5 space-y-4">
+                <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                  <Activity className="w-4 h-4" />
+                  Quality Metrics
+                </h4>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  {/* SICN (Scaled Jacobian) */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h5 className="text-xs font-medium text-gray-500 mb-2">SICN (Scaled Jacobian)</h5>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Min:</span>
+                        <span className={`font-mono ${metrics.sicn_min < 0.2 ? 'text-red-600' : 'text-gray-800'}`}>
+                          {formatMetric(metrics.sicn_min)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Avg:</span>
+                        <span className="font-mono text-gray-800">{formatMetric(metrics.sicn_avg)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Max:</span>
+                        <span className="font-mono text-green-600">{formatMetric(metrics.sicn_max)}</span>
+                      </div>
+                    </div>
+                    {/* Visual bar */}
+                    <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500"
+                        style={{ width: `${(metrics.sicn_avg || 0) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Gamma */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h5 className="text-xs font-medium text-gray-500 mb-2">Gamma (Shape Quality)</h5>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Min:</span>
+                        <span className={`font-mono ${metrics.gamma_min < 0.3 ? 'text-red-600' : 'text-gray-800'}`}>
+                          {formatMetric(metrics.gamma_min)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Avg:</span>
+                        <span className="font-mono text-gray-800">{formatMetric(metrics.gamma_avg)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Max:</span>
+                        <span className="font-mono text-green-600">{formatMetric(metrics.gamma_max)}</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500"
+                        style={{ width: `${(metrics.gamma_avg || 0) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Skewness */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h5 className="text-xs font-medium text-gray-500 mb-2">Skewness (lower is better)</h5>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Min:</span>
+                        <span className="font-mono text-green-600">{formatMetric(metrics.skewness_min)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Avg:</span>
+                        <span className="font-mono text-gray-800">{formatMetric(metrics.skewness_avg)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Max:</span>
+                        <span className={`font-mono ${metrics.skewness_max > 0.85 ? 'text-red-600' : 'text-gray-800'}`}>
+                          {formatMetric(metrics.skewness_max)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500"
+                        style={{ width: `${(1 - (metrics.skewness_avg || 0)) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Aspect Ratio */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h5 className="text-xs font-medium text-gray-500 mb-2">Aspect Ratio (closer to 1 is better)</h5>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Min:</span>
+                        <span className="font-mono text-green-600">{formatMetric(metrics.aspect_ratio_min, 2)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Avg:</span>
+                        <span className="font-mono text-gray-800">{formatMetric(metrics.aspect_ratio_avg, 2)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Max:</span>
+                        <span className={`font-mono ${metrics.aspect_ratio_max > 10 ? 'text-red-600' : 'text-gray-800'}`}>
+                          {formatMetric(metrics.aspect_ratio_max, 2)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Additional Info */}
+                <div className="mt-4 pt-4 border-t border-gray-200">
+                  <h5 className="text-xs font-medium text-gray-500 mb-2">Processing Details</h5>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
+                      <span className="text-gray-500">Strategy:</span>
+                      <span className="font-medium text-gray-700">{job.mesh_strategy || 'Auto'}</span>
+                    </div>
+                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
+                      <span className="text-gray-500">Target Elements:</span>
+                      <span className="font-medium text-gray-700">{job.target_elements?.toLocaleString() || '-'}</span>
+                    </div>
+                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
+                      <span className="text-gray-500">Output Size:</span>
+                      <span className="font-medium text-gray-700">{formatFileSize(job.output_file_size)}</span>
+                    </div>
+                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
+                      <span className="text-gray-500">Curvature Adaptive:</span>
+                      <span className="font-medium text-gray-700">{job.curvature_adaptive ? 'Yes' : 'No'}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Error Details */}
+            {job.status === 'failed' && job.error_message && (
+              <div className="p-5">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <h5 className="text-sm font-medium text-red-800 mb-2 flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4" />
+                    Error Details
+                  </h5>
+                  <pre className="text-xs text-red-700 whitespace-pre-wrap font-mono bg-red-100/50 p-3 rounded">
+                    {job.error_message}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          {/* Modal Footer */}
+          <div className="px-5 py-3 bg-gray-50 border-t flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden relative">
@@ -221,19 +486,37 @@ export default function BatchDashboard({
       {batch.files && batch.files.length > 0 && (
         <div className="max-h-80 overflow-y-auto">
           {batch.files.map((file) => (
-            <div key={file.id} className="border-b border-gray-100 last:border-0">
+            <div key={file.id} className={`border-b border-gray-100 last:border-0 ${
+              selectedFileId === file.id ? 'bg-blue-50' : ''
+            }`}>
               {/* File Header */}
-              <div 
-                className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50 cursor-pointer"
-                onClick={() => toggleFile(file.id)}
-              >
-                {expandedFiles[file.id] 
-                  ? <ChevronDown className="w-4 h-4 text-gray-400" />
-                  : <ChevronRight className="w-4 h-4 text-gray-400" />
-                }
+              <div className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50">
+                {/* Expand/Collapse Toggle */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    toggleFile(file.id)
+                  }}
+                  className="p-0.5 hover:bg-gray-200 rounded"
+                >
+                  {expandedFiles[file.id] 
+                    ? <ChevronDown className="w-4 h-4 text-gray-400" />
+                    : <ChevronRight className="w-4 h-4 text-gray-400" />
+                  }
+                </button>
                 {getStatusIcon(file.status)}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-800 truncate">
+                {/* Clickable filename for preview */}
+                <div 
+                  className="flex-1 min-w-0 cursor-pointer hover:text-blue-600 transition-colors"
+                  onClick={() => {
+                    setSelectedFileId(file.id)
+                    onFileSelect?.(file)
+                  }}
+                  title="Click to preview"
+                >
+                  <p className={`text-sm font-medium truncate ${
+                    selectedFileId === file.id ? 'text-blue-600' : 'text-gray-800'
+                  }`}>
                     {file.original_filename}
                   </p>
                   <p className="text-xs text-gray-500">
@@ -251,16 +534,29 @@ export default function BatchDashboard({
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-gray-500">
-                        <th className="text-left py-1">Preset</th>
-                        <th className="text-left py-1">Status</th>
-                        <th className="text-right py-1">Elements</th>
+                        <th className="text-left py-1 w-16">Preset</th>
+                        <th className="text-left py-1 w-6"></th>
+                        <th className="text-right py-1">Elem</th>
                         <th className="text-right py-1">Score</th>
                         <th className="text-right py-1">Time</th>
                       </tr>
                     </thead>
                     <tbody>
                       {file.jobs.map((job) => (
-                        <tr key={job.id} className="border-t border-gray-200">
+                        <tr 
+                          key={job.id} 
+                          className={`border-t border-gray-200 ${
+                            job.status === 'completed' || job.status === 'failed' 
+                              ? 'cursor-pointer hover:bg-blue-50 transition-colors' 
+                              : ''
+                          }`}
+                          onClick={() => {
+                            if (job.status === 'completed' || job.status === 'failed') {
+                              setSelectedJob({ job, file })
+                            }
+                          }}
+                          title={job.status === 'completed' || job.status === 'failed' ? 'Click for details' : ''}
+                        >
                           <td className="py-1.5">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                               job.quality_preset === 'coarse' ? 'bg-yellow-100 text-yellow-700' :
@@ -271,15 +567,12 @@ export default function BatchDashboard({
                             </span>
                           </td>
                           <td className="py-1.5">
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-1" title={job.status}>
                               {getStatusIcon(job.status)}
-                              <span className={`${
-                                job.status === 'completed' ? 'text-green-600' :
-                                job.status === 'failed' ? 'text-red-600' :
-                                'text-gray-600'
-                              }`}>
-                                {job.status}
-                              </span>
+                              {/* Only show text for non-final states to save space */}
+                              {!['completed', 'failed'].includes(job.status) && (
+                                <span className="text-gray-600">{job.status}</span>
+                              )}
                             </div>
                           </td>
                           <td className="py-1.5 text-right text-gray-600">
@@ -290,6 +583,9 @@ export default function BatchDashboard({
                           </td>
                           <td className="py-1.5 text-right text-gray-600">
                             {formatDuration(job.processing_time)}
+                            {(job.status === 'completed' || job.status === 'failed') && (
+                              <span className="ml-1 text-blue-500">→</span>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -324,6 +620,15 @@ export default function BatchDashboard({
           <span>Completed: {new Date(batch.completed_at).toLocaleString()}</span>
         )}
       </div>
+
+      {/* Job Detail Modal */}
+      {selectedJob && (
+        <JobDetailModal 
+          job={selectedJob.job} 
+          file={selectedJob.file}
+          onClose={() => setSelectedJob(null)} 
+        />
+      )}
     </div>
   )
 }

@@ -10,6 +10,7 @@ from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from pathlib import Path
 import json
 import sys
+import os
 import subprocess
 import uuid
 from datetime import datetime
@@ -81,6 +82,7 @@ def create_app(config_class=None):
     
     # Register blueprints
     app.register_blueprint(auth_bp)
+    app.register_blueprint(batch_bp)
     
     # Ensure instance folder exists for SQLite database
     instance_dir = Path(__file__).parent / 'instance'

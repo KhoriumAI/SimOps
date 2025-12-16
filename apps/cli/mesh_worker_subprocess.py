@@ -1017,8 +1017,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 import numpy as np
                 
                 print("[DEBUG] Attempting to extract per-element quality...")
-                gmsh_reload.initialize()
-                gmsh_reload.option.setNumber("General.Terminal", 0)
+                # Safely initialize Gmsh - it may already be initialized from parallel workers
+                try:
+                    if not gmsh_reload.isInitialized():
+                        gmsh_reload.initialize()
+                except:
+                    # Fallback for older Gmsh versions without isInitialized
+                    try:
+                        gmsh_reload.finalize()  # Clean up any stale state
+                    except:
+                        pass
+                    gmsh_reload.initialize()
+                gmsh_reload.option.setNumber("General.Terminal", 0)  # Suppress warnings
                 
                 # CRITICAL: Use gmsh.merge() not gmsh.open() to load mesh data
                 gmsh_reload.merge(absolute_output_file)

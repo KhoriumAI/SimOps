@@ -13,6 +13,7 @@ Endpoints for batch mesh generation:
 
 import os
 import io
+import re
 import zipfile
 import hashlib
 import tempfile
@@ -29,6 +30,13 @@ from models import (
 from storage import get_storage
 
 batch_bp = Blueprint('batch', __name__, url_prefix='/api/batch')
+
+# UUID validation regex
+UUID_REGEX = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
+def validate_uuid(uuid_string):
+    """Validate UUID format to prevent injection attacks"""
+    return bool(UUID_REGEX.match(uuid_string))
 
 
 @batch_bp.route('/create', methods=['POST'])
@@ -59,9 +67,16 @@ def create_batch():
     
     data = request.get_json() or {}
     
+    # Validate and sanitize batch name
+    batch_name = data.get('name', '')
+    if batch_name:
+        batch_name = batch_name.strip()[:255]  # Limit length
+        # Remove potentially dangerous characters
+        batch_name = ''.join(c for c in batch_name if c.isalnum() or c in ' -_.')
+    
     batch = Batch(
         user_id=current_user_id,
-        name=data.get('name'),
+        name=batch_name or None,
         mesh_independence=data.get('mesh_independence', False),
         mesh_strategy=data.get('mesh_strategy', 'Tetrahedral (Delaunay)'),
         curvature_adaptive=data.get('curvature_adaptive', True),
@@ -94,6 +109,10 @@ def upload_batch_files(batch_id):
         "total_jobs": 9  // if mesh_independence=True, 3 files × 3 presets = 9 jobs
     }
     """
+    # Validate UUID format
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -229,6 +248,59 @@ def upload_batch_files(batch_id):
     return jsonify(response)
 
 
+@batch_bp.route('/file/<file_id>/preview', methods=['GET'])
+@jwt_required()
+def get_batch_file_preview(file_id):
+    """
+    Get CAD preview for a batch file.
+    Returns triangulated preview data for 3D visualization.
+    """
+    import tempfile
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from api_server import parse_step_file_for_preview
+    
+    if not validate_uuid(file_id):
+        return jsonify({"error": "Invalid file ID format"}), 400
+    
+    current_user_id = int(get_jwt_identity())
+    
+    # Get the batch file
+    batch_file = BatchFile.query.get(file_id)
+    if not batch_file:
+        return jsonify({"error": "File not found"}), 404
+    
+    # Verify ownership via batch
+    batch = Batch.query.get(batch_file.batch_id)
+    if not batch or batch.user_id != current_user_id:
+        return jsonify({"error": "Access denied"}), 403
+    
+    # Get file path
+    filepath = batch_file.storage_path
+    if not filepath:
+        return jsonify({"error": "CAD file not found"}), 404
+    
+    try:
+        storage = get_storage()
+        use_s3 = current_app.config.get('USE_S3', False)
+        
+        # If S3, download to temp file for parsing
+        if use_s3 and filepath.startswith('s3://'):
+            file_ext = Path(batch_file.original_filename).suffix
+            local_temp = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+            storage.download_to_local(filepath, local_temp.name)
+            preview_data = parse_step_file_for_preview(local_temp.name)
+            Path(local_temp.name).unlink(missing_ok=True)
+        else:
+            if not Path(filepath).exists():
+                return jsonify({"error": "CAD file not found"}), 404
+            preview_data = parse_step_file_for_preview(filepath)
+        
+        return jsonify(preview_data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate preview: {str(e)}"}), 500
+
+
 @batch_bp.route('/<batch_id>', methods=['GET'])
 @jwt_required()
 def get_batch_status(batch_id):
@@ -241,6 +313,9 @@ def get_batch_status(batch_id):
     
     Returns full batch object with files and optionally jobs.
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -265,6 +340,9 @@ def start_batch(batch_id):
     In production: Uses Celery for parallel processing
     In development: Uses threading for sequential processing
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -301,145 +379,212 @@ def start_batch(batch_id):
         
         def process_batch_locally(app, bid):
             """Process batch jobs locally without Celery"""
-            with app.app_context():
-                from models import Batch, BatchJob
-                from storage import get_storage
-                import subprocess
-                import sys
-                
-                batch = Batch.query.get(bid)
-                if not batch:
-                    return
-                
-                jobs = BatchJob.query.filter_by(batch_id=bid, status='pending').all()
-                storage = get_storage()
-                
-                for job in jobs:
-                    try:
-                        job.status = 'processing'
-                        job.started_at = datetime.utcnow()
-                        db.session.commit()
-                        
-                        # Get the source file
-                        batch_file = job.source_file
-                        if not batch_file:
-                            job.status = 'failed'
-                            job.error_message = 'Source file not found'
+            import sys
+            import traceback
+            print(f"[BATCH] Thread started for batch {bid[:8]}", flush=True)
+            
+            try:
+                with app.app_context():
+                    from models import Batch, BatchJob
+                    from storage import get_storage
+                    import subprocess
+                    
+                    batch = Batch.query.get(bid)
+                    if not batch:
+                        print(f"[BATCH] Error: Batch {bid[:8]} not found", flush=True)
+                        return
+                    
+                    jobs = BatchJob.query.filter_by(batch_id=bid, status='pending').all()
+                    print(f"[BATCH] Found {len(jobs)} pending jobs", flush=True)
+                    storage = get_storage()
+                    
+                    for job in jobs:
+                        try:
+                            job.status = 'processing'
+                            job.started_at = datetime.utcnow()
                             db.session.commit()
-                            continue
-                        
-                        # Get file from storage
-                        # For local storage, storage_path IS the full path
-                        # For S3, we'd need to download first
-                        input_path = batch_file.storage_path
-                        if not input_path or not os.path.exists(input_path):
-                            job.status = 'failed'
-                            job.error_message = f'Input file not found: {batch_file.storage_path}'
-                            print(f"[BATCH] Error: Input file not found: {input_path}")
-                            db.session.commit()
-                            continue
-                        
-                        print(f"[BATCH] Processing job {job.id[:8]} - {batch_file.original_filename} ({job.quality_preset})")
-                        
-                        # Create output directory
-                        output_dir = Path(current_app.config['OUTPUT_FOLDER'])
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        
-                        # Build quality params JSON
-                        import json as json_module
-                        quality_params = {
-                            'strategy': job.mesh_strategy or 'Tetrahedral (Delaunay)',
-                            'target_elements': job.target_elements or 5000,
-                            'curvature_adaptive': job.curvature_adaptive,
-                            'output_prefix': f"{Path(batch_file.original_filename).stem}_{job.quality_preset}"
-                        }
-                        
-                        # Run mesh worker subprocess
-                        mesh_worker = Path(__file__).parent.parent.parent / 'apps' / 'cli' / 'mesh_worker_subprocess.py'
-                        
-                        cmd = [
-                            sys.executable,
-                            str(mesh_worker),
-                            str(input_path),
-                            str(output_dir),
-                            '--quality-params', json_module.dumps(quality_params)
-                        ]
-                        
-                        print(f"[BATCH] Running: {' '.join(cmd[:4])} --quality-params '...'")
-                        
-                        result = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=600
-                        )
-                        
-                        print(f"[BATCH] Exit code: {result.returncode}")
-                        if result.stdout:
-                            print(f"[BATCH] stdout: {result.stdout[-500:]}")
-                        if result.stderr:
-                            print(f"[BATCH] stderr: {result.stderr[-500:]}")
-                        
-                        # Parse result JSON from stdout
-                        output_path = None
-                        if result.returncode == 0 and result.stdout:
-                            try:
-                                mesh_result = json_module.loads(result.stdout.strip().split('\n')[-1])
-                                if mesh_result.get('success') and mesh_result.get('mesh_file'):
-                                    output_path = Path(mesh_result['mesh_file'])
-                                    job.element_count = mesh_result.get('element_count')
-                                    job.node_count = mesh_result.get('node_count')
-                                    job.score = mesh_result.get('score')
-                                    job.quality_metrics = mesh_result.get('quality_metrics')
-                            except:
-                                # Try to find any .msh file in output dir
-                                pattern = f"*{job.quality_preset}*.msh"
-                                msh_files = list(output_dir.glob(pattern))
-                                if msh_files:
-                                    output_path = msh_files[0]
-                        
-                        if output_path and output_path.exists():
-                            job.status = 'completed'
-                            job.output_path = str(output_path)
-                            job.output_file_size = output_path.stat().st_size
-                            job.completed_at = datetime.utcnow()
-                            print(f"[BATCH] ✓ Job completed: {output_path}")
                             
-                            # Update batch counts
-                            batch.completed_jobs = BatchJob.query.filter_by(
-                                batch_id=bid, status='completed'
-                            ).count()
-                        else:
-                            error_msg = result.stderr[:500] if result.stderr else f'Mesh generation failed (exit code: {result.returncode})'
+                            # Get the source file
+                            batch_file = job.source_file
+                            if not batch_file:
+                                job.status = 'failed'
+                                job.error_message = 'Source file not found'
+                                db.session.commit()
+                                continue
+                            
+                            # Get file from storage
+                            # For local storage, storage_path IS the full path
+                            # For S3, we'd need to download first
+                            input_path = batch_file.storage_path
+                            if not input_path or not os.path.exists(input_path):
+                                job.status = 'failed'
+                                job.error_message = f'Input file not found: {batch_file.storage_path}'
+                                print(f"[BATCH] Error: Input file not found: {input_path}", flush=True)
+                                db.session.commit()
+                                continue
+                            
+                            print(f"[BATCH] Processing job {job.id[:8]} - {batch_file.original_filename} ({job.quality_preset})", flush=True)
+                            
+                            # Create output directory - use app.config NOT current_app.config in thread
+                            output_dir = Path(app.config['OUTPUT_FOLDER'])
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            # Build quality params JSON
+                            import json as json_module
+                            quality_params = {
+                                'strategy': job.mesh_strategy or 'Tetrahedral (Delaunay)',
+                                'target_elements': job.target_elements or 5000,
+                                'curvature_adaptive': job.curvature_adaptive,
+                                'output_prefix': f"{Path(batch_file.original_filename).stem}_{job.quality_preset}"
+                            }
+                            
+                            # Run mesh worker subprocess
+                            mesh_worker = Path(__file__).parent.parent.parent / 'apps' / 'cli' / 'mesh_worker_subprocess.py'
+                            
+                            cmd = [
+                                sys.executable,
+                                str(mesh_worker),
+                                str(input_path),
+                                str(output_dir),
+                                '--quality-params', json_module.dumps(quality_params)
+                            ]
+                            
+                            print(f"[BATCH] Running: {' '.join(cmd[:4])} --quality-params '...'", flush=True)
+                            
+                            # Use Popen for real-time output streaming
+                            import time
+                            
+                            # Force Python unbuffered output in subprocess
+                            env = os.environ.copy()
+                            env['PYTHONUNBUFFERED'] = '1'
+                            
+                            process = subprocess.Popen(
+                                cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                                text=True,
+                                bufsize=1,  # Line buffered
+                                env=env
+                            )
+                            
+                            stdout_lines = []
+                            last_log_time = time.time()
+                            start_time = time.time()
+                            timeout = 600  # 10 minute timeout
+                            
+                            # Stream output in real-time
+                            while True:
+                                # Check timeout
+                                if time.time() - start_time > timeout:
+                                    process.kill()
+                                    print(f"[BATCH] ⚠ Process killed after {timeout}s timeout", flush=True)
+                                    break
+                                
+                                line = process.stdout.readline()
+                                if not line and process.poll() is not None:
+                                    break
+                                if line:
+                                    line = line.rstrip()
+                                    stdout_lines.append(line)
+                                    # Log important lines (skip verbose debug)
+                                    if any(x in line for x in ['[OK]', 'Error', 'WARNING', 'BEST RESULT', 'Success', 'score:', 'Generated', 'Starting', 'Loading', 'Mesh', 'Strategy']):
+                                        print(f"[BATCH]   {line}", flush=True)
+                                    # Log heartbeat every 15 seconds
+                                    elif time.time() - last_log_time > 15:
+                                        elapsed = int(time.time() - start_time)
+                                        print(f"[BATCH] ... still processing ({elapsed}s elapsed, {len(stdout_lines)} lines)", flush=True)
+                                        last_log_time = time.time()
+                            
+                            # Get return code
+                            return_code = process.poll()
+                            stdout_text = '\n'.join(stdout_lines)
+                            elapsed = int(time.time() - start_time)
+                            print(f"[BATCH] Process completed in {elapsed}s", flush=True)
+                            
+                            print(f"[BATCH] Exit code: {return_code}", flush=True)
+                            
+                            # Create a result-like object for compatibility
+                            class Result:
+                                pass
+                            result = Result()
+                            result.returncode = return_code
+                            result.stdout = stdout_text
+                            result.stderr = ""
+                            
+                            # Parse result JSON from stdout
+                            output_path = None
+                            if result.returncode == 0 and result.stdout:
+                                try:
+                                    mesh_result = json_module.loads(result.stdout.strip().split('\n')[-1])
+                                    # mesh worker returns 'output_file', not 'mesh_file'
+                                    if mesh_result.get('success') and mesh_result.get('output_file'):
+                                        output_path = Path(mesh_result['output_file'])
+                                        
+                                        # Extract metrics - worker returns nested structure
+                                        metrics = mesh_result.get('metrics', {})
+                                        job.element_count = metrics.get('total_elements') or mesh_result.get('total_elements')
+                                        job.node_count = metrics.get('total_nodes') or mesh_result.get('total_nodes')
+                                        job.score = mesh_result.get('score')
+                                        job.quality_metrics = mesh_result.get('quality_metrics')
+                                except Exception as parse_err:
+                                    print(f"[BATCH] JSON parse error: {parse_err}", flush=True)
+                                    # Try to find any .msh file in output dir
+                                    pattern = f"*{job.quality_preset}*.msh"
+                                    msh_files = list(output_dir.glob(pattern))
+                                    if msh_files:
+                                        output_path = msh_files[0]
+                            
+                            if output_path and output_path.exists():
+                                job.status = 'completed'
+                                job.output_path = str(output_path)
+                                job.output_file_size = output_path.stat().st_size
+                                job.completed_at = datetime.utcnow()
+                                
+                                # Calculate processing time
+                                if job.started_at:
+                                    job.processing_time = (job.completed_at - job.started_at).total_seconds()
+                                print(f"[BATCH] ✓ Job completed: {output_path}", flush=True)
+                                
+                                # Update batch counts
+                                batch.completed_jobs = BatchJob.query.filter_by(
+                                    batch_id=bid, status='completed'
+                                ).count()
+                            else:
+                                error_msg = result.stderr[:500] if result.stderr else f'Mesh generation failed (exit code: {result.returncode})'
+                                job.status = 'failed'
+                                job.error_message = error_msg
+                                print(f"[BATCH] ✗ Job failed: {error_msg}", flush=True)
+                                batch.failed_jobs = BatchJob.query.filter_by(
+                                    batch_id=bid, status='failed'
+                                ).count()
+                            
+                            db.session.commit()
+                            
+                        except Exception as e:
                             job.status = 'failed'
-                            job.error_message = error_msg
-                            print(f"[BATCH] ✗ Job failed: {error_msg}")
+                            job.error_message = str(e)[:500]
+                            print(f"[BATCH] Job exception: {e}", flush=True)
                             batch.failed_jobs = BatchJob.query.filter_by(
                                 batch_id=bid, status='failed'
                             ).count()
-                        
-                        db.session.commit()
-                        
-                    except Exception as e:
-                        job.status = 'failed'
-                        job.error_message = str(e)[:500]
-                        batch.failed_jobs = BatchJob.query.filter_by(
-                            batch_id=bid, status='failed'
-                        ).count()
-                        db.session.commit()
+                            db.session.commit()
                 
-                # Update final batch status
-                batch = Batch.query.get(bid)
-                if batch.failed_jobs == batch.total_jobs:
-                    batch.status = 'failed'
-                elif batch.completed_jobs == batch.total_jobs:
-                    batch.status = 'completed'
-                    batch.completed_at = datetime.utcnow()
-                elif batch.completed_jobs + batch.failed_jobs == batch.total_jobs:
-                    batch.status = 'completed'  # partial completion
-                    batch.completed_at = datetime.utcnow()
-                
-                db.session.commit()
+                    # Update final batch status
+                    batch = Batch.query.get(bid)
+                    if batch.failed_jobs == batch.total_jobs:
+                        batch.status = 'failed'
+                    elif batch.completed_jobs == batch.total_jobs:
+                        batch.status = 'completed'
+                        batch.completed_at = datetime.utcnow()
+                    elif batch.completed_jobs + batch.failed_jobs == batch.total_jobs:
+                        batch.status = 'completed'  # partial completion
+                        batch.completed_at = datetime.utcnow()
+                    
+                    db.session.commit()
+                    print(f"[BATCH] Batch {bid[:8]} completed. Status: {batch.status}", flush=True)
+            except Exception as e:
+                print(f"[BATCH] CRITICAL ERROR in thread: {e}", flush=True)
+                traceback.print_exc()
         
         # Start background thread
         thread = threading.Thread(
@@ -463,6 +608,9 @@ def cancel_batch_route(batch_id):
     Cancel all pending/queued jobs in the batch.
     Running jobs will complete but no new jobs will start.
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -519,6 +667,9 @@ def download_batch_meshes(batch_id):
       - FileB/
         - FileB_medium_mesh.msh
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -559,6 +710,23 @@ def download_batch_meshes(batch_id):
             
             # Get file content
             try:
+                output_path = Path(job.output_path)
+                
+                # Security: Validate path is within allowed directories
+                if not use_s3:
+                    allowed_dirs = [
+                        Path(current_app.config['OUTPUT_FOLDER']).resolve(),
+                        Path(current_app.config['UPLOAD_FOLDER']).resolve(),
+                        Path('/tmp').resolve()
+                    ]
+                    try:
+                        resolved = output_path.resolve()
+                        if not any(str(resolved).startswith(str(d)) for d in allowed_dirs):
+                            print(f"[DOWNLOAD] Security: Path outside allowed dirs: {job.output_path}")
+                            continue
+                    except Exception:
+                        continue
+                
                 if use_s3 and job.output_path.startswith('s3://'):
                     # Download from S3 to temp file
                     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.msh')
@@ -607,6 +775,9 @@ def get_batch_jobs(batch_id):
     - status: filter by status (pending, queued, processing, completed, failed)
     - file_id: filter by source file
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)
@@ -674,6 +845,9 @@ def delete_batch(batch_id):
     """
     Delete a batch and all its files and jobs.
     """
+    if not validate_uuid(batch_id):
+        return jsonify({"error": "Invalid batch ID format"}), 400
+    
     current_user_id = int(get_jwt_identity())
     
     batch = Batch.query.get(batch_id)

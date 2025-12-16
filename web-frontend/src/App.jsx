@@ -32,6 +32,7 @@ function App() {
   const [consoleOpen, setConsoleOpen] = useState(true)
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
@@ -483,6 +484,40 @@ function App() {
                 setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
               }}
               onLog={(msg) => setLogs(prev => [...prev, msg])}
+              onFileSelect={async (file) => {
+                // Fetch CAD preview for batch file
+                setIsLoadingPreview(true)
+                setLogs(prev => [...prev, `[INFO] Loading preview for ${file.original_filename}...`])
+                try {
+                  const response = await authFetch(`${API_BASE}/batch/file/${file.id}/preview`)
+                  if (response.ok) {
+                    const data = await response.json()
+                    if (data.error) {
+                      setLogs(prev => [...prev, `[WARNING] ${data.error}`])
+                      setMeshData({ vertices: [], colors: [], numVertices: 0, numTriangles: 0, isPreview: true })
+                    } else {
+                      setMeshData(data)
+                      if (data.geometry) {
+                        setGeometryInfo(data.geometry)
+                        const geo = data.geometry
+                        setLogs(prev => [
+                          ...prev,
+                          `[OK] CAD Preview: ${file.original_filename}`,
+                          `[INFO] Solids: ${geo.solid_count}, Faces: ${geo.face_count}, Volume: ${geo.total_volume?.toFixed(4) || 'N/A'}`
+                        ])
+                      }
+                    }
+                  } else {
+                    const err = await response.json()
+                    setLogs(prev => [...prev, `[ERROR] Preview failed: ${err.error || 'Unknown error'}`])
+                  }
+                } catch (err) {
+                  console.error('Preview error:', err)
+                  setLogs(prev => [...prev, `[ERROR] Failed to load preview: ${err.message}`])
+                } finally {
+                  setIsLoadingPreview(false)
+                }
+              }}
             />
           ) : (
           /* Single File Mode */
@@ -633,9 +668,13 @@ function App() {
               filename={projectStatus?.filename}
               qualityMetrics={meshData?.qualityMetrics || projectStatus?.latest_result?.quality_metrics}
               status={projectStatus?.status}
-              isLoading={isUploading || projectStatus?.status === 'processing'}
+              isLoading={isUploading || projectStatus?.status === 'processing' || isLoadingPreview}
               loadingProgress={isUploading ? uploadProgress : undefined}
-              loadingMessage={isUploading ? 'Uploading & Processing CAD file...' : (projectStatus?.status === 'processing' ? 'Generating Mesh...' : undefined)}
+              loadingMessage={
+                isLoadingPreview ? 'Loading CAD Preview...' :
+                isUploading ? 'Uploading & Processing CAD file...' : 
+                (projectStatus?.status === 'processing' ? 'Generating Mesh...' : undefined)
+              }
             />
           </div>
           

@@ -110,58 +110,73 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const timerRef = useRef(null)
+  const isPollingRef = useRef(false)
+
+  // Check if batch is in a final state
+  const isFinalState = (status) => {
+    return ['completed', 'failed', 'cancelled'].includes(status)
+  }
 
   const fetchBatch = useCallback(async () => {
     if (!batchId || !authFetch) return
 
     try {
-      console.log('[useBatchPolling] Fetching batch:', batchId)
       const response = await authFetch(`${API_BASE}/batch/${batchId}?include_files=true&include_jobs=true`)
-      console.log('[useBatchPolling] Response status:', response.status)
       if (response.ok) {
         const data = await response.json()
-        console.log('[useBatchPolling] Batch data:', data)
         setBatch(data)
         setError(null)
+        
+        // Auto-stop polling when batch reaches final state
+        if (isFinalState(data.status) && timerRef.current) {
+          console.log('[Polling] Batch complete, stopping polling')
+          clearInterval(timerRef.current)
+          timerRef.current = null
+          isPollingRef.current = false
+        }
       } else {
         const err = await response.json()
-        console.error('[useBatchPolling] Error response:', err)
         setError(err.error || 'Failed to fetch batch')
       }
     } catch (err) {
-      console.error('[useBatchPolling] Fetch error:', err)
+      // Only log actual errors, not routine fetches
+      console.error('[Polling] Error:', err.message)
       setError(err.message)
     }
   }, [batchId, authFetch])
 
   const startPolling = useCallback(() => {
-    if (timerRef.current) return
+    if (timerRef.current || isPollingRef.current) return
+    
+    // Don't start polling if already in final state
+    if (batch && isFinalState(batch.status)) return
 
+    console.log('[Polling] Started')
+    isPollingRef.current = true
     fetchBatch()
     timerRef.current = setInterval(fetchBatch, interval)
-  }, [fetchBatch, interval])
+  }, [fetchBatch, interval, batch])
 
   const stopPolling = useCallback(() => {
     if (timerRef.current) {
+      console.log('[Polling] Stopped')
       clearInterval(timerRef.current)
       timerRef.current = null
+      isPollingRef.current = false
     }
   }, [])
 
   // Fetch immediately when batchId changes
   useEffect(() => {
     if (batchId && authFetch) {
-      console.log('[useBatchPolling] batchId changed, fetching:', batchId)
       setLoading(true)
-      setBatch(null) // Clear old batch while loading
+      setBatch(null)
       
       const doFetch = async () => {
         try {
           const response = await authFetch(`${API_BASE}/batch/${batchId}?include_files=true&include_jobs=true`)
-          console.log('[useBatchPolling] Initial fetch response:', response.status)
           if (response.ok) {
             const data = await response.json()
-            console.log('[useBatchPolling] Initial fetch data:', data)
             setBatch(data)
             setError(null)
           } else {
@@ -169,7 +184,6 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
             setError(err.error || 'Failed to fetch batch')
           }
         } catch (err) {
-          console.error('[useBatchPolling] Initial fetch error:', err)
           setError(err.message)
         } finally {
           setLoading(false)
@@ -180,9 +194,11 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
     } else if (!batchId) {
       setBatch(null)
       setLoading(false)
+      stopPolling()
     }
-  }, [batchId, authFetch])
+  }, [batchId, authFetch, stopPolling])
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => stopPolling()
   }, [stopPolling])
@@ -193,7 +209,8 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
     error,
     refresh: fetchBatch,
     startPolling,
-    stopPolling
+    stopPolling,
+    isPolling: isPollingRef.current
   }
 }
 

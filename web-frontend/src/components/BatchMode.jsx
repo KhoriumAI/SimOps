@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import BatchUpload from './BatchUpload'
 import BatchDashboard from './BatchDashboard'
@@ -20,7 +20,7 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
  * 4. Monitor progress
  * 5. Download results
  */
-export default function BatchMode({ onBatchComplete, onLog }) {
+export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const { authFetch } = useAuth()
   
   // Helper to add log
@@ -76,19 +76,24 @@ export default function BatchMode({ onBatchComplete, onLog }) {
     loadBatches()
   }, [loadBatches])
 
+  // Track if we've already notified about batch completion
+  const notifiedBatchIdRef = useRef(null)
+
   // Start/stop polling based on batch status
   useEffect(() => {
+    const finalStates = ['completed', 'failed', 'cancelled']
+    
     if (batch?.status === 'processing') {
       startPolling()
-    } else {
+    } else if (finalStates.includes(batch?.status)) {
       stopPolling()
+      // Notify parent when batch completes (only once per batch)
+      if (batch?.status === 'completed' && onBatchComplete && notifiedBatchIdRef.current !== batch.id) {
+        notifiedBatchIdRef.current = batch.id
+        onBatchComplete(batch)
+      }
     }
-
-    // Notify parent when batch completes
-    if (batch?.status === 'completed' && onBatchComplete) {
-      onBatchComplete(batch)
-    }
-  }, [batch?.status, startPolling, stopPolling, onBatchComplete])
+  }, [batch?.status, batch?.id, startPolling, stopPolling, onBatchComplete])
 
   // Create new batch
   const createBatch = async () => {
@@ -425,6 +430,7 @@ export default function BatchMode({ onBatchComplete, onLog }) {
             onCancel={handleCancel}
             onDownload={handleDownload}
             onDelete={handleDelete}
+            onFileSelect={onFileSelect}
             isLoading={isLoading}
           />
         )}
