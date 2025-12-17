@@ -311,11 +311,19 @@ def register_routes(app):
         """
         strategies = [
             {
+                'id': 'fast_tet_delaunay',
+                'name': 'Tet (Fast)',
+                'description': 'Fast single-pass HXT Delaunay - ideal for batch processing',
+                'element_type': 'tet',
+                'recommended': True,
+                'fast': True
+            },
+            {
                 'id': 'tetrahedral_delaunay',
                 'name': 'Tetrahedral (Delaunay)',
-                'description': 'Classic Delaunay triangulation - reliable for most geometries',
+                'description': 'Exhaustive strategy search - best quality, slower',
                 'element_type': 'tet',
-                'recommended': True
+                'recommended': False
             },
             {
                 'id': 'tetrahedral_frontal',
@@ -361,7 +369,7 @@ def register_routes(app):
         return jsonify({
             'strategies': strategies,
             'names': [s['name'] for s in strategies],
-            'default': 'Tetrahedral (Delaunay)'
+            'default': 'Tet (Fast)'
         })
 
     @app.route('/api/upload', methods=['POST'])

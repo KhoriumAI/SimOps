@@ -473,8 +473,8 @@ function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - Compact Sidebar */}
-        <div className={`${mode === 'batch' ? 'w-80' : 'w-56'} border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300`}>
+        {/* Left Panel - Responsive Sidebar */}
+        <div className={`${mode === 'batch' ? 'w-80 xl:w-96 min-w-[280px]' : 'w-56 min-w-[200px]'} max-w-[40vw] border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300 flex-shrink-0`}>
           
           {/* Batch Mode */}
           {mode === 'batch' ? (

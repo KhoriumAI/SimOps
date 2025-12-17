@@ -49,7 +49,7 @@ def create_batch():
     {
         "name": "Optional batch name",
         "mesh_independence": true/false,
-        "mesh_strategy": "Tetrahedral (Delaunay)",
+        "mesh_strategy": "Tet (Fast)",
         "curvature_adaptive": true
     }
     
@@ -78,7 +78,7 @@ def create_batch():
         user_id=current_user_id,
         name=batch_name or None,
         mesh_independence=data.get('mesh_independence', False),
-        mesh_strategy=data.get('mesh_strategy', 'Tetrahedral (Delaunay)'),
+        mesh_strategy=data.get('mesh_strategy', 'Tet (Fast)'),
         curvature_adaptive=data.get('curvature_adaptive', True),
         parallel_limit=current_app.config.get('BATCH_PARALLEL_JOBS', 6),
         status='pending'
@@ -395,10 +395,18 @@ def start_batch(batch_id):
                         return
                     
                     jobs = BatchJob.query.filter_by(batch_id=bid, status='pending').all()
-                    print(f"[BATCH] Found {len(jobs)} pending jobs", flush=True)
+                    total_jobs = len(jobs)
+                    print(f"[BATCH] Found {total_jobs} pending jobs", flush=True)
                     storage = get_storage()
                     
-                    for job in jobs:
+                    for job_idx, job in enumerate(jobs):
+                        # Check if batch was cancelled
+                        db.session.refresh(batch)
+                        if batch.status == 'cancelled':
+                            print(f"[BATCH] Batch cancelled, stopping processing", flush=True)
+                            break
+                        
+                        print(f"[BATCH] === Starting job {job_idx + 1}/{total_jobs} ===", flush=True)
                         try:
                             job.status = 'processing'
                             job.started_at = datetime.utcnow()
@@ -431,12 +439,22 @@ def start_batch(batch_id):
                             
                             # Build quality params JSON
                             import json as json_module
+                            
+                            # Get preset sizing based on quality_preset
+                            from models import MESH_PRESETS
+                            preset = MESH_PRESETS.get(job.quality_preset, MESH_PRESETS['medium'])
+                            
                             quality_params = {
-                                'strategy': job.mesh_strategy or 'Tetrahedral (Delaunay)',
-                                'target_elements': job.target_elements or 5000,
-                                'curvature_adaptive': job.curvature_adaptive,
+                                'mesh_strategy': job.mesh_strategy or 'Tet (Fast)',
+                                'quality_preset': job.quality_preset,
+                                'target_elements': job.target_elements or preset['target_elements'],
+                                'max_size_mm': job.max_element_size or preset['max_element_size'],
+                                'min_size_mm': (job.max_element_size or preset['max_element_size']) / 10.0,  # Min = 1/10 of max
+                                'curvature_adaptive': job.curvature_adaptive if job.curvature_adaptive is not None else preset['curvature_adaptive'],
                                 'output_prefix': f"{Path(batch_file.original_filename).stem}_{job.quality_preset}"
                             }
+                            
+                            print(f"[BATCH] Job params: preset={job.quality_preset}, max_size={quality_params['max_size_mm']}, target={quality_params['target_elements']}", flush=True)
                             
                             # Run mesh worker subprocess
                             mesh_worker = Path(__file__).parent.parent.parent / 'apps' / 'cli' / 'mesh_worker_subprocess.py'
@@ -449,7 +467,10 @@ def start_batch(batch_id):
                                 '--quality-params', json_module.dumps(quality_params)
                             ]
                             
-                            print(f"[BATCH] Running: {' '.join(cmd[:4])} --quality-params '...'", flush=True)
+                            print(f"[BATCH] Running subprocess...", flush=True)
+                            print(f"[BATCH]   Input: {input_path}", flush=True)
+                            print(f"[BATCH]   Output dir: {output_dir}", flush=True)
+                            print(f"[BATCH]   Params: {json_module.dumps(quality_params)}", flush=True)
                             
                             # Use Popen for real-time output streaming
                             import time
@@ -470,36 +491,58 @@ def start_batch(batch_id):
                             stdout_lines = []
                             last_log_time = time.time()
                             start_time = time.time()
-                            timeout = 600  # 10 minute timeout
+                            timeout = 1200  # 20 minute timeout for complex geometries
                             
-                            # Stream output in real-time
+                            print(f"[BATCH] Subprocess PID: {process.pid}", flush=True)
+                            
+                            # Stream output in real-time with select for non-blocking
+                            import select
+                            
                             while True:
                                 # Check timeout
-                                if time.time() - start_time > timeout:
+                                elapsed = time.time() - start_time
+                                if elapsed > timeout:
                                     process.kill()
                                     print(f"[BATCH] ⚠ Process killed after {timeout}s timeout", flush=True)
                                     break
                                 
-                                line = process.stdout.readline()
-                                if not line and process.poll() is not None:
+                                # Check if process has finished
+                                ret = process.poll()
+                                if ret is not None:
+                                    # Process finished - read any remaining output
+                                    remaining = process.stdout.read()
+                                    if remaining:
+                                        for line in remaining.strip().split('\n'):
+                                            stdout_lines.append(line)
+                                    print(f"[BATCH] Process exited with code {ret}", flush=True)
                                     break
-                                if line:
-                                    line = line.rstrip()
-                                    stdout_lines.append(line)
-                                    # Log important lines (skip verbose debug)
-                                    if any(x in line for x in ['[OK]', 'Error', 'WARNING', 'BEST RESULT', 'Success', 'score:', 'Generated', 'Starting', 'Loading', 'Mesh', 'Strategy']):
-                                        print(f"[BATCH]   {line}", flush=True)
-                                    # Log heartbeat every 15 seconds
-                                    elif time.time() - last_log_time > 15:
-                                        elapsed = int(time.time() - start_time)
-                                        print(f"[BATCH] ... still processing ({elapsed}s elapsed, {len(stdout_lines)} lines)", flush=True)
+                                
+                                # Use select to check if data is available (with 1s timeout)
+                                try:
+                                    ready, _, _ = select.select([process.stdout], [], [], 1.0)
+                                except (ValueError, OSError):
+                                    # Pipe closed
+                                    break
+                                
+                                if ready:
+                                    line = process.stdout.readline()
+                                    if line:
+                                        line = line.rstrip()
+                                        stdout_lines.append(line)
+                                        # Log important lines
+                                        if any(x in line for x in ['[OK]', 'Error', 'WARNING', 'BEST', 'Success', 'score:', 'Generated', 'Starting', 'Loading', 'Mesh', 'Strategy', 'FAST-TET', 'SICN', 'Gamma', 'Elements']):
+                                            print(f"[BATCH]   {line}", flush=True)
+                                else:
+                                    # No data available - log heartbeat every 10 seconds
+                                    if time.time() - last_log_time > 10:
+                                        print(f"[BATCH] ... waiting for output ({int(elapsed)}s elapsed)", flush=True)
                                         last_log_time = time.time()
                             
                             # Get return code
                             return_code = process.poll()
                             stdout_text = '\n'.join(stdout_lines)
                             elapsed = int(time.time() - start_time)
-                            print(f"[BATCH] Process completed in {elapsed}s", flush=True)
+                            print(f"[BATCH] Process completed in {elapsed}s with {len(stdout_lines)} output lines", flush=True)
                             
                             print(f"[BATCH] Exit code: {return_code}", flush=True)
                             
@@ -559,15 +602,21 @@ def start_batch(batch_id):
                                 ).count()
                             
                             db.session.commit()
+                            print(f"[BATCH] === Job {job_idx + 1}/{total_jobs} complete, continuing... ===", flush=True)
                             
                         except Exception as e:
+                            import traceback as tb
                             job.status = 'failed'
                             job.error_message = str(e)[:500]
                             print(f"[BATCH] Job exception: {e}", flush=True)
+                            tb.print_exc()
                             batch.failed_jobs = BatchJob.query.filter_by(
                                 batch_id=bid, status='failed'
                             ).count()
                             db.session.commit()
+                            print(f"[BATCH] === Job {job_idx + 1}/{total_jobs} failed, continuing... ===", flush=True)
+                    
+                    print(f"[BATCH] === All {total_jobs} jobs processed ===", flush=True)
                 
                     # Update final batch status
                     batch = Batch.query.get(bid)

@@ -148,7 +148,7 @@ export default function BatchDashboard({
           {/* Modal Content */}
           <div className="overflow-y-auto max-h-[calc(90vh-120px)]">
             {/* Summary Stats */}
-            <div className="grid grid-cols-4 gap-4 p-5 bg-gray-50 border-b">
+            <div className="grid grid-cols-3 gap-4 p-5 bg-gray-50 border-b">
               <div className="text-center">
                 <div className="text-2xl font-bold text-gray-800">
                   {job.element_count?.toLocaleString() || '-'}
@@ -159,18 +159,16 @@ export default function BatchDashboard({
                 </div>
               </div>
               <div className="text-center">
-                <div className="text-2xl font-bold text-gray-800">
-                  {job.node_count?.toLocaleString() || '-'}
-                </div>
-                <div className="text-xs text-gray-500">Nodes</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-600">
-                  {job.score?.toFixed(1) || '-'}
+                <div className={`text-2xl font-bold ${
+                  (metrics.sicn_avg || 0) >= 0.7 ? 'text-green-600' :
+                  (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                  'text-red-600'
+                }`}>
+                  {formatMetric(metrics.sicn_avg)}
                 </div>
                 <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
                   <BarChart2 className="w-3 h-3" />
-                  Quality Score
+                  SICN (Quality)
                 </div>
               </div>
               <div className="text-center">
@@ -193,106 +191,194 @@ export default function BatchDashboard({
                 </h4>
                 
                 <div className="grid grid-cols-2 gap-4">
-                  {/* SICN (Scaled Jacobian) */}
+                  {/* SICN (Scaled Jacobian) - higher is better, 0-1 scale */}
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h5 className="text-xs font-medium text-gray-500 mb-2">SICN (Scaled Jacobian)</h5>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
-                        <span className={`font-mono ${metrics.sicn_min < 0.2 ? 'text-red-600' : 'text-gray-800'}`}>
+                        <span className={`font-mono ${
+                          (metrics.sicn_min || 0) >= 0.4 ? 'text-green-600' :
+                          (metrics.sicn_min || 0) >= 0.2 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
                           {formatMetric(metrics.sicn_min)}
                         </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
-                        <span className="font-mono text-gray-800">{formatMetric(metrics.sicn_avg)}</span>
+                        <span className={`font-mono ${
+                          (metrics.sicn_avg || 0) >= 0.7 ? 'text-green-600' :
+                          (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.sicn_avg)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
-                        <span className="font-mono text-green-600">{formatMetric(metrics.sicn_max)}</span>
+                        <span className={`font-mono ${
+                          (metrics.sicn_max || 0) >= 0.9 ? 'text-green-600' :
+                          (metrics.sicn_max || 0) >= 0.7 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.sicn_max)}
+                        </span>
                       </div>
                     </div>
-                    {/* Visual bar */}
+                    {/* Visual bar - solid color based on avg value */}
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div 
-                        className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500"
+                        className={`h-full ${
+                          (metrics.sicn_avg || 0) >= 0.7 ? 'bg-green-500' :
+                          (metrics.sicn_avg || 0) >= 0.4 ? 'bg-yellow-500' :
+                          'bg-red-500'
+                        }`}
                         style={{ width: `${(metrics.sicn_avg || 0) * 100}%` }}
                       />
                     </div>
                   </div>
 
-                  {/* Gamma */}
+                  {/* Gamma - higher is better, 0-1 scale */}
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h5 className="text-xs font-medium text-gray-500 mb-2">Gamma (Shape Quality)</h5>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
-                        <span className={`font-mono ${metrics.gamma_min < 0.3 ? 'text-red-600' : 'text-gray-800'}`}>
+                        <span className={`font-mono ${
+                          (metrics.gamma_min || 0) >= 0.5 ? 'text-green-600' :
+                          (metrics.gamma_min || 0) >= 0.3 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
                           {formatMetric(metrics.gamma_min)}
                         </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
-                        <span className="font-mono text-gray-800">{formatMetric(metrics.gamma_avg)}</span>
+                        <span className={`font-mono ${
+                          (metrics.gamma_avg || 0) >= 0.7 ? 'text-green-600' :
+                          (metrics.gamma_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.gamma_avg)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
-                        <span className="font-mono text-green-600">{formatMetric(metrics.gamma_max)}</span>
+                        <span className={`font-mono ${
+                          (metrics.gamma_max || 0) >= 0.9 ? 'text-green-600' :
+                          (metrics.gamma_max || 0) >= 0.7 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.gamma_max)}
+                        </span>
                       </div>
                     </div>
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div 
-                        className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500"
+                        className={`h-full ${
+                          (metrics.gamma_avg || 0) >= 0.7 ? 'bg-green-500' :
+                          (metrics.gamma_avg || 0) >= 0.4 ? 'bg-yellow-500' :
+                          'bg-red-500'
+                        }`}
                         style={{ width: `${(metrics.gamma_avg || 0) * 100}%` }}
                       />
                     </div>
                   </div>
 
-                  {/* Skewness */}
+                  {/* Skewness - lower is better, 0-1 scale (0 is best) */}
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h5 className="text-xs font-medium text-gray-500 mb-2">Skewness (lower is better)</h5>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
-                        <span className="font-mono text-green-600">{formatMetric(metrics.skewness_min)}</span>
+                        <span className={`font-mono ${
+                          (metrics.skewness_min || 0) <= 0.1 ? 'text-green-600' :
+                          (metrics.skewness_min || 0) <= 0.3 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.skewness_min)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
-                        <span className="font-mono text-gray-800">{formatMetric(metrics.skewness_avg)}</span>
+                        <span className={`font-mono ${
+                          (metrics.skewness_avg || 0) <= 0.25 ? 'text-green-600' :
+                          (metrics.skewness_avg || 0) <= 0.5 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.skewness_avg)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
-                        <span className={`font-mono ${metrics.skewness_max > 0.85 ? 'text-red-600' : 'text-gray-800'}`}>
+                        <span className={`font-mono ${
+                          (metrics.skewness_max || 0) <= 0.5 ? 'text-green-600' :
+                          (metrics.skewness_max || 0) <= 0.85 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
                           {formatMetric(metrics.skewness_max)}
                         </span>
                       </div>
                     </div>
+                    {/* Bar shows avg skewness - shorter is better */}
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div 
-                        className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500"
-                        style={{ width: `${(1 - (metrics.skewness_avg || 0)) * 100}%` }}
+                        className={`h-full ${
+                          (metrics.skewness_avg || 0) <= 0.25 ? 'bg-green-500' :
+                          (metrics.skewness_avg || 0) <= 0.5 ? 'bg-yellow-500' :
+                          'bg-red-500'
+                        }`}
+                        style={{ width: `${Math.min((metrics.skewness_avg || 0) * 100, 100)}%` }}
                       />
                     </div>
                   </div>
 
-                  {/* Aspect Ratio */}
+                  {/* Aspect Ratio - closer to 1 is better, typically 1-10+ scale */}
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h5 className="text-xs font-medium text-gray-500 mb-2">Aspect Ratio (closer to 1 is better)</h5>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
-                        <span className="font-mono text-green-600">{formatMetric(metrics.aspect_ratio_min, 2)}</span>
+                        <span className={`font-mono ${
+                          (metrics.aspect_ratio_min || 1) <= 1.5 ? 'text-green-600' :
+                          (metrics.aspect_ratio_min || 1) <= 2.5 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.aspect_ratio_min, 2)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
-                        <span className="font-mono text-gray-800">{formatMetric(metrics.aspect_ratio_avg, 2)}</span>
+                        <span className={`font-mono ${
+                          (metrics.aspect_ratio_avg || 1) <= 2 ? 'text-green-600' :
+                          (metrics.aspect_ratio_avg || 1) <= 4 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {formatMetric(metrics.aspect_ratio_avg, 2)}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
-                        <span className={`font-mono ${metrics.aspect_ratio_max > 10 ? 'text-red-600' : 'text-gray-800'}`}>
+                        <span className={`font-mono ${
+                          (metrics.aspect_ratio_max || 1) <= 5 ? 'text-green-600' :
+                          (metrics.aspect_ratio_max || 1) <= 10 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
                           {formatMetric(metrics.aspect_ratio_max, 2)}
                         </span>
                       </div>
+                    </div>
+                    {/* Bar normalized: lower avg is greener */}
+                    <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full ${
+                          (metrics.aspect_ratio_avg || 1) <= 2 ? 'bg-green-500' :
+                          (metrics.aspect_ratio_avg || 1) <= 4 ? 'bg-yellow-500' :
+                          'bg-red-500'
+                        }`}
+                        style={{ width: `${Math.min(((metrics.aspect_ratio_avg || 1) - 1) / 9 * 100, 100)}%` }}
+                      />
                     </div>
                   </div>
                 </div>
@@ -306,16 +392,8 @@ export default function BatchDashboard({
                       <span className="font-medium text-gray-700">{job.mesh_strategy || 'Auto'}</span>
                     </div>
                     <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
-                      <span className="text-gray-500">Target Elements:</span>
-                      <span className="font-medium text-gray-700">{job.target_elements?.toLocaleString() || '-'}</span>
-                    </div>
-                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
                       <span className="text-gray-500">Output Size:</span>
                       <span className="font-medium text-gray-700">{formatFileSize(job.output_file_size)}</span>
-                    </div>
-                    <div className="flex justify-between bg-gray-50 px-3 py-2 rounded">
-                      <span className="text-gray-500">Curvature Adaptive:</span>
-                      <span className="font-medium text-gray-700">{job.curvature_adaptive ? 'Yes' : 'No'}</span>
                     </div>
                   </div>
                 </div>
@@ -470,15 +548,15 @@ export default function BatchDashboard({
 
       {/* Settings Summary */}
       <div className="px-4 py-2 border-b border-gray-100 bg-gray-50/50">
-        <div className="flex items-center gap-4 text-xs text-gray-600">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
           <div className="flex items-center gap-1">
             <Settings className="w-3 h-3" />
-            <span>{batch.mesh_strategy}</span>
+            <span className="truncate max-w-[120px]" title={batch.mesh_strategy}>{batch.mesh_strategy}</span>
           </div>
           {batch.mesh_independence && (
-            <span className="text-purple-600">Coarse + Medium + Fine</span>
+            <span className="text-purple-600 whitespace-nowrap">C+M+F</span>
           )}
-          <span>Parallel: {batch.parallel_limit}</span>
+          <span className="whitespace-nowrap">∥{batch.parallel_limit}</span>
         </div>
       </div>
 
@@ -537,58 +615,66 @@ export default function BatchDashboard({
                         <th className="text-left py-1 w-16">Preset</th>
                         <th className="text-left py-1 w-6"></th>
                         <th className="text-right py-1">Elem</th>
-                        <th className="text-right py-1">Score</th>
+                        <th className="text-right py-1">SICN</th>
                         <th className="text-right py-1">Time</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {file.jobs.map((job) => (
-                        <tr 
-                          key={job.id} 
-                          className={`border-t border-gray-200 ${
-                            job.status === 'completed' || job.status === 'failed' 
-                              ? 'cursor-pointer hover:bg-blue-50 transition-colors' 
-                              : ''
-                          }`}
-                          onClick={() => {
-                            if (job.status === 'completed' || job.status === 'failed') {
-                              setSelectedJob({ job, file })
-                            }
-                          }}
-                          title={job.status === 'completed' || job.status === 'failed' ? 'Click for details' : ''}
-                        >
-                          <td className="py-1.5">
-                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                              job.quality_preset === 'coarse' ? 'bg-yellow-100 text-yellow-700' :
-                              job.quality_preset === 'fine' ? 'bg-blue-100 text-blue-700' :
-                              'bg-gray-100 text-gray-700'
+                      {file.jobs.map((job) => {
+                        // Get SICN from quality_metrics
+                        const sicnAvg = job.quality_metrics?.sicn_avg
+                        return (
+                          <tr 
+                            key={job.id} 
+                            className={`border-t border-gray-200 ${
+                              job.status === 'completed' || job.status === 'failed' 
+                                ? 'cursor-pointer hover:bg-blue-50 transition-colors' 
+                                : ''
+                            }`}
+                            onClick={() => {
+                              if (job.status === 'completed' || job.status === 'failed') {
+                                setSelectedJob({ job, file })
+                              }
+                            }}
+                            title={job.status === 'completed' || job.status === 'failed' ? 'Click for details' : ''}
+                          >
+                            <td className="py-1.5">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                job.quality_preset === 'coarse' ? 'bg-yellow-100 text-yellow-700' :
+                                job.quality_preset === 'fine' ? 'bg-blue-100 text-blue-700' :
+                                'bg-gray-100 text-gray-700'
+                              }`}>
+                                {job.quality_preset}
+                              </span>
+                            </td>
+                            <td className="py-1.5">
+                              <div className="flex items-center gap-1" title={job.status}>
+                                {getStatusIcon(job.status)}
+                                {/* Only show text for non-final states to save space */}
+                                {!['completed', 'failed'].includes(job.status) && (
+                                  <span className="text-gray-600">{job.status}</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-1.5 text-right text-gray-600">
+                              {job.element_count?.toLocaleString() || '-'}
+                            </td>
+                            <td className={`py-1.5 text-right ${
+                              sicnAvg >= 0.7 ? 'text-green-600' :
+                              sicnAvg >= 0.4 ? 'text-yellow-600' :
+                              sicnAvg ? 'text-red-600' : 'text-gray-600'
                             }`}>
-                              {job.quality_preset}
-                            </span>
-                          </td>
-                          <td className="py-1.5">
-                            <div className="flex items-center gap-1" title={job.status}>
-                              {getStatusIcon(job.status)}
-                              {/* Only show text for non-final states to save space */}
-                              {!['completed', 'failed'].includes(job.status) && (
-                                <span className="text-gray-600">{job.status}</span>
+                              {sicnAvg?.toFixed(3) || '-'}
+                            </td>
+                            <td className="py-1.5 text-right text-gray-600">
+                              {formatDuration(job.processing_time)}
+                              {(job.status === 'completed' || job.status === 'failed') && (
+                                <span className="ml-1 text-blue-500">→</span>
                               )}
-                            </div>
-                          </td>
-                          <td className="py-1.5 text-right text-gray-600">
-                            {job.element_count?.toLocaleString() || '-'}
-                          </td>
-                          <td className="py-1.5 text-right text-gray-600">
-                            {job.score?.toFixed(2) || '-'}
-                          </td>
-                          <td className="py-1.5 text-right text-gray-600">
-                            {formatDuration(job.processing_time)}
-                            {(job.status === 'completed' || job.status === 'failed') && (
-                              <span className="ml-1 text-blue-500">→</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                   

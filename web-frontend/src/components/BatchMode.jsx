@@ -41,16 +41,29 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   // Settings
   const [batchName, setBatchName] = useState('')
   const [meshIndependence, setMeshIndependence] = useState(false)
-  const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (Delaunay)')
+  const [meshStrategy, setMeshStrategy] = useState('Tet (Fast)')  // Fast strategy for batch processing
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
-
-  const meshStrategies = [
-    'Tetrahedral (Delaunay)',
-    'Tetrahedral (Frontal)',
-    'Tetrahedral (HXT)',
-    'Hex-Dominant'
-  ]
+  const [meshStrategies, setMeshStrategies] = useState(['Tet (Fast)', 'Tetrahedral (Delaunay)'])
+  
+  // Fetch available strategies from API
+  useEffect(() => {
+    const fetchStrategies = async () => {
+      try {
+        const response = await authFetch(`${API_BASE}/strategies`)
+        if (response.ok) {
+          const data = await response.json()
+          setMeshStrategies(data.names || ['Tet (Fast)', 'Tetrahedral (Delaunay)'])
+          if (data.default) {
+            setMeshStrategy(data.default)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch strategies:', err)
+      }
+    }
+    fetchStrategies()
+  }, [authFetch])
 
   // Polling for current batch
   const { batch, refresh, startPolling, stopPolling } = useBatchPolling(
