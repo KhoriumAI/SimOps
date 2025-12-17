@@ -29,17 +29,12 @@ meshing/
 
 # Node.js
 node_modules/
-dist/
-.pnpm-store/
+web-frontend/dist/
 
 # Environment files
 .env
 .env.local
 .env.*.local
-
-# Database
-*.db
-*.sqlite
 
 # IDE
 .vscode/
@@ -61,12 +56,6 @@ output/
 *.vtu
 *.quality.json
 *_exhaustive_report.txt
-
-# User uploads and sample files (don't commit these)
-backend/uploads/
-backend/samplefiles/
-backend/outputs/
-backend/instance/
 
 # Logs
 *.log
