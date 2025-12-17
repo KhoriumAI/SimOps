@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useMemo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei'
 import * as THREE from 'three'
-import { Cube, Scissors, Palette, Layers } from 'lucide-react'
+import { Box, Scissors, Palette, Layers } from 'lucide-react'
 
 function MeshObject({ meshData, clipping, showQuality }) {
   const meshRef = useRef()
@@ -148,7 +148,7 @@ export default function MeshViewer({ meshData }) {
       {!meshData && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-500">
           <div className="text-center">
-            <Cube className="w-16 h-16 mx-auto mb-4 opacity-20" />
+            <Box className="w-16 h-16 mx-auto mb-4 opacity-20" />
             <p>No mesh loaded</p>
             <p className="text-sm">Upload a CAD file and generate a mesh to view</p>
           </div>
