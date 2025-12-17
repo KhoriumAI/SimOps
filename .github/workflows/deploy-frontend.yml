@@ -1,0 +1,81 @@
+# Deploy Frontend to AWS S3 + CloudFront
+# Triggers on push to main branch when frontend files change
+
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web-frontend/**"
+  
+  # Allow manual trigger from Actions tab
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-1
+  S3_BUCKET: muaz-mesh-web-dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: web-frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web-frontend
+        run: npm ci
+
+      - name: Build for production
+        working-directory: web-frontend
+        env:
+          # Set your production API URL here
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync web-frontend/dist s3://${{ env.S3_BUCKET }} \
+            --delete \
+            --cache-control "public, max-age=31536000" \
+            --exclude "index.html" \
+            --exclude "*.json"
+          
+          # Upload index.html and JSON files with no-cache
+          aws s3 cp web-frontend/dist/index.html s3://${{ env.S3_BUCKET }}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+          
+          # Upload any JSON config files with no-cache
+          aws s3 sync web-frontend/dist s3://${{ env.S3_BUCKET }} \
+            --exclude "*" \
+            --include "*.json" \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+      # Optional: Uncomment when CloudFront is set up
+      # - name: Invalidate CloudFront cache
+      #   run: |
+      #     aws cloudfront create-invalidation \
+      #       --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+      #       --paths "/*"
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Frontend deployed successfully!"
+          echo "📦 S3 Bucket: ${{ env.S3_BUCKET }}"
+          echo "🌐 URL: http://${{ env.S3_BUCKET }}.s3-website-${{ env.AWS_REGION }}.amazonaws.com"
