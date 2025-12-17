@@ -10,6 +10,7 @@ from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from pathlib import Path
 import json
 import sys
+import os
 import subprocess
 import uuid
 from datetime import datetime
