@@ -34,6 +34,14 @@ class StorageBackend:
     
     def get_file_url(self, filepath: str, expires_in: int = 3600) -> str:
         raise NotImplementedError
+    
+    def download_to_local(self, remote_path: str, local_path: str) -> str:
+        """Download file to local filesystem (for processing)"""
+        raise NotImplementedError
+    
+    def save_local_file(self, local_path: str, filename: str, user_email: str = None, file_type: str = 'mesh') -> str:
+        """Upload a local file to storage"""
+        raise NotImplementedError
 
 
 class LocalStorage(StorageBackend):
@@ -89,8 +97,50 @@ class LocalStorage(StorageBackend):
         return Path(filepath).exists()
     
     def get_file_url(self, filepath: str, expires_in: int = 3600) -> str:
-        # For local storage, return the file path
+        """
+        For local storage, returns the file path.
+        
+        NOTE: Browsers cannot access file:// URLs for security reasons.
+        In development, use a Flask route to serve files instead:
+            @app.route('/files/<path:filename>')
+            def serve_file(filename):
+                return send_from_directory(UPLOAD_FOLDER, filename)
+        """
         return filepath
+    
+    def download_to_local(self, remote_path: str, local_path: str) -> str:
+        """
+        Pass-through for local storage - file is already local.
+        Just copies to the target location if different, or returns as-is.
+        """
+        import shutil
+        
+        remote_path = str(remote_path)
+        local_path = str(local_path)
+        
+        # If same path, nothing to do
+        if Path(remote_path).resolve() == Path(local_path).resolve():
+            return local_path
+        
+        # Copy to target location
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(remote_path, local_path)
+        return local_path
+    
+    def save_local_file(self, local_path: str, filename: str, user_email: str = None, file_type: str = 'mesh') -> str:
+        """
+        For local storage, just copy/move the file to the storage directory.
+        """
+        import shutil
+        
+        dest_path = self.base_path / filename
+        
+        # If same path, nothing to do
+        if Path(local_path).resolve() == dest_path.resolve():
+            return str(dest_path)
+        
+        shutil.copy2(local_path, dest_path)
+        return str(dest_path)
 
 
 class S3Storage(StorageBackend):

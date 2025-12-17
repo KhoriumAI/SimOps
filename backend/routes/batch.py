@@ -49,7 +49,7 @@ def create_batch():
     {
         "name": "Optional batch name",
         "mesh_independence": true/false,
-        "mesh_strategy": "Tet (Fast)",
+        "mesh_strategy": "Tet (Fast)",  # Uses HXT algorithm (tet_delaunay_optimized) - fast single-pass
         "curvature_adaptive": true
     }
     
@@ -399,6 +399,12 @@ def start_batch(batch_id):
                     print(f"[BATCH] Found {total_jobs} pending jobs", flush=True)
                     storage = get_storage()
                     
+                    # Process jobs SEQUENTIALLY using HXT (tet_delaunay_optimized)
+                    # This is faster than parallel internal strategy search because:
+                    # 1. HXT is already parallelized internally by Gmsh
+                    # 2. Avoids memory overhead of multiple strategy workers
+                    # 3. Sequential processing = predictable resource usage
+                    # 4. Each job gets full CPU for Gmsh's internal parallelization
                     for job_idx, job in enumerate(jobs):
                         # Check if batch was cancelled
                         db.session.refresh(batch)

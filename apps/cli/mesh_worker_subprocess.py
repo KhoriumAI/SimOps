@@ -851,18 +851,19 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
 
 def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
-    Fast single-pass Tet Delaunay mesh using HXT algorithm.
+    Fast single-pass Tet Delaunay mesh using HXT algorithm (tet_delaunay_optimized).
     
-    Skips exhaustive strategy search - just runs HXT Delaunay directly.
-    Much faster for batch processing where you want quick results.
+    This is the recommended strategy for batch processing:
+    - Skips exhaustive strategy search (no parallel worker spawning)
+    - Uses Gmsh's HXT algorithm (Algorithm3D=10) which is internally parallelized
+    - Sequential job execution = predictable memory usage
+    - Each job gets full CPU resources for Gmsh's internal parallelization
     
-    Uses Gmsh's parallel HXT algorithm (Algorithm3D=10) which is:
-    - Very fast (parallelized)
-    - Robust (handles most geometries)
-    - Good quality (suitable for most simulations)
+    Algorithm: Frontal-Delaunay 2D (6) + HXT 3D (10)
+    Optimization: Standard (no slow Netgen)
     """
     try:
-        print("[FAST-TET] Starting Fast Tet Delaunay pipeline...", flush=True)
+        print("[HXT] Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
         start_time = time.time()
         
         # Determine output path - include quality preset and unique ID to avoid overwrites
@@ -879,19 +880,19 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("General.Verbosity", 2)
         
         # Load CAD file
-        print(f"[FAST-TET] Loading CAD: {cad_file}", flush=True)
+        print(f"[HXT] Loading CAD: {cad_file}", flush=True)
         gmsh.model.occ.importShapes(cad_file)
         gmsh.model.occ.synchronize()
         
         # Get bounding box for sizing
         xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
         diagonal = ((xmax - xmin)**2 + (ymax - ymin)**2 + (zmax - zmin)**2)**0.5
-        print(f"[FAST-TET] Model diagonal: {diagonal:.4f}", flush=True)
+        print(f"[HXT] Model diagonal: {diagonal:.4f}", flush=True)
         
         # Calculate mesh sizes
         # Use quality_params if provided, otherwise auto-calculate
         quality_preset = quality_params.get('quality_preset', 'medium') if quality_params else 'medium'
-        print(f"[FAST-TET] Quality preset: {quality_preset}", flush=True)
+        print(f"[HXT] Quality preset: {quality_preset}", flush=True)
         
         if quality_params:
             max_size = quality_params.get('max_size_mm', diagonal / 15.0)
@@ -906,7 +907,7 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         
         # Scale sizes relative to model diagonal for better consistency
         # For coarse/medium/fine, this ensures different densities
-        print(f"[FAST-TET] Mesh sizes: min={min_size:.4f}, max={max_size:.4f}, target_elements={target_elements}", flush=True)
+        print(f"[HXT] Mesh sizes: min={min_size:.4f}, max={max_size:.4f}, target_elements={target_elements}", flush=True)
         
         # Set global mesh sizes
         gmsh.option.setNumber("Mesh.MeshSizeMin", min_size)
@@ -925,11 +926,11 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
         
         # Generate mesh
-        print("[FAST-TET] Generating 3D mesh...", flush=True)
+        print("[HXT] Generating 3D mesh...", flush=True)
         mesh_start = time.time()
         gmsh.model.mesh.generate(3)
         mesh_time = time.time() - mesh_start
-        print(f"[FAST-TET] Mesh generation: {mesh_time:.2f}s", flush=True)
+        print(f"[HXT] Mesh generation: {mesh_time:.2f}s", flush=True)
         
         # Count elements
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -939,14 +940,14 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         elem_types, elem_tags, _ = gmsh.model.mesh.getElements(3)
         num_elements = sum(len(tags) for tags in elem_tags)
         
-        print(f"[FAST-TET] Elements: {num_elements}, Nodes: {num_nodes}", flush=True)
+        print(f"[HXT] Elements: {num_elements}, Nodes: {num_nodes}", flush=True)
         
         # Extract quality metrics using Gmsh's built-in functions
         quality_metrics = {}
         per_element_quality = {}
         
         try:
-            print("[FAST-TET] Computing quality metrics...", flush=True)
+            print("[HXT] Computing quality metrics...", flush=True)
             
             # Get all tet element tags
             tet_tags = []
@@ -999,18 +1000,18 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                 for i, tag in enumerate(tet_tags):
                     per_element_quality[str(tag)] = float(sicn_values[i])
                 
-                print(f"[FAST-TET] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
-                print(f"[FAST-TET] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
+                print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
+                print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
                 
         except Exception as qe:
-            print(f"[FAST-TET] Warning: Could not compute quality: {qe}", flush=True)
+            print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
         
         # Write output
         gmsh.write(output_file)
         gmsh.finalize()
         
         total_time = time.time() - start_time
-        print(f"[FAST-TET] SUCCESS! Total time: {total_time:.2f}s", flush=True)
+        print(f"[HXT] SUCCESS! Total time: {total_time:.2f}s", flush=True)
         
         return {
             'success': True,
