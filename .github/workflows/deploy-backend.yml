@@ -38,6 +38,9 @@ jobs:
             # Install/update dependencies
             pip install -r backend/requirements.txt
             
+            # Kill any running processes on port 5000
+            sudo fuser -k 5000/tcp 2>/dev/null || true
+            
             # Restart the application
             sudo systemctl restart gunicorn || sudo systemctl start gunicorn
             
