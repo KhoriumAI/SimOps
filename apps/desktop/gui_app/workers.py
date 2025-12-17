@@ -16,6 +16,15 @@ from pathlib import Path
 from multiprocessing import cpu_count
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
+# API Contract for type-safe communication
+try:
+    # Import from project root
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from core.api_contract import MeshJobRequest, MeshJobResponse, JobStatus
+    CONTRACT_AVAILABLE = True
+except ImportError:
+    CONTRACT_AVAILABLE = False
+
 
 class WorkerSignals(QObject):
     """Signals for mesh worker thread"""

@@ -212,7 +212,7 @@ castellatedMeshControls
     {{
         {stl_filename}
         {{
-            level (2 3); // Refinement level (min max)
+            level (1 1); // Refinement level (min max) - Level 1 splits 2x -> Matches target cell size
         }}
     }}
 
@@ -362,41 +362,72 @@ SIMPLE
     (case_dir / "system" / "fvSolution").write_text(fv_solution)
 
 
-def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
-    """Run snappyHexMesh pipeline via WSL."""
-    case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
-    
-    # Chain commands: if one fails, print its log and exit
-    # We use parentheses to group the "try or print log" logic
-    # SKIPPING surfaceFeatureExtract (implicit snapping)
-    cmd_str = (
-        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; '
-        f'cd "{case_dir_wsl}" && '
-        f'(blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
-        f'(snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1))'
-    )
-    
-    cmd = ['wsl', 'bash', '-c', cmd_str]
-    
-    if verbose:
-        print("[OpenFOAM] Running snappyHexMesh pipeline (Implicit Feature Snapping)...")
+def run_env_cmd(case_dir_wsl: str, command: str, verbose: bool = True) -> bool:
+    """Run a command in the OpenFOAM WSL environment."""
+    source_cmd = 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null'
+    full_cmd = f'{source_cmd}; cd "{case_dir_wsl}" && {command}'
     
     try:
-        # Increase timeout for snappy (can be slow)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        # Run with explicit structure
+        proc = subprocess.run(
+            ['wsl', 'bash', '-c', full_cmd],
+            capture_output=True, text=True, timeout=900
+        )
         
-        if result.returncode != 0:
-            print(f"[OpenFOAM] ERROR: Pipeline failed.")
-            print(f"Stdout/Stderr capture:\n{result.stdout}\n{result.stderr}")
+        if proc.returncode != 0:
+            if verbose:
+                print(f"[OpenFOAM] ERROR: Command failed: {command}", flush=True)
+                print(f"Stdout:\n{proc.stdout}", flush=True)
+                print(f"Stderr:\n{proc.stderr}", flush=True)
             return False
             
         return True
     except subprocess.TimeoutExpired:
-        print("[OpenFOAM] ERROR: snappyHexMesh timed out")
+        if verbose:
+            print(f"[OpenFOAM] ERROR: Command timed out: {command}", flush=True)
         return False
     except Exception as e:
-        print(f"[OpenFOAM] ERROR: {e}")
+        if verbose:
+            print(f"[OpenFOAM] ERROR executing {command}: {e}", flush=True)
         return False
+
+def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
+    """Run snappyHexMesh pipeline via WSL."""
+    case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
+    
+    if verbose:
+        print("[OpenFOAM] Starting snappyHexMesh pipeline...", flush=True)
+    
+    # 1. blockMesh
+    if verbose:
+        print("[OpenFOAM] Running blockMesh...", flush=True)
+    
+    # We redirect to log file but also check return code
+    cmd_block = 'blockMesh > log.blockMesh 2>&1'
+    if not run_env_cmd(case_dir_wsl, cmd_block, verbose):
+        # Print log if failed
+        log = case_dir / "log.blockMesh"
+        if log.exists() and verbose:
+            print(f"[OpenFOAM] blockMesh Log:\n{log.read_text()}", flush=True)
+        return False
+        
+    if verbose:
+        print("[OpenFOAM] blockMesh complete.", flush=True)
+        print("[OpenFOAM] Running snappyHexMesh (this may take minutes)...", flush=True)
+        
+    # 2. snappyHexMesh
+    cmd_snappy = 'snappyHexMesh -overwrite > log.snappy 2>&1'
+    if not run_env_cmd(case_dir_wsl, cmd_snappy, verbose):
+         # Print log if failed
+        log = case_dir / "log.snappy"
+        if log.exists() and verbose:
+             print(f"[OpenFOAM] snappyHexMesh Log:\n{log.read_text()}", flush=True)
+        return False
+        
+    if verbose:
+        print("[OpenFOAM] snappyHexMesh complete.", flush=True)
+        
+    return True
 
 
 
@@ -469,8 +500,8 @@ def generate_openfoam_hex_mesh(
     Generate hex-dominant mesh using OpenFOAM (cfMesh or snappyHexMesh).
     """
     if verbose:
-        print(f"[OpenFOAM] Generating hex mesh for: {stl_path}")
-        print(f"[OpenFOAM] Target cell size: {cell_size} mm")
+        print(f"[OpenFOAM] Generating hex mesh for: {stl_path}", flush=True)
+        print(f"[OpenFOAM] Target cell size: {cell_size} mm", flush=True)
     
     # Check prerequisites
     if platform.system() == 'Windows':

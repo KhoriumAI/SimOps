@@ -1176,14 +1176,15 @@ class BaseMeshGenerator(ABC):
                 gmsh.model.setPhysicalName(3, p_tag, "INTERNAL_VOLUME")
             self.log_message(f"Created Physical Volume (Tag {p_tag})")
 
-        # 2. Physical Surfaces (The Boundaries)
+        # 2. Physical Surfaces - ONE GROUP PER CAD SURFACE
+        # This preserves original CAD face boundaries for accurate zone selection
         surfaces = gmsh.model.getEntities(2)
-        if surfaces:
-            p_tag = gmsh.model.addPhysicalGroup(2, [s[1] for s in surfaces])
+        for i, (dim, tag) in enumerate(surfaces):
+            p_tag = gmsh.model.addPhysicalGroup(2, [tag])
             if mode == "CFD":
-                gmsh.model.setPhysicalName(2, p_tag, "WALL_BOUNDARIES")
+                gmsh.model.setPhysicalName(2, p_tag, f"WALL_{tag}")
             else:  # FEA
-                gmsh.model.setPhysicalName(2, p_tag, "SURFACE_BOUNDARIES")
-            self.log_message(f"Created Physical Surface (Tag {p_tag})")
+                gmsh.model.setPhysicalName(2, p_tag, f"SURFACE_{tag}")
+            self.log_message(f"Created Physical Surface {tag} (Tag {p_tag})")
 
 

@@ -18,14 +18,15 @@ from typing import Dict, Optional
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QSizePolicy, QWidget, QSlider, QSpinBox,
-    QPushButton, QCheckBox, QComboBox
+    QPushButton, QCheckBox, QComboBox, QShortcut
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont, QColor, QKeySequence
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from .interactor import CustomInteractorStyle
 from .utils import hsl_to_rgb
+from core.zone_manager import FluentZoneManager
 
 
 class HQMeshWorker(QThread):
@@ -147,6 +148,8 @@ class VTK3DViewer(QFrame):
     
     # Signal to request application exit
     exit_requested = pyqtSignal()
+    # Signal when selection changes (count of selected faces)
+    selection_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -155,6 +158,11 @@ class VTK3DViewer(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Initialize Zone Manager
+        self.zone_manager = FluentZoneManager()
+        self.vtk_cell_to_face_id = [] # List mapping VTK cell ID -> Face ID
+        self.face_id_to_vtk_cell = {} # Dict mapping Face ID -> VTK cell ID
 
         self.vtk_widget = QVTKRenderWindowInteractor(self)
         layout.addWidget(self.vtk_widget)
@@ -162,6 +170,10 @@ class VTK3DViewer(QFrame):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.95, 0.95, 0.97)
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+
+        # Shortcut to exit fullscreen
+        self.esc_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self.esc_shortcut.activated.connect(self.exit_fullscreen)
 
         # Add ambient lighting to prevent pitch-black shadows
         # This ensures all areas have a minimum illumination level
@@ -2326,6 +2338,293 @@ except Exception as e:
             import traceback
             traceback.print_exc()
 
+    def _init_zone_actors(self):
+        """Initialize actors for zone highlighting and selection"""
+        # 1. Selection Actor (Orange Overlay)
+        self.selected_faces_actor = vtk.vtkActor()
+        mapper = vtk.vtkPolyDataMapper()
+        self.selected_faces_actor.SetMapper(mapper)
+        
+        prop = self.selected_faces_actor.GetProperty()
+        prop.SetColor(0.0, 0.3, 1.0) # Bright Blue
+        prop.SetOpacity(1.0)
+        prop.SetLighting(False)
+        prop.EdgeVisibilityOn()
+        prop.SetEdgeColor(0.0, 0.0, 0.5) # Dark blue edges
+        prop.SetLineWidth(3)
+        
+        # Use 3D offset approach: render slightly "in front"
+        mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(-2.0, -200)
+        
+        self.renderer.AddActor(self.selected_faces_actor)
+        self.selected_faces_actor.VisibilityOff()
+
+        # 2. Highlight Actor (Yellow Hover)
+        self.highlight_actor = vtk.vtkActor()
+        self.highlighted_mapper = vtk.vtkPolyDataMapper()
+        self.highlight_actor.SetMapper(self.highlighted_mapper)
+        
+        h_prop = self.highlight_actor.GetProperty()
+        h_prop.SetColor(0.0, 0.8, 1.0) # Cyan
+        h_prop.SetOpacity(1.0)
+        h_prop.SetLighting(False)
+        h_prop.EdgeVisibilityOn()
+        h_prop.SetEdgeColor(0.0, 0.5, 1.0) # Blue edges
+        h_prop.SetLineWidth(3)
+        
+        self.highlighted_mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        self.highlighted_mapper.SetResolveCoincidentTopologyPolygonOffsetParameters(-2.0, -200)
+        
+        self.renderer.AddActor(self.highlight_actor)
+        self.highlight_actor.VisibilityOff()
+
+    def initialize_zone_manager(self):
+        """
+        Called after mesh is loaded. 
+        Populates zone manager with data and builds cell ID map.
+        """
+        print("[VTKViewer] Initializing Zone Manager...")
+        if not self.current_mesh_elements: 
+            print("[VTKViewer] Cancelled: No mesh elements found")
+            return
+            
+        try:
+            points_dict = self.current_mesh_nodes or {}
+            elements = self.current_mesh_elements
+            
+            # Populate node map if missing (fallback)
+            if not self.current_node_map:
+                self.current_node_map = {nid: i for i, nid in enumerate(points_dict.keys())}
+                
+            num_points = len(points_dict)
+            if num_points == 0:
+                print("[VTKViewer] Cancelled: No points found")
+                return
+                
+            points_array = np.zeros((num_points, 3))
+            
+            for nid, idx in self.current_node_map.items():
+                if nid in points_dict:
+                    points_array[idx] = points_dict[nid]
+                
+            mapped_elements = []
+            
+            # Setup ID map for clicking
+            self.vtk_cell_to_face_id = []
+            
+            for elem in elements:
+                etype = elem.get('type')
+                if etype in ('triangle', 'quadrilateral'):
+                    # Map node IDs to indices
+                    raw_nodes = elem.get('nodes')
+                    mapped_nodes = [self.current_node_map.get(n, 0) for n in raw_nodes] # Safe get
+                    
+                    e_copy = elem.copy()
+                    e_copy['nodes'] = mapped_nodes
+                    mapped_elements.append(e_copy)
+                    
+                    self.vtk_cell_to_face_id.append(elem['id'])
+
+            # FALLBACK: If no explicit surface elements, use extracted surface mapping
+            if not self.vtk_cell_to_face_id and hasattr(self, 'surface_to_volume_map') and self.surface_to_volume_map:
+                print(f"[VTKViewer] Using surface->volume mapping for {len(self.surface_to_volume_map)} cells")
+                
+                # CRITICAL FIX: Use the EXTRACTED SURFACE's points, not original mesh nodes!
+                # The extracted surface has its own point numbering (0 to N-1)
+                if self.current_poly_data and self.current_poly_data.GetPoints():
+                    vtk_points = self.current_poly_data.GetPoints()
+                    num_surface_points = vtk_points.GetNumberOfPoints()
+                    print(f"[VTKViewer] Extracted surface has {num_surface_points} points")
+                    
+                    # Build points array from extracted surface
+                    points_array = np.zeros((num_surface_points, 3))
+                    for i in range(num_surface_points):
+                        points_array[i] = vtk_points.GetPoint(i)
+                
+                sorted_keys = sorted(self.surface_to_volume_map.keys())
+                for i in sorted_keys:
+                    vol_elem_id = int(self.surface_to_volume_map[i]) 
+                    self.vtk_cell_to_face_id.append(vol_elem_id)
+                    
+                    # Construct pseudo-element for ZoneManager adjacency
+                    if self.current_poly_data:
+                        cell = self.current_poly_data.GetCell(i)
+                        npts = cell.GetNumberOfPoints()
+                        face_nodes = []
+                        for j in range(npts):
+                            pid = cell.GetPointId(j) 
+                            face_nodes.append(pid)
+                        
+                        mapped_elements.append({
+                            'id': vol_elem_id,
+                            'type': 'triangle' if npts == 3 else 'quadrilateral',
+                            'nodes': face_nodes
+                        })
+            
+            if not self.vtk_cell_to_face_id:
+                print("[VTKViewer] WARNING: No surface faces mapped for selection!")
+                    
+            # Initialize Reverse Map (One-to-Many)
+            self.face_id_to_vtk_cell = {}
+            for idx, fid in enumerate(self.vtk_cell_to_face_id):
+                if fid not in self.face_id_to_vtk_cell:
+                    self.face_id_to_vtk_cell[fid] = []
+                self.face_id_to_vtk_cell[fid].append(idx)
+                    
+            # Initialize Manager with correct points
+            self.zone_manager.set_mesh_data(points_array, mapped_elements)
+            print(f"[VTKViewer] Zone Manager Initialized: {len(self.vtk_cell_to_face_id)} faces mapped.")
+            
+        except Exception as e:
+            print(f"[VTKViewer] Error initializing zone manager: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_scene_click(self, x, y, shift=False, ctrl=False):
+        """Handle scene click from interactor"""
+        picker = vtk.vtkCellPicker()
+        picker.SetTolerance(0.005)
+        
+        if picker.Pick(x, y, 0, self.renderer):
+            cell_id = picker.GetCellId()
+            if cell_id >= 0 and cell_id < len(self.vtk_cell_to_face_id):
+                face_id = self.vtk_cell_to_face_id[cell_id]
+                print(f"[VTK] Clicked Cell {cell_id} -> Face {face_id}")
+                self.zone_manager.select_face(face_id, toggle=ctrl, multi_select=shift)
+                self.update_zone_visuals()
+        else:
+            # Clicked background -> Deselect all
+            if not shift and not ctrl:
+                self.zone_manager.selected_faces.clear()
+                self.update_zone_visuals()
+
+    def on_scene_hover(self, x, y):
+        """Handle mouse hover to highlight faces"""
+        if not self.current_poly_data:
+            return
+
+        # Auto-initialize if needed
+        if not self.vtk_cell_to_face_id and self.current_mesh_elements:
+             # print("[VTKViewer] Lazy-initializing Zone Manager on hover...")
+             self.initialize_zone_manager()
+             
+        picker = vtk.vtkCellPicker()
+        picker.SetTolerance(0.005)
+        
+        if picker.Pick(x, y, 0, self.renderer):
+            cell_id = picker.GetCellId()
+            if cell_id >= 0:
+                if cell_id < len(self.vtk_cell_to_face_id):
+                    face_id = self.vtk_cell_to_face_id[cell_id]
+                    # print(f"[DEBUG] Hover: Cell {cell_id} -> Face {face_id}")
+                    
+                    if face_id != self.zone_manager.highlighted_face:
+                        self.zone_manager.highlighted_face = face_id
+                        self.update_highlight_visuals()
+                else:
+                    # print(f"[DEBUG] Cell ID {cell_id} out of range")
+                    pass
+        else:
+            if self.zone_manager.highlighted_face is not None:
+                self.zone_manager.highlighted_face = None
+                self.update_highlight_visuals()
+
+    def update_zone_visuals(self):
+        """Update selected faces overlay"""
+        selected_ids = self.zone_manager.selected_faces
+        
+        # Emit signal for UI update
+        self.selection_changed.emit(len(selected_ids))
+        
+        if not selected_ids:
+            self.selected_faces_actor.VisibilityOff()
+            self.vtk_widget.GetRenderWindow().Render()
+            return
+            
+        # Build Selection PolyData
+        selection_list = vtk.vtkIdTypeArray()
+        selection_list.SetNumberOfComponents(1)
+        
+        # Hack: rebuild on init if needed (ensure it's the new dict-of-lists format)
+        if not hasattr(self, 'face_id_to_vtk_cell') or not isinstance(self.face_id_to_vtk_cell, dict):
+             self.initialize_zone_manager()
+            
+        count = 0
+        for fid in selected_ids:
+            if fid in self.face_id_to_vtk_cell:
+                # Add ALL cells belonging to this face ID
+                for cid in self.face_id_to_vtk_cell[fid]:
+                    selection_list.InsertNextValue(cid)
+                    count += 1
+        
+        if count == 0:
+            return
+
+        # Extract Cells
+        selection_node = vtk.vtkSelectionNode()
+        selection_node.SetFieldType(vtk.vtkSelectionNode.CELL)
+        selection_node.SetContentType(vtk.vtkSelectionNode.INDICES)
+        selection_node.SetSelectionList(selection_list)
+        
+        selection = vtk.vtkSelection()
+        selection.AddNode(selection_node)
+        
+        extract_selection = vtk.vtkExtractSelection()
+        extract_selection.SetInputData(0, self.current_poly_data)
+        extract_selection.SetInputData(1, selection)
+        extract_selection.Update()
+        
+        selected_poly = vtk.vtkGeometryFilter()
+        selected_poly.SetInputData(extract_selection.GetOutput())
+        selected_poly.Update()
+        
+        self.selected_faces_actor.GetMapper().SetInputData(selected_poly.GetOutput())
+        self.selected_faces_actor.VisibilityOn()
+        self.selected_faces_actor.GetProperty().SetColor(1.0, 0.5, 0.0)
+        self.selected_faces_actor.GetProperty().SetOpacity(0.8)
+        self.selected_faces_actor.GetProperty().SetLighting(False)
+        
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def update_highlight_visuals(self):
+        """Update hover highlight"""
+        fid = self.zone_manager.highlighted_face
+        if fid is None or not hasattr(self, 'face_id_to_vtk_cell'):
+            self.highlight_actor.VisibilityOff()
+            self.vtk_widget.GetRenderWindow().Render()
+            return
+            
+        cids = self.face_id_to_vtk_cell.get(fid)
+        if not cids:
+            return
+
+        selection_list = vtk.vtkIdTypeArray()
+        selection_list.SetNumberOfComponents(1)
+        for cid in cids:
+            selection_list.InsertNextValue(cid)
+        
+        selection_node = vtk.vtkSelectionNode()
+        selection_node.SetFieldType(vtk.vtkSelectionNode.CELL)
+        selection_node.SetContentType(vtk.vtkSelectionNode.INDICES)
+        selection_node.SetSelectionList(selection_list)
+        
+        selection = vtk.vtkSelection()
+        selection.AddNode(selection_node)
+        
+        extract_selection = vtk.vtkExtractSelection()
+        extract_selection.SetInputData(0, self.current_poly_data)
+        extract_selection.SetInputData(1, selection)
+        extract_selection.Update()
+        
+        selected_poly = vtk.vtkGeometryFilter()
+        selected_poly.SetInputData(extract_selection.GetOutput())
+        selected_poly.Update()
+        
+        self.highlight_actor.GetMapper().SetInputData(selected_poly.GetOutput())
+        self.highlight_actor.VisibilityOn()
+        self.vtk_widget.GetRenderWindow().Render()
+
     def load_mesh_file(self, filepath: str, result: dict = None):
         """Load and display mesh file with optional result dict for counts"""
         print(f"\n{'='*70}")
@@ -2354,8 +2653,9 @@ except Exception as e:
             self.current_mesh_file = filepath
             
             print(f"[DEBUG] Parsing .msh file...")
-            nodes, elements = self._parse_msh_file(filepath)
-            print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements")
+            nodes, elements, physical_groups = self._parse_msh_file(filepath)
+            self.current_physical_groups = physical_groups  # Store for zone selection
+            print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements, {len(physical_groups)} physical groups")
 
             # Try to load surface quality data if not provided
             if not (result and result.get('per_element_quality')):
@@ -2864,6 +3164,18 @@ except Exception as e:
             self.info_label.setText(info_text)
             self.info_label.adjustSize()  # Force label to resize to fit content
             print(f"[DEBUG] Info label updated: {info_text}")
+            print(f"[DEBUG] Info label updated: {info_text}")
+            
+            # Initialize Zone Manager with new mesh data
+            if hasattr(self, 'initialize_zone_manager'):
+                print("[VTKViewer] Calling initialize_zone_manager() from load_mesh_file...")
+                self.initialize_zone_manager()
+            else:
+                print("[VTKViewer ERROR] initialize_zone_manager method missing!")
+            
+            # Re-initialize zone actors (restores them after clear_view)
+            self._init_zone_actors()
+
             print(f"[DEBUG] load_mesh_file completed successfully!")
             return "SUCCESS"
 
@@ -2952,6 +3264,8 @@ except Exception as e:
     def _parse_msh_file(self, filepath: str):
         nodes = {}
         elements = []
+        physical_groups = {}  # {tag: {'dim': int, 'name': str}}
+        entity_physical = {}  # {(dim, entity_tag): physical_tag} for Gmsh 4.1
 
         with open(filepath, 'r') as f:
             lines = [l.strip() for l in f.readlines()]
@@ -2978,6 +3292,31 @@ except Exception as e:
         i = 0
         while i < len(lines):
             line = lines[i]
+
+            # Parse $PhysicalNames section
+            if line == "$PhysicalNames":
+                i += 1
+                if i >= len(lines): break
+                try:
+                    num_physical = int(lines[i])
+                    i += 1
+                    for _ in range(num_physical):
+                        if i >= len(lines): break
+                        parts = lines[i].split()
+                        if len(parts) >= 3:
+                            dim = int(parts[0])
+                            tag = int(parts[1])
+                            # Name is in quotes, extract it
+                            name = parts[2].strip('"')
+                            physical_groups[tag] = {'dim': dim, 'name': name}
+                        i += 1
+                    if i < len(lines) and lines[i] == "$EndPhysicalNames":
+                        i += 1
+                    print(f"[MESH_LOADER] Parsed {len(physical_groups)} physical groups")
+                    continue
+                except ValueError:
+                    i += 1
+                    continue
 
             if line == "$Nodes":
                 i += 1
@@ -3067,6 +3406,8 @@ except Exception as e:
                     while i < len(lines) and lines[i] != "$EndElements":
                         parts = lines[i].split()
                         if len(parts) == 4:
+                            entity_dim = int(parts[0])  # Dimension of entity (2=surface, 3=volume)
+                            entity_tag = int(parts[1])  # Entity tag (maps to CAD surface)
                             element_type = int(parts[2])
                             num_elements_in_block = int(parts[3])
                             i += 1
@@ -3085,7 +3426,11 @@ except Exception as e:
                                     if len(data) >= 1 + expected_nodes:
                                         eid = int(data[0])
                                         enodes = [int(x) for x in data[1:1+expected_nodes]]
-                                        elements.append({"id": eid, "type": type_str, "nodes": enodes})
+                                        elem_dict = {"id": eid, "type": type_str, "nodes": enodes}
+                                        # Store entity_tag for CAD-level zone selection
+                                        if entity_dim == 2:  # Surface elements only
+                                            elem_dict['entity_tag'] = entity_tag
+                                        elements.append(elem_dict)
                                     i += 1
                             else:
                                 i += num_elements_in_block
@@ -3098,7 +3443,7 @@ except Exception as e:
             else:
                 i += 1
 
-        return nodes, elements
+        return nodes, elements, physical_groups
     def load_component_visualization(self, result: Dict):
         """Load and display CoACD components with PyVista"""
         from pathlib import Path

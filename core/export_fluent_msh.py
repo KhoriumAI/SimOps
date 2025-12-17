@@ -227,6 +227,7 @@ def export_fluent_msh(
     tets: np.ndarray,
     boundary_classifier: Optional[Callable[[np.ndarray], str]] = None,
     boundary_zone_types: Optional[Dict[str, str]] = None,
+    zone_assignments: Optional[Dict[Tuple[int, ...], str]] = None,
     cell_zone_name: str = "fluid",
     verbose: bool = True
 ) -> bool:
@@ -238,9 +239,8 @@ def export_fluent_msh(
         points: (N, 3) array of node coordinates
         tets: (M, 4) array of tetrahedral connectivity (0-indexed)
         boundary_classifier: Function that takes face centroid (3,) and returns zone name string
-                            If None, uses default_boundary_classifier
         boundary_zone_types: Dict mapping zone name -> boundary type (e.g., "inlet" -> "velocity-inlet")
-                            If None, all boundaries default to "wall"
+        zone_assignments: Dict mapping sorted node tuple -> zone name. Overrides classifier.
         cell_zone_name: Name for the cell zone (default: "fluid")
         verbose: Print progress messages
     
@@ -286,9 +286,15 @@ def export_fluent_msh(
     # Group boundary faces by zone
     zone_faces = {}
     for nodes, owner_cell, key in boundary_faces_raw:
-        face_pts = points[nodes]
-        centroid = np.mean(face_pts, axis=0)
-        zone_name = boundary_classifier(centroid)
+        # Check explicit assignment first
+        sorted_nodes = tuple(sorted(nodes))
+        if zone_assignments and sorted_nodes in zone_assignments:
+            zone_name = zone_assignments[sorted_nodes]
+        else:
+            # Fallback to classifier logic
+            face_pts = points[nodes]
+            centroid = np.mean(face_pts, axis=0)
+            zone_name = boundary_classifier(centroid)
         
         if zone_name not in zone_faces:
             zone_faces[zone_name] = []

@@ -483,6 +483,13 @@ except Exception as e:
             self.viewer.info_label.setText("".join(info_lines))
             self.viewer.info_label.adjustSize()
             
+            # Initialize Zone Manager with new mesh data
+            if hasattr(self.viewer, 'initialize_zone_manager'):
+                print("[MESH_LOADER] Calling initialize_zone_manager() from loader...")
+                self.viewer.initialize_zone_manager()
+            else:
+                print("[MESH_LOADER ERROR] Viewer missing initialize_zone_manager method")
+            
             return "SUCCESS"
 
         except Exception as e:

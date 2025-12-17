@@ -41,6 +41,7 @@ from strategies.conformal_hex_glue import generate_conformal_hex_mesh
 from strategies.polyhedral_strategy import PolyhedralMeshGenerator
 from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
 from core.config import Config
+from core.api_contract import MeshJobRequest, MeshJobResponse
 import tempfile
 
 # Pre-load GPU mesher if available (this is the main delay)
@@ -61,11 +62,11 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
     
     Converts STEP to STL first, then runs cfMesh.
     """
-    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
+    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...", flush=True)
     
     try:
         # Step 1: Convert STEP to STL
-        print("[OpenFOAM-HEX] Step 1: Converting STEP to STL...")
+        print("[OpenFOAM-HEX] Step 1: Converting STEP to STL...", flush=True)
         discretizer = HighFidelityDiscretization(verbose=True)
         temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
         
@@ -80,7 +81,9 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
             return {'success': False, 'message': 'Failed to convert STEP to STL'}
         
         # Step 2: Get cell size from quality params
-        cell_size = quality_params.get('max_element_size', 2.0) if quality_params else 2.0
+        cell_size = 2.0
+        if quality_params:
+            cell_size = float(quality_params.get('max_size_mm', quality_params.get('max_element_size', 2.0)))
         
         # Step 3: Determine output path
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -89,13 +92,13 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
         
         # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
+        print("[OpenFOAM-HEX] Step 2: Running cfMesh...", flush=True)
         result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
         
         if not result['success']:
             return result
         
-        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
+        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}", flush=True)
         
         return result
         
@@ -1151,14 +1154,21 @@ if __name__ == "__main__":
     cad_file = args.cad_file
     output_dir = args.output_dir
     
-    # Load quality params
+    # Load quality params (backward compatible dict format)
     quality_params = {}
     if args.config_file and os.path.exists(args.config_file):
         try:
             with open(args.config_file, 'r') as f:
                 quality_params = json.load(f)
+            # AIRLOCK: Validate input through contract (non-breaking)
+            try:
+                request = MeshJobRequest.from_dict({'cad_file': cad_file, **quality_params})
+                print(f"[CONTRACT] Validated request: strategy={request.mesh_strategy}", flush=True)
+            except Exception as e:
+                print(f"[CONTRACT] Warning: Request validation failed: {e}", flush=True)
         except Exception as e:
-            print(json.dumps({'success': False, 'error': f'Failed to load config file: {e}'}))
+            response = MeshJobResponse.failure(f'Failed to load config file: {e}')
+            print(response.to_json())
             sys.exit(1)
     elif args.quality_params:
         try:
@@ -1169,5 +1179,10 @@ if __name__ == "__main__":
     # Generate mesh
     result = generate_mesh(cad_file, output_dir, quality_params)
 
-    # Output result as JSON
-    print(json.dumps(result))
+    # AIRLOCK: Wrap result in contract type (non-breaking, still outputs same JSON)
+    try:
+        response = MeshJobResponse.from_dict(result)
+        print(response.to_json())
+    except Exception:
+        # Fallback to raw dict if contract parsing fails
+        print(json.dumps(result))
