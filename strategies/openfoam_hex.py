@@ -18,9 +18,10 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
-from typing import Dict, Optional
+import re
 import platform
+from pathlib import Path
+from typing import Dict, Optional, List, Tuple
 
 
 def check_wsl_available() -> bool:
@@ -391,6 +392,61 @@ def run_env_cmd(case_dir_wsl: str, command: str, verbose: bool = True) -> bool:
             print(f"[OpenFOAM] ERROR executing {command}: {e}", flush=True)
         return False
 
+def run_env_cmd_stream(case_dir_wsl: str, command: str, verbose: bool = True) -> bool:
+    """Run a command in the OpenFOAM WSL environment and stream output for progress tracking."""
+    source_cmd = 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null'
+    full_cmd = f'{source_cmd}; cd "{case_dir_wsl}" && {command}'
+    
+    try:
+        if verbose:
+            print(f"[OpenFOAM] Executing (stream): {command}", flush=True)
+            
+        process = subprocess.Popen(
+            ['wsl', 'bash', '-c', full_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        points_to_snap = 0
+        last_pct = -5
+        
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Log to console so mesh_worker_subprocess captures it
+            print(line, flush=True)
+            
+            # Parse for snapping progress
+            # Pattern: "Number of points to snap: 12345"
+            if "Number of points to snap:" in line:
+                match = re.search(r'Number of points to snap:\s*(\d+)', line)
+                if match:
+                    points_to_snap = int(match.group(1))
+                    if verbose:
+                        print(f"[OpenFOAM] Found {points_to_snap} points to snap.", flush=True)
+            
+            # Pattern: "Points snapped: 1234"
+            elif "Points snapped:" in line and points_to_snap > 0:
+                match = re.search(r'Points snapped:\s*(\d+)', line)
+                if match:
+                    current = int(match.group(1))
+                    pct = int((current / points_to_snap) * 100)
+                    # Output in 5% increments or final
+                    if pct >= last_pct + 5 or current == points_to_snap:
+                        print(f"[OpenFOAM] Snapping progress: {pct}% ({current}/{points_to_snap} points)", flush=True)
+                        last_pct = pct
+        
+        process.wait()
+        return process.returncode == 0
+    except Exception as e:
+        if verbose:
+            print(f"[OpenFOAM] ERROR streaming {command}: {e}", flush=True)
+        return False
+
 def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
     """Run snappyHexMesh pipeline via WSL."""
     case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
@@ -416,12 +472,13 @@ def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
         print("[OpenFOAM] Running snappyHexMesh (this may take minutes)...", flush=True)
         
     # 2. snappyHexMesh
-    cmd_snappy = 'snappyHexMesh -overwrite > log.snappy 2>&1'
-    if not run_env_cmd(case_dir_wsl, cmd_snappy, verbose):
-         # Print log if failed
+    # Instead of redirecting to file only, we use our streaming runner to get progress logs
+    cmd_snappy = 'snappyHexMesh -overwrite 2>&1 | tee log.snappy'
+    if not run_env_cmd_stream(case_dir_wsl, cmd_snappy, verbose):
+         # Print log if failed (though streaming already printed much of it)
         log = case_dir / "log.snappy"
         if log.exists() and verbose:
-             print(f"[OpenFOAM] snappyHexMesh Log:\n{log.read_text()}", flush=True)
+             print(f"[OpenFOAM] snappyHexMesh Log (Last lines):\n{log.read_text().splitlines()[-20:]}", flush=True)
         return False
         
     if verbose:

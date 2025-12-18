@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from .quality import MeshQualityAnalyzer
 from .config import Config, get_default_config
 from .ai_integration import AIRecommendationEngine, MeshRecommendation
+from .cad_cleaning import apply_cad_cleaning
 
 
 class MeshGenerationResult:
@@ -426,6 +427,11 @@ class BaseMeshGenerator(ABC):
             # Get geometry info and analyze features
             self._extract_geometry_info()
             self._analyze_geometry_features()
+
+            # CAD Cleaning Pathway (Airlocked)
+            # Detects sharp edges and applies size fields to prevent false curvature refinement
+            max_size = getattr(self.config.mesh_params, 'max_size_mm', None)
+            apply_cad_cleaning(self.config, max_size_mm=max_size, log_fn=self.log_message)
 
             # Apply geometry-aware mesh settings
             self._apply_geometry_aware_settings()
@@ -904,8 +910,12 @@ class BaseMeshGenerator(ABC):
     def analyze_current_mesh(self) -> Optional[Dict]:
         """Analyze current mesh quality using Gmsh's built-in metrics"""
         self.log_message("Analyzing mesh quality...")
+        start_time = time.time()
 
         metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True)
+        
+        duration = time.time() - start_time
+        self.log_message(f"[OK] Quality analysis completed in {duration:.3f}s")
 
         if metrics:
             # Log basic statistics

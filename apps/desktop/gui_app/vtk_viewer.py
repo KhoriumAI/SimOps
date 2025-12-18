@@ -2410,8 +2410,9 @@ except Exception as e:
                 
             mapped_elements = []
             
-            # Setup ID map for clicking
+            # Setup ID maps for clicking
             self.vtk_cell_to_face_id = []
+            self.vtk_cell_to_entity_tag = []  # CAD surface tag for each cell
             
             for elem in elements:
                 etype = elem.get('type')
@@ -2425,6 +2426,8 @@ except Exception as e:
                     mapped_elements.append(e_copy)
                     
                     self.vtk_cell_to_face_id.append(elem['id'])
+                    # Store CAD entity_tag if available
+                    self.vtk_cell_to_entity_tag.append(elem.get('entity_tag', None))
 
             # FALLBACK: If no explicit surface elements, use extracted surface mapping
             if not self.vtk_cell_to_face_id and hasattr(self, 'surface_to_volume_map') and self.surface_to_volume_map:
@@ -2490,7 +2493,27 @@ except Exception as e:
             cell_id = picker.GetCellId()
             if cell_id >= 0 and cell_id < len(self.vtk_cell_to_face_id):
                 face_id = self.vtk_cell_to_face_id[cell_id]
-                print(f"[VTK] Clicked Cell {cell_id} -> Face {face_id}")
+                
+                # Look up CAD surface tag if available
+                entity_tag = None
+                if hasattr(self, 'vtk_cell_to_entity_tag') and cell_id < len(self.vtk_cell_to_entity_tag):
+                    entity_tag = self.vtk_cell_to_entity_tag[cell_id]
+                
+                # Look up CAD surface name from physical groups
+                cad_name = None
+                if entity_tag and hasattr(self, 'current_physical_groups'):
+                    for pg_tag, pg_data in self.current_physical_groups.items():
+                        if pg_data.get('name', '').endswith(f'_{entity_tag}'):
+                            cad_name = pg_data.get('name')
+                            break
+                
+                if cad_name:
+                    print(f"[VTK] Clicked Cell {cell_id} -> Face {face_id} (CAD Surface: {cad_name})")
+                elif entity_tag:
+                    print(f"[VTK] Clicked Cell {cell_id} -> Face {face_id} (Entity {entity_tag})")
+                else:
+                    print(f"[VTK] Clicked Cell {cell_id} -> Face {face_id}")
+                
                 self.zone_manager.select_face(face_id, toggle=ctrl, multi_select=shift)
                 self.update_zone_visuals()
         else:

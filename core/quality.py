@@ -127,15 +127,17 @@ class MeshQualityAnalyzer:
 
             quality_metrics['min_angle'] = quality_metrics['gmsh_min_angle']
 
-            # SECONDARY: Calculate our custom metrics for comparison/debugging
-            quality_metrics['custom_skewness'] = self.calculate_skewness_metrics()
-            quality_metrics['custom_aspect_ratio'] = self.calculate_aspect_ratio_metrics()
-            quality_metrics['custom_min_angle'] = self.calculate_min_angle_metrics()
-            quality_metrics['edge_length_ratio'] = self.calculate_edge_length_ratio_metrics()
+            # SECONDARY: Redundant custom metrics are disabled for performance
+            # These are extremely slow on large meshes as they run in pure Python.
+            quality_metrics['custom_skewness'] = None
+            quality_metrics['custom_aspect_ratio'] = None
+            quality_metrics['custom_min_angle'] = None
+            quality_metrics['edge_length_ratio'] = None
 
             if include_advanced_metrics:
-                quality_metrics['jacobian'] = self.calculate_jacobian_metrics()
-                quality_metrics['volume_ratio'] = self.calculate_volume_ratio_metrics()
+                # Disable advanced metrics for now as they also lack progress reporting
+                quality_metrics['jacobian'] = None
+                quality_metrics['volume_ratio'] = None
 
             return quality_metrics
 
@@ -163,9 +165,19 @@ class MeshQualityAnalyzer:
             all_sicn = []
             for elem_type, tags in zip(element_types, element_tags):
                 if elem_type in self.TET_ELEMENT_TYPES:
-                    # Get SICN for these elements
-                    qualities = gmsh.model.mesh.getElementQualities(tags, "minSICN")
-                    all_sicn.extend(qualities)
+                    # Chunked calculation for progress reporting
+                    num_tags = len(tags)
+                    chunk_size = 100000
+                    for i in range(0, num_tags, chunk_size):
+                        chunk = tags[i:min(i + chunk_size, num_tags)]
+                        qualities = gmsh.model.mesh.getElementQualities(chunk, "minSICN")
+                        all_sicn.extend(qualities)
+                        
+                        # Throttled progress reporting (every 5%)
+                        step_size = max(1, num_tags // 20)
+                        if (i + len(chunk)) % step_size < chunk_size or (i + len(chunk)) == num_tags:
+                            pct = int(((i + len(chunk)) / num_tags) * 100)
+                            print(f"[Quality] SICN progress: {pct}% ({len(all_sicn):,} / {num_tags:,} tets)", flush=True)
 
             if all_sicn:
                 return {
@@ -199,8 +211,19 @@ class MeshQualityAnalyzer:
             all_gamma = []
             for elem_type, tags in zip(element_types, element_tags):
                 if elem_type in self.TET_ELEMENT_TYPES:
-                    qualities = gmsh.model.mesh.getElementQualities(tags, "gamma")
-                    all_gamma.extend(qualities)
+                    # Chunked calculation for progress reporting
+                    num_tags = len(tags)
+                    chunk_size = 100000
+                    for i in range(0, num_tags, chunk_size):
+                        chunk = tags[i:min(i + chunk_size, num_tags)]
+                        qualities = gmsh.model.mesh.getElementQualities(chunk, "gamma")
+                        all_gamma.extend(qualities)
+                        
+                        # Throttled progress reporting (every 10%)
+                        step_size = max(1, num_tags // 10)
+                        if (i + len(chunk)) % step_size < chunk_size or (i + len(chunk)) == num_tags:
+                            pct = int(((i + len(chunk)) / num_tags) * 100)
+                            print(f"[Quality] Gamma progress: {pct}% ({len(all_gamma):,} / {num_tags:,} tets)", flush=True)
 
             if all_gamma:
                 return {
@@ -232,9 +255,19 @@ class MeshQualityAnalyzer:
             all_angles = []
             for elem_type, tags in zip(element_types, element_tags):
                 if elem_type in self.TET_ELEMENT_TYPES:
-                    # Gmsh's angleShape returns minimum dihedral angle
-                    qualities = gmsh.model.mesh.getElementQualities(tags, "angleShape")
-                    all_angles.extend(qualities)
+                    # Chunked calculation for progress reporting
+                    num_tags = len(tags)
+                    chunk_size = 100000
+                    for i in range(0, num_tags, chunk_size):
+                        chunk = tags[i:min(i + chunk_size, num_tags)]
+                        qualities = gmsh.model.mesh.getElementQualities(chunk, "angleShape")
+                        all_angles.extend(qualities)
+                        
+                        # Throttled progress reporting (every 10%)
+                        step_size = max(1, num_tags // 10)
+                        if (i + len(chunk)) % step_size < chunk_size or (i + len(chunk)) == num_tags:
+                            pct = int(((i + len(chunk)) / num_tags) * 100)
+                            print(f"[Quality] Angle progress: {pct}% ({len(all_angles):,} / {num_tags:,} tets)", flush=True)
 
             if all_angles:
                 return {

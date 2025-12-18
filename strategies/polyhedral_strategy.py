@@ -320,7 +320,10 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
             
             polyhedral_elements = []
             
-            for p_node_idx in range(len(nodes)):
+            total_nodes = len(nodes)
+            progress_step = max(1, total_nodes // 20)  # 5% increments
+            
+            for p_node_idx in range(total_nodes):
                 cell_faces = []
                 
                 # Check if this is a surface node
@@ -350,13 +353,17 @@ class PolyhedralMeshGenerator(BaseMeshGenerator):
                                 f_idx = edge_to_boundary_face[edge]
                                 cell_faces.append(dual_faces[f_idx])
 
-                
                 if len(cell_faces) >= 4:
                     polyhedral_elements.append({
                         'id': p_node_idx + 1,
                         'type': 'polyhedron',
                         'faces': cell_faces
                     })
+                
+                # Log progress in 5% increments
+                if (p_node_idx + 1) % progress_step == 0 or p_node_idx == total_nodes - 1:
+                    pct = int(((p_node_idx + 1) / total_nodes) * 100)
+                    self.log_message(f"[Polyhedral] Conversion progress: {pct}% ({p_node_idx + 1}/{total_nodes} nodes processed)")
             
             self.log_message(f"Constructed {len(polyhedral_elements)} polyhedral cells")
             

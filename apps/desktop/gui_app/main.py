@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QProgressBar, QGroupBox,
     QSplitter, QFileDialog, QFrame, QScrollArea, QGridLayout,
     QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox,
-    QListWidget, QListWidgetItem, QAbstractItemView, QLineEdit
+    QListWidget, QListWidgetItem, QAbstractItemView, QLineEdit, QDialog
 )
 from qtrangeslider import QRangeSlider
 from PyQt5.QtCore import Qt, QTimer, QObject, QEvent
@@ -42,6 +42,17 @@ class NoScrollSlider(QSlider):
     """QSlider that ignores wheel events to prevent accidental changes"""
     def wheelEvent(self, event):
         event.ignore()
+
+class FullscreenConsole(QTextEdit):
+    """QTextEdit that handles double-click to toggle fullscreen"""
+    def __init__(self, parent=None, double_click_callback=None):
+        super().__init__(parent)
+        self.double_click_callback = double_click_callback
+
+    def mouseDoubleClickEvent(self, event):
+        if self.double_click_callback:
+            self.double_click_callback()
+        super().mouseDoubleClickEvent(event)
 
 # Paintbrush imports
 PAINTBRUSH_AVAILABLE = False
@@ -1562,10 +1573,28 @@ class ModernMeshGenGUI(QMainWindow):
         """)
         copy_console_btn.clicked.connect(self.copy_console_to_clipboard)
         console_header_layout.addStretch()
+
+        self.fullscreen_btn = QPushButton("📺 Fullscreen")
+        self.fullscreen_btn.setMaximumWidth(120)
+        self.fullscreen_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0d6efd;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #0b5ed7; }
+        """)
+        self.fullscreen_btn.clicked.connect(self.toggle_console_fullscreen)
+        console_header_layout.addWidget(self.fullscreen_btn)
+        
         console_header_layout.addWidget(copy_console_btn)
         console_layout.addLayout(console_header_layout)
 
-        self.console = QTextEdit()
+        self.console = FullscreenConsole(double_click_callback=self.toggle_console_fullscreen)
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(200)
         self.console.setStyleSheet("""
@@ -1583,6 +1612,57 @@ class ModernMeshGenGUI(QMainWindow):
 
         self.right_panel_layout.addWidget(console_frame)
         return panel
+
+    def toggle_console_fullscreen(self):
+        """Toggle a large fullscreen-like dialog for the console"""
+        if hasattr(self, 'console_dialog') and self.console_dialog.isVisible():
+            self.console_dialog.close()
+            return
+
+        # Create dialog if it doesn't exist
+        if not hasattr(self, 'console_dialog'):
+            self.console_dialog = QDialog(self)
+            self.console_dialog.setWindowTitle("Khorium Console - Fullscreen View")
+            self.console_dialog.resize(1000, 700)
+            
+            layout = QVBoxLayout(self.console_dialog)
+            
+            # Header with Close button
+            header_layout = QHBoxLayout()
+            title = QLabel("Console Output")
+            title.setFont(QFont("Arial", 14, QFont.Bold))
+            header_layout.addWidget(title)
+            
+            header_layout.addStretch()
+            
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.setStyleSheet("""
+                QPushButton { background-color: #dc3545; color: white; border: none; padding: 8px; border-radius: 4px; font-weight: bold; }
+                QPushButton:hover { background-color: #bb2d3b; }
+            """)
+            close_btn.clicked.connect(self.console_dialog.close)
+            header_layout.addWidget(close_btn)
+            layout.addLayout(header_layout)
+            
+            # The large console view (clones current console)
+            self.large_console = QTextEdit()
+            self.large_console.setReadOnly(True)
+            self.large_console.setStyleSheet(self.console.styleSheet() + "font-size: 12px;") # Slightly larger font
+            layout.addWidget(self.large_console)
+            
+            # Sync existing content
+            self.large_console.setPlainText(self.console.toPlainText())
+            self.large_console.verticalScrollBar().setValue(
+                self.large_console.verticalScrollBar().maximum()
+            )
+
+        # Show the dialog
+        self.large_console.setPlainText(self.console.toPlainText())
+        self.large_console.moveCursor(self.large_console.textCursor().End)
+        self.console_dialog.show()
+        self.console_dialog.raise_()
+        self.console_dialog.activateWindow()
 
     # ===================================
     # SETTINGS PERSISTENCE
@@ -2493,6 +2573,11 @@ class ModernMeshGenGUI(QMainWindow):
     def add_log(self, message: str):
         self.console.append(message)
         self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+        
+        # Sync with fullscreen view if active
+        if hasattr(self, 'large_console'):
+            self.large_console.append(message)
+            self.large_console.verticalScrollBar().setValue(self.large_console.verticalScrollBar().maximum())
 
     def copy_console_to_clipboard(self):
         """Copy all console text to clipboard"""
@@ -2776,7 +2861,9 @@ class ModernMeshGenGUI(QMainWindow):
                 
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat(f"100% - Complete! (Total: {time_str})")
-                self.add_log(f"[DEBUG] *** PROGRESS BAR SET TO 100% COMPLETE at {time.time():.3f} ***")
+                
+                elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
+                self.add_log(f"[DEBUG] *** PROGRESS BAR SET TO 100% COMPLETE at {time.time():.3f} (elapsed: {elapsed:.1f}s) ***")
             else:
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat("100% - Complete!")
@@ -2861,9 +2948,14 @@ class ModernMeshGenGUI(QMainWindow):
                 else:
                     # Standard mesh loading
                     self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
-                    self.add_log(f"[DEBUG] *** STARTING MESH LOAD at {time.time():.3f} ***")
+                    
+                    elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
+                    self.load_start_time = time.time()
+                    self.add_log(f"[DEBUG] *** STARTING MESH LOAD at {time.time():.3f} (Generation took: {elapsed:.1f}s) ***")
                     load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
-                    self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} ***")
+                    
+                    load_duration = time.time() - self.load_start_time
+                    self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} (Load took: {load_duration:.3f}s) ***")
                     self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
             
             # Check for hex testing component visualization

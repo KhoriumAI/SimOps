@@ -32,16 +32,60 @@ print("[INIT] Loading Gmsh...", flush=True)
 import gmsh
 
 print("[INIT] Loading strategies...", flush=True)
-from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
-from strategies.hex_dominant_strategy import (
-    HighFidelityDiscretization,
-    ConvexDecomposition
-)
-from strategies.conformal_hex_glue import generate_conformal_hex_mesh
-from strategies.polyhedral_strategy import PolyhedralMeshGenerator
-from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
-from core.config import Config
-from core.api_contract import MeshJobRequest, MeshJobResponse
+import traceback
+
+try:
+    from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
+    print("[INIT] ExhaustiveMeshGenerator loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load ExhaustiveMeshGenerator: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from strategies.hex_dominant_strategy import (
+        HighFidelityDiscretization,
+        ConvexDecomposition
+    )
+    print("[INIT] Hex dominant strategies loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load Hex dominant strategies: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from strategies.conformal_hex_glue import generate_conformal_hex_mesh
+    print("[INIT] Conformal hex glue loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load conformal hex glue: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from strategies.polyhedral_strategy import PolyhedralMeshGenerator
+    print("[INIT] PolyhedralMeshGenerator loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load PolyhedralMeshGenerator: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
+    print("[INIT] OpenFOAM strategies loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load OpenFOAM strategies: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from core.config import Config
+    from core.api_contract import MeshJobRequest, MeshJobResponse
+    print("[INIT] Core contract modules loaded.", flush=True)
+except Exception as e:
+    print(f"[ERROR] Failed to load core contract modules: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+
 import tempfile
 
 # Pre-load GPU mesher if available (this is the main delay)

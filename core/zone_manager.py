@@ -30,8 +30,13 @@ class FluentZoneManager:
         self.face_normals: Dict[int, np.ndarray] = {}   # face_id -> normal vector
         self.face_centers: Dict[int, np.ndarray] = {}   # face_id -> centroid
         
+        # Curvature-based segmentation (fallback when CAD info unavailable)
+        self.vertex_curvature: Dict[int, float] = {}    # vertex_idx -> mean curvature
+        self.break_edges: Set[Tuple[int, int]] = set()  # edges that are curvature breaks
+        
         # Constants
         self.spill_angle_threshold = 15.0 # degrees - Tight threshold to prevent spill across sharp edges
+        self.curvature_break_threshold = 0.5  # Curvature difference threshold for break edges
 
     def set_mesh_data(self, points: np.ndarray, elements: List[Dict]):
         """
@@ -100,6 +105,85 @@ class FluentZoneManager:
                         self.face_adjacency[f1].append(f2)
                         
         print(f"[ZoneManager] Processed {count} surface faces. Adjacency graph built.")
+        
+        # Compute curvature for fallback segmentation
+        self._compute_vertex_curvature(points, elements)
+        self._detect_break_edges()
+        print(f"[ZoneManager] Curvature computed. {len(self.break_edges)} break edges detected.")
+
+    def _compute_vertex_curvature(self, points: np.ndarray, elements: List[Dict]):
+        """
+        Compute approximate mean curvature at each vertex using angle defect method.
+        This is simpler and more robust than cotangent weights for triangle meshes.
+        """
+        self.vertex_curvature.clear()
+        
+        # Track which vertices belong to which faces
+        vertex_faces = collections.defaultdict(list)
+        for elem in elements:
+            if elem.get('type') not in ('triangle', 'quadrilateral'):
+                continue
+            nodes = elem.get('nodes', [])
+            for n in nodes:
+                vertex_faces[n].append(elem.get('id'))
+        
+        # Compute curvature at each vertex
+        for vertex_idx, face_ids in vertex_faces.items():
+            if len(face_ids) < 2:
+                continue
+                
+            # Get normals of all faces touching this vertex
+            normals = []
+            for fid in face_ids:
+                if fid in self.face_normals:
+                    normals.append(self.face_normals[fid])
+            
+            if len(normals) < 2:
+                continue
+            
+            # Curvature approximation: variance of normal directions
+            # High variance = high curvature
+            normals = np.array(normals)
+            mean_normal = np.mean(normals, axis=0)
+            norm = np.linalg.norm(mean_normal)
+            if norm > 1e-9:
+                mean_normal /= norm
+            
+            # Variance from mean (1 - dot product)
+            deviations = [1.0 - abs(np.dot(n, mean_normal)) for n in normals]
+            curvature = np.mean(deviations)
+            self.vertex_curvature[vertex_idx] = curvature
+    
+    def _detect_break_edges(self):
+        """
+        Detect edges with high curvature difference - these are natural face boundaries.
+        """
+        self.break_edges.clear()
+        
+        if not self.vertex_curvature:
+            return
+        
+        # Check all edges in adjacency
+        checked = set()
+        for fid1, neighbors in self.face_adjacency.items():
+            for fid2 in neighbors:
+                edge_key = tuple(sorted([fid1, fid2]))
+                if edge_key in checked:
+                    continue
+                checked.add(edge_key)
+                
+                # Get curvature at shared vertices (simplified: use face centers)
+                c1 = self.face_normals.get(fid1)
+                c2 = self.face_normals.get(fid2)
+                
+                if c1 is not None and c2 is not None:
+                    # Dihedral angle as curvature proxy
+                    dot = np.dot(c1, c2)
+                    angle_diff = np.arccos(np.clip(dot, -1, 1))
+                    
+                    # If angle > threshold, it's a break edge
+                    if angle_diff > self.curvature_break_threshold:
+                        self.break_edges.add(edge_key)
 
     def select_face(self, face_id: int, toggle: bool = False, multi_select: bool = False):
         """
@@ -154,6 +238,10 @@ class FluentZoneManager:
         # Add start face to selection immediately
         self.selected_faces.add(start_face_id)
         
+        # Store starting normal to prevent drift around curved surfaces
+        start_normal = self.face_normals[start_face_id]
+        start_threshold_cos = np.cos(np.radians(30.0))  # 30° from starting normal
+        
         threshold_cos = np.cos(np.radians(self.spill_angle_threshold))
         
         while queue:
@@ -169,9 +257,22 @@ class FluentZoneManager:
                 
             for neighbor_id in neighbors:
                 if neighbor_id not in visited:
-                    # Check angle
+                    # Check if this edge is a curvature break (high dihedral angle)
+                    edge_key = tuple(sorted([current_id, neighbor_id]))
+                    if edge_key in self.break_edges:
+                        # Don't cross break edges - this is a face boundary
+                        continue
+                    
+                    # Check angle threshold
                     neighbor_normal = self.face_normals.get(neighbor_id)
                     if neighbor_normal is None:
+                        continue
+                    
+                    # ANTI-DRIFT CHECK: Compare neighbor to STARTING normal
+                    # This prevents gradual drift around curved surfaces
+                    dot_to_start = np.dot(start_normal, neighbor_normal)
+                    if dot_to_start < start_threshold_cos:
+                        # Too far from starting orientation - don't include
                         continue
                         
                     dot_prod = np.dot(current_normal, neighbor_normal)
