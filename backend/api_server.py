@@ -41,12 +41,29 @@ def create_app(config_class=None):
     Path(app.config['UPLOAD_FOLDER']).mkdir(parents=True, exist_ok=True)
     Path(app.config['OUTPUT_FOLDER']).mkdir(parents=True, exist_ok=True)
 
-    # Initialize CORS
+    # Initialize CORS - Allow frontend origins
+    cors_origins = [
+        "http://localhost:5173",
+        "http://localhost:3000", 
+        "http://127.0.0.1:5173",
+        "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com",
+        os.environ.get("CORS_ORIGINS", "").strip()
+    ]
+    # Filter out empty strings
+    cors_origins = [o for o in cors_origins if o]
+    
     CORS(app, resources={
         r"/api/*": {
-            "origins": ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+            "origins": cors_origins,
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True
+        },
+        r"/auth/*": {
+            "origins": cors_origins,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True
         }
     })
     
