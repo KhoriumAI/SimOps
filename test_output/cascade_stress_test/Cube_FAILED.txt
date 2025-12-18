@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Cube
+Input:    C:\Users\Owner\Downloads\Simops\cad_files\Cube.step
+Time:     2025-12-18T10:03:50.013826
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 86.60 mm
+  Min Dim:  50.00 mm
+  Est. Wall:16.67 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_CFD: 'node_coords'
+- MedFi_Robust: 'node_coords'
+- LowFi_Emergency: Mesh generation failed: float division by zero
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

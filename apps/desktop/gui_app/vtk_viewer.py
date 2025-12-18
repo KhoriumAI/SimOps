@@ -2648,8 +2648,93 @@ except Exception as e:
         self.highlight_actor.VisibilityOn()
         self.vtk_widget.GetRenderWindow().Render()
 
+    def _load_vtk_file(self, filepath: str, result: dict = None):
+        """Load legacy VTK file with thermal results"""
+        print(f"[DEBUG] Loading VTK file: {filepath}")
+        try:
+            import pyvista as pv
+            import vtk
+            
+            # Load with PyVista
+            mesh = pv.read(filepath)
+            self.current_volumetric_grid = mesh
+            
+            # Check for Temperature scalar
+            scalar_name = None
+            if "Temperature" in mesh.point_data:
+                scalar_name = "Temperature"
+            elif "Temperature" in mesh.cell_data:
+                scalar_name = "Temperature"
+                
+            # Extract surface for display
+            poly_data = mesh.extract_surface()
+            self.current_poly_data = poly_data
+            
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(poly_data)
+            
+            if scalar_name:
+                print(f"[DEBUG] Found thermal data: {scalar_name}")
+                rng = mesh.get_data_range(scalar_name)
+                print(f"[DEBUG] Temperature range: {rng}")
+                
+                mapper.SetScalarRange(rng)
+                if scalar_name in mesh.point_data:
+                    mapper.SetScalarModeToUsePointData()
+                else:
+                    mapper.SetScalarModeToUseCellData()
+                mapper.ScalarVisibilityOn()
+                
+                # Thermal Colormap (Turbo/Jet-like)
+                lut = vtk.vtkLookupTable()
+                lut.SetNumberOfTableValues(256)
+                lut.Build()
+                
+                ctf = vtk.vtkColorTransferFunction()
+                ctf.AddRGBPoint(rng[0], 0.0, 0.0, 1.0)      # Blue
+                ctf.AddRGBPoint(rng[0] + 0.35*(rng[1]-rng[0]), 0.0, 1.0, 1.0) # Cyan
+                ctf.AddRGBPoint(rng[0] + 0.65*(rng[1]-rng[0]), 1.0, 1.0, 0.0) # Yellow
+                ctf.AddRGBPoint(rng[1], 1.0, 0.0, 0.0)      # Red
+                
+                for i in range(256):
+                    val = rng[0] + (i / 255.0) * (rng[1] - rng[0])
+                    rgb = ctf.GetColor(val)
+                    lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], 1.0)
+                
+                mapper.SetLookupTable(lut)
+                
+                # Scalar Bar
+                scalar_bar = vtk.vtkScalarBarActor()
+                scalar_bar.SetLookupTable(lut)
+                scalar_bar.SetTitle("Temperature (K)")
+                scalar_bar.SetNumberOfLabels(5)
+                scalar_bar.SetPosition(0.85, 0.1)
+                scalar_bar.SetWidth(0.12)
+                scalar_bar.SetHeight(0.8)
+                self.renderer.AddActor2D(scalar_bar)
+                
+            self.current_actor = vtk.vtkActor()
+            self.current_actor.SetMapper(mapper)
+            self.renderer.AddActor(self.current_actor)
+            
+            self.renderer.ResetCamera()
+            self.vtk_widget.GetRenderWindow().Render()
+            self.info_label.setText(f"Loaded: {Path(filepath).name}")
+            return "SUCCESS"
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to load VTK: {e}")
+            import traceback
+            traceback.print_exc()
+            self.info_label.setText("Error loading VTK")
+            return "FAILED"
+
     def load_mesh_file(self, filepath: str, result: dict = None):
         """Load and display mesh file with optional result dict for counts"""
+        # Dispatch to VTK loader if legacy VTK file
+        if Path(filepath).suffix.lower() == '.vtk':
+            return self._load_vtk_file(filepath, result)
+
         print(f"\n{'='*70}")
         print(f"[DEBUG] load_mesh_file called:")
         print(f"  filepath: {filepath}")

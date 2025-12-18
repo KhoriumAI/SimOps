@@ -1,0 +1,4 @@
+Simulation Result for: test_input.step
+Timestamp: Thu Dec 18 14:18:44 2025
+Status: SUCCESS
+Computed Value: 42
