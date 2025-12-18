@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useMemo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, MousePointer2, Paintbrush, Scissors, BarChart3, CheckSquare, Square } from 'lucide-react'
+import { Box, MousePointer2, Paintbrush, Scissors, BarChart3, Loader2 } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
 
 function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
@@ -139,7 +139,7 @@ function GridWithAxes({ showAxes }) {
   )
 }
 
-export default function MeshViewer({ meshData, qualityMetrics, filename }) {
+export default function MeshViewer({ meshData, qualityMetrics, filename, isLoading, loadingProgress, loadingMessage }) {
   const [clipping, setClipping] = useState({
     enabled: false,
     x: false,
@@ -202,8 +202,8 @@ export default function MeshViewer({ meshData, qualityMetrics, filename }) {
       onClick={onClick}
       disabled={disabled}
       className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs transition-all ${active
-          ? 'bg-blue-600 text-white shadow-sm'
-          : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700 hover:text-white'
+        ? 'bg-blue-600 text-white shadow-sm'
+        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700 hover:text-white'
         } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
     >
       {Icon && <Icon className="w-3.5 h-3.5" />}
@@ -288,7 +288,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename }) {
 
       {/* Main 3D Viewport */}
       <div className="flex-1 relative bg-gradient-to-b from-gray-200 to-gray-300">
-        {!meshData ? (
+        {!meshData && !isLoading ? (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500">
             <div className="text-center">
               <Box className="w-16 h-16 mx-auto mb-4 opacity-20" />
@@ -297,29 +297,31 @@ export default function MeshViewer({ meshData, qualityMetrics, filename }) {
           </div>
         ) : (
           <>
-            <Canvas shadows gl={{ localClippingEnabled: true }}>
-              <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={50} />
-              <OrbitControls enableDamping dampingFactor={0.05} />
+            {meshData && (
+              <Canvas shadows gl={{ localClippingEnabled: true }}>
+                <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={50} />
+                <OrbitControls enableDamping dampingFactor={0.05} />
 
-              <ambientLight intensity={0.6} />
-              <directionalLight
-                position={[50, 50, 25]}
-                intensity={0.8}
-                castShadow
-                shadow-mapSize-width={2048}
-                shadow-mapSize-height={2048}
-              />
-              <directionalLight position={[-50, -50, -25]} intensity={0.4} />
+                <ambientLight intensity={0.6} />
+                <directionalLight
+                  position={[50, 50, 25]}
+                  intensity={0.8}
+                  castShadow
+                  shadow-mapSize-width={2048}
+                  shadow-mapSize-height={2048}
+                />
+                <directionalLight position={[-50, -50, -25]} intensity={0.4} />
 
-              <GridWithAxes showAxes={showAxes} />
+                <GridWithAxes showAxes={showAxes} />
 
-              <MeshObject
-                meshData={meshData}
-                clipping={clipping}
-                showQuality={showQuality}
-                showWireframe={showWireframe}
-              />
-            </Canvas>
+                <MeshObject
+                  meshData={meshData}
+                  clipping={clipping}
+                  showQuality={showQuality}
+                  showWireframe={showWireframe}
+                />
+              </Canvas>
+            )}
 
             {/* Overlays */}
 
@@ -420,6 +422,25 @@ export default function MeshViewer({ meshData, qualityMetrics, filename }) {
               </div>
             )}
           </>
+        )}
+
+        {/* Loading Overlay */}
+        {isLoading && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex flex-col items-center justify-center text-white">
+            <Loader2 className="w-12 h-12 animate-spin text-blue-500 mb-4" />
+            <h3 className="text-lg font-medium mb-1">{loadingMessage || 'Processing...'}</h3>
+            {loadingProgress !== undefined && (
+              <div className="w-64 space-y-2">
+                <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-300"
+                    style={{ width: `${loadingProgress}%` }}
+                  />
+                </div>
+                <div className="text-xs text-gray-400 text-right">{Math.round(loadingProgress)}%</div>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
