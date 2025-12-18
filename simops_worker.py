@@ -165,7 +165,7 @@ def generate_mesh_with_strategy(
     return str(output_file)
 
 
-def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str) -> Dict:
+def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, sim_config: Optional['SimulationConfig'] = None) -> Dict:
     """
     Run thermal solver with fallback chain:
     1. Try CalculiX (professional solver)
@@ -175,7 +175,26 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str) ->
     try:
         logger.info(f"Running Thermal Solver via CalculiX...")
         adapter = CalculiXAdapter()
-        result = adapter.run(Path(mesh_file), Path(output_dir), {})
+        
+        # Build Adapter Config from SimulationConfig
+        adapter_config = {}
+        if sim_config and hasattr(sim_config, 'physics'):
+             phy = sim_config.physics
+             # Map fields (Attribute access assuming dataclass/pydantic)
+             if hasattr(phy, 'thermal_conductivity'): adapter_config['thermal_conductivity'] = phy.thermal_conductivity
+             if hasattr(phy, 'heat_load_watts'): adapter_config['heat_source_temperature'] = phy.heat_load_watts # Mapping Load to Temp for MVP? Or separate? 
+             # Wait, heat_load_watts isn't temp. current adapter uses fixed temp.
+             # MVP: If heat_load_watts provided, assumes 800K for now or need logic?
+             # Let's check what 'phy' has. 
+             # Assuming standard fields: unit_scaling, convection_coeff, ambient_temperature
+             if hasattr(phy, 'unit_scaling'): adapter_config['unit_scaling'] = phy.unit_scaling
+             if hasattr(phy, 'convection_coeff'): adapter_config['convection_coeff'] = phy.convection_coeff
+             if hasattr(phy, 'ambient_temperature'): adapter_config['ambient_temperature'] = phy.ambient_temperature
+             if hasattr(phy, 'transient'): adapter_config['transient'] = phy.transient
+             if hasattr(phy, 'duration'): adapter_config['duration'] = phy.duration
+             if hasattr(phy, 'steps'): adapter_config['time_step'] = phy.duration / max(1, phy.steps)
+
+        result = adapter.run(Path(mesh_file), Path(output_dir), adapter_config)
         
         if 'elements' in result:
             result['num_elements'] = len(result['elements'])
@@ -494,7 +513,7 @@ def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
             )
             
             # Step 2: Run thermal solver
-            result = run_thermal_solver(mesh_file, output_path, strategy['name'])
+            result = run_thermal_solver(mesh_file, output_path, strategy['name'], sim_config)
             
             # Step 3: Generate report
             report_files = generate_report(job_name, output_path, result, strategy['name'])

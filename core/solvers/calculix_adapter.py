@@ -14,6 +14,7 @@ class CalculiXAdapter(ISolver):
     """
     Adapter for running thermal analysis using CalculiX (ccx).
     Generates .inp files from Gmsh mesh and parsing .frd results.
+    Supports: Steady State, Transient, Convection (*FILM), and Tet4/Tet10/Tri3/Tri6.
     """
     
     def __init__(self, ccx_binary: str = "ccx"):
@@ -38,8 +39,7 @@ class CalculiXAdapter(ISolver):
         
         logger.info(f"[CalculiX] Converting mesh {mesh_file.name} to INP...")
         
-        # Scale Factor (mm->m default=0.001 if not specified? No, default 1.0. User must config).
-        # Actually MVP Assumption: User inputs Meters or configures scaling.
+        # Scale Factor (mm->m default=1.0 unless configured)
         scale_factor = config.get("unit_scaling", 1.0)
         
         # 1. Convert Mesh and Generate INP
@@ -51,7 +51,6 @@ class CalculiXAdapter(ISolver):
         
         try:
             # ccx expects jobname without extension
-            # it reads jobname.inp and writes jobname.frd
             cwd = str(output_dir)
             
             # Check if ccx exists
@@ -97,7 +96,7 @@ class CalculiXAdapter(ISolver):
         
         return results
 
-    def _generate_inp(self, mesh_file: Path, inp_file: Path, config: Dict[str, Any]) -> Dict:
+    def _generate_inp(self, mesh_file: Path, inp_file: Path, config: Dict[str, Any], scale: float = 1.0) -> Dict:
         """
         Reads Gmsh file and writes CalculiX input deck.
         Returns dict with node_map (internal ID -> coords) for parsing later.
@@ -108,12 +107,9 @@ class CalculiXAdapter(ISolver):
         try:
             # Nodes
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-            node_coords = node_coords.reshape(-1, 3)
+            node_coords = node_coords.reshape(-1, 3) * scale
             
-            # CalculiX requires 1-based indexing sequence usually, but handles arbitrary tags if specified.
-            # We will just write *NODE using Gmsh tags directly.
-            
-            # Elements (Tet4 = C3D4, Tet10 = C3D10)
+            # Volume Elements (Tet4 = C3D4, Tet10 = C3D10)
             elem_types, elem_tags, elem_nodes = gmsh.model.mesh.getElements(dim=3)
             
             c3d4_elems = []
@@ -139,13 +135,24 @@ class CalculiXAdapter(ISolver):
             if not c3d4_elems and not c3d10_elems:
                 raise ValueError("No Tetrahedral elements found in mesh")
             
-            # Combine all for parsing/viz return (Warning: mixed types might break simple array return)
-            # For result parsing we just need nodes usually? 
-            # Actually run() returns 'elements' for VTK visualization.
-            # VTK visualization of Tet10 usually falls back to Tet4 or requires special handling.
-            # Simops currently expects Linear Tets for simple VTK writer.
-            # We will return ALL elements, but VTK writer might need update if we pass 10 nodes.
-            # For now, let's stack them.
+            # Skin Elements (Tri3=2, Tri6=9) for Convection (*FILM)
+            surf_types, surf_tags, surf_nodes = gmsh.model.mesh.getElements(dim=2)
+            tri3_elems = []
+            tri6_elems = []
+            
+            for i, etype in enumerate(surf_types):
+                 if etype == 2: # Tri3
+                     nodes = surf_nodes[i].reshape(-1, 3).astype(int)
+                     tags = surf_tags[i].astype(int)
+                     chunk = np.column_stack((tags, nodes))
+                     tri3_elems.append(chunk)
+                 elif etype == 9: # Tri6
+                     nodes = surf_nodes[i].reshape(-1, 6).astype(int)
+                     tags = surf_tags[i].astype(int)
+                     chunk = np.column_stack((tags, nodes))
+                     tri6_elems.append(chunk)
+            
+            # Combine all for parsing/viz return
             if c3d4_elems:
                 all_elems = np.vstack(c3d4_elems)
             elif c3d10_elems:
@@ -153,14 +160,14 @@ class CalculiXAdapter(ISolver):
             else:
                 all_elems = np.vstack(c3d4_elems + c3d10_elems)
             
-            # Identify Boundary Nodes
-            # Heuristic for MVP: Top 10% Z = Hot, Bottom 10% Z = Cold
+            # Identify Boundary Nodes (Legacy/Heuristic Support for Fixed Temp)
             z = node_coords[:, 2]
             z_min, z_max = np.min(z), np.max(z)
             z_rng = z_max - z_min
             
-            hot_mask = z > (z_max - 0.01 * z_rng)
-            cold_mask = z < (z_min + 0.01 * z_rng)
+            tol = config.get("bc_tolerance", 0.01)
+            hot_mask = z > (z_max - tol * z_rng)
+            cold_mask = z < (z_min + tol * z_rng)
             
             hot_tags = node_tags[hot_mask].astype(int)
             cold_tags = node_tags[cold_mask].astype(int)
@@ -175,14 +182,14 @@ class CalculiXAdapter(ISolver):
                 for tag, (x,y,z) in zip(node_tags, node_coords):
                     f.write(f"{int(tag)}, {x:.6f}, {y:.6f}, {z:.6f}\n")
                     
-                # Elements
+                # Volume Elements
                 if c3d4_elems:
-                    f.write("*ELEMENT, TYPE=C3D4, ELSET=Eall\n")
+                    f.write("*ELEMENT, TYPE=C3D4, ELSET=E_Vol\n")
                     for row in np.vstack(c3d4_elems):
                         f.write(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}\n")
                         
                 if c3d10_elems:
-                    f.write("*ELEMENT, TYPE=C3D10, ELSET=Eall\n")
+                    f.write("*ELEMENT, TYPE=C3D10, ELSET=E_Vol\n")
                     for row in np.vstack(c3d10_elems):
                          # ID, 1-10
                          f.write(f"{row[0]}")
@@ -190,40 +197,83 @@ class CalculiXAdapter(ISolver):
                              f.write(f", {n}")
                          f.write("\n")
 
+                # Skin Elements (S3/S6)
+                if tri3_elems:
+                    f.write("*ELEMENT, TYPE=S3, ELSET=E_Skin\n")
+                    for row in np.vstack(tri3_elems):
+                        f.write(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}\n")
+
+                if tri6_elems:
+                     f.write("*ELEMENT, TYPE=S6, ELSET=E_Skin\n")
+                     for row in np.vstack(tri6_elems):
+                         f.write(f"{row[0]}")
+                         for n in row[1:]:
+                             f.write(f", {n}")
+                         f.write("\n")
                     
-                # Material (Aluminum)
+                # Materials & Sections
                 k = config.get("thermal_conductivity", 150.0)
-                f.write("*MATERIAL, NAME=ALUMINUM\n")
+                rho = config.get("density", 2700.0)
+                cp = config.get("specific_heat", 900.0)
+                
+                f.write("*MATERIAL, NAME=Mat1\n")
                 f.write("*CONDUCTIVITY\n")
-                f.write(f"{k}\n")   # Configurable K
-                f.write("*SOLID SECTION, ELSET=Eall, MATERIAL=ALUMINUM\n")
+                f.write(f"{k}\n")
+                f.write("*DENSITY\n")
+                f.write(f"{rho}\n")
+                f.write("*SPECIFIC HEAT\n")
+                f.write(f"{cp}\n")
+                
+                f.write("*SOLID SECTION, ELSET=E_Vol, MATERIAL=Mat1\n")
+                
+                if tri3_elems or tri6_elems:
+                     # Dummy Shell Section for Skin (Thickness=0.001) to support FILM
+                     f.write("*SHELL SECTION, ELSET=E_Skin, MATERIAL=Mat1\n")
+                     f.write("0.001\n")
                 
                 # Step
                 f.write("*STEP\n")
-                f.write("*HEAT TRANSFER, STEADY STATE\n")
                 
-                # BCs
-                # Get temps from config or defaults
+                if config.get("transient", False):
+                     # Transient Analysis
+                     dt = config.get("time_step", 1.0)
+                     t_end = config.get("duration", 10.0)
+                     f.write("*HEAT TRANSFER, DIRECT\n")
+                     f.write(f"{dt}, {t_end}\n")
+                else:
+                     # Steady State
+                     f.write("*HEAT TRANSFER, STEADY STATE\n")
+                
+                # Boundary Conditions (Conduction)
+                f.write("*BOUNDARY\n")
+                # Legacy Support: Hot Top / Cold Bottom
                 t_hot = config.get("heat_source_temperature", 800.0)
                 t_cold = config.get("ambient_temperature", 300.0)
                 
-                f.write("*BOUNDARY\n")
-                # Temp usually DOF 11 in CalculiX heat transfer
-                for node in hot_tags:
-                    f.write(f"{node}, 11, 11, {t_hot}\n")
-                for node in cold_tags:
-                    f.write(f"{node}, 11, 11, {t_cold}\n")
+                for tag in hot_tags:
+                    f.write(f"{tag}, 11, 11, {t_hot}\n")
+                for tag in cold_tags:
+                    f.write(f"{tag}, 11, 11, {t_cold}\n")
                     
+                # Convection (*FILM)
+                # Apply to E_Skin faces
+                h = config.get("convection_coeff", 0.0)
+                T_inf = config.get("ambient_temperature", 293.0) 
+                
+                if h > 0 and (tri3_elems or tri6_elems):
+                     f.write("*FILM\n")
+                     # Apply to Face 1 (Top) of Shells
+                     f.write(f"E_Skin, F1, {T_inf}, {h}\n")
+
                 # Output
                 f.write("*NODE FILE\n")
-                f.write("NT\n") # Nodal Temperature
+                f.write("NT\n")
                 f.write("*END STEP\n")
                 
             return {
                 'node_map': dict(zip(node_tags, node_coords)),
                 'elements': all_elems[:, 1:] # Strip ID, keep nodes
             }
-            
         finally:
             gmsh.finalize()
             
@@ -234,11 +284,6 @@ class CalculiXAdapter(ISolver):
         """
         temperatures = {}
         
-        # Current logic: Minimal parsing to get the scalar field
-        # FRD format is block based.
-        # We look for '100CL' (Nodal values) block or similar.
-        # Simplified parser for MVP.
-        
         reading_temps = False
         
         with open(frd_file, 'r') as f:
@@ -247,7 +292,7 @@ class CalculiXAdapter(ISolver):
         for i, line in enumerate(lines):
             # Check for Temperature block
             # -4 is Nodal Results
-            # NT = Nodal Temperature, NDTEMP = Nodal Temperature (alt), P = Pressure (sometimes used for temperature in some contexts)
+            # NT, NDTEMP, P
             if line.startswith(" -4") and ("NT" in line or "NDTEMP" in line or "P" in line):
                 reading_temps = True
                 continue
@@ -256,13 +301,10 @@ class CalculiXAdapter(ISolver):
                 if line.startswith(" -3"): # End of block
                     break
                 
-                # Format: NodeID, Value
-                # -1 node_id value (sometimes formatting varies)
                 parts = line.split()
                 if len(parts) < 2: continue
                 
                 try:
-                    # FRD formatting is fixed width usually, but split works often
                     # -1 123 3.000E+02
                     if parts[0] == '-1':
                         nid = int(parts[1])
@@ -272,8 +314,6 @@ class CalculiXAdapter(ISolver):
                     pass
                     
         if not temperatures:
-            # Fallback for binary or different format?
-            # CCX default is usually ASCII.
             logger.warning("Could not parse temperatures from FRD.")
             
         # Convert to arrays matching node_map order
@@ -288,13 +328,14 @@ class CalculiXAdapter(ISolver):
         T_array = np.array(T_array)
         parsed_coords = np.array(parsed_coords)
         
+        # Calculate stats
+        t_min = float(np.min(T_array)) if len(T_array)>0 else 0.0
+        t_max = float(np.max(T_array)) if len(T_array)>0 else 0.0
+        
         return {
             'temperature': T_array,
             'node_coords': parsed_coords,
-            'min_temp': float(np.min(T_array)) if len(T_array)>0 else 0.0,
-            'max_temp': float(np.max(T_array)) if len(T_array)>0 else 0.0,
-            # Pass elements? If needed for VTK. We have to re-read or cache them.
-            # For now, let result parsing handle that if needed, or re-read mesh.
-            # The worker expects 'elements' for VTK export.
+            'min_temp': t_min,
+            'max_temp': t_max,
             'elements': elements 
         }
