@@ -42,15 +42,32 @@ def create_app(config_class=None):
     Path(app.config['OUTPUT_FOLDER']).mkdir(parents=True, exist_ok=True)
 
     # Initialize CORS - Allow frontend origins
-    cors_origins = [
+    default_origins = [
         "http://localhost:5173",
         "http://localhost:3000", 
         "http://127.0.0.1:5173",
-        "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com",
-        os.environ.get("CORS_ORIGINS", "").strip()
+        "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com"
     ]
-    # Filter out empty strings
-    cors_origins = [o for o in cors_origins if o]
+    
+    # Get origins from config or environment
+    config_origins = app.config.get('CORS_ORIGINS', [])
+    if isinstance(config_origins, str):
+        config_origins = [o.strip() for o in config_origins.split(',') if o.strip()]
+        
+    env_origins = os.environ.get("CORS_ORIGINS", "")
+    if env_origins:
+        env_origins_list = [o.strip() for o in env_origins.split(',') if o.strip()]
+    else:
+        env_origins_list = []
+
+    # Combine all origins
+    cors_origins = sorted(list(set(default_origins + config_origins + env_origins_list)))
+    
+    # Check if we should allow all (if '*' is present)
+    if '*' in cors_origins:
+        cors_origins = "*"
+
+    print(f"[CORS] Allowed Origins: {cors_origins}")
     
     CORS(app, resources={
         r"/api/*": {
