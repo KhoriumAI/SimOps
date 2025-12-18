@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { Box, MousePointer2, Paintbrush, Scissors, BarChart3, Loader2 } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
 
-function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
+function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor, customColors }) {
   const meshRef = useRef()
   const { camera, gl } = useThree()
 
@@ -24,9 +24,12 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
     const vertices = new Float32Array(meshData.vertices)
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
-    // Colors (Float32Array) - if available
-    if (meshData.colors && meshData.colors.length > 0) {
-      const colors = new Float32Array(meshData.colors)
+    // Colors (Float32Array)
+    // Priority: Custom (Height) > Quality (if showQuality) > None
+    const sourceColors = customColors || (meshData.colors && meshData.colors.length > 0 ? meshData.colors : null)
+
+    if (sourceColors) {
+      const colors = new Float32Array(sourceColors)
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     }
 
@@ -34,7 +37,7 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
     geo.computeBoundingBox()
 
     return geo
-  }, [meshData])
+  }, [meshData, customColors])
 
   // Auto-fit camera
   useEffect(() => {
@@ -46,8 +49,6 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
       boundingBox.getSize(size)
       const maxDim = Math.max(size.x, size.y, size.z)
 
-      // Only adjust if this is a fresh load (heuristic: camera at default)
-      // or if we want to force reset. For now, just do it on geometry change.
       const distance = maxDim * 2
       camera.position.set(center.x + distance, center.y + distance, center.z + distance)
       camera.lookAt(center)
@@ -59,7 +60,6 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
   const clippingPlanes = useMemo(() => {
     if (!geometry || !clipping.enabled) return []
 
-    // Only update clipping planes if values change significantly to avoid thrashing
     const bbox = geometry.boundingBox
     const center = new THREE.Vector3()
     bbox.getCenter(center)
@@ -86,13 +86,19 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe }) {
 
   if (!geometry) return null
 
+  // Helper to determine if we are effectively showing vertex colors
+  // Case 1: Custom Colors provided (Height mode) -> YES
+  // Case 2: Show Quality is true AND mesh has colors -> YES
+  // Otherwise -> NO (Solid Color)
+  const shouldUseVertexColors = !!customColors || (showQuality && meshData.colors && meshData.colors.length > 0)
+
   return (
     <group>
       {/* Main Solid Mesh */}
       <mesh ref={meshRef} geometry={geometry} castShadow receiveShadow>
         <meshStandardMaterial
-          vertexColors={showQuality && meshData.colors && meshData.colors.length > 0}
-          color={showQuality && meshData.colors && meshData.colors.length > 0 ? undefined : "#3b82f6"} // Blue color from screenshot
+          vertexColors={shouldUseVertexColors}
+          color={shouldUseVertexColors ? undefined : meshColor}
           side={THREE.DoubleSide}
           flatShading={true}
           clippingPlanes={clippingPlanes}
@@ -159,6 +165,10 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
   // Tools
   const [activeTool, setActiveTool] = useState(null) // 'select', 'paint', 'clip'
 
+  // Color/Style State
+  const [meshColor, setMeshColor] = useState('#3b82f6') // Default Blue
+  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'height'
+
   // Initialize defaults based on screenshot
   useEffect(() => {
     // If quality metrics exist, maybe auto-enable quality view? 
@@ -172,12 +182,45 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
       setActiveTool(newState ? 'clip' : null)
     } else if (tool === 'hist') {
       setShowHistogram(prev => !prev)
+    } else if (tool === 'color') {
+      setActiveTool(activeTool === 'color' ? null : 'color')
     } else {
       setActiveTool(activeTool === tool ? null : tool)
     }
   }
 
   const hasQualityData = meshData?.colors && meshData.colors.length > 0
+
+  // ... (keeping Checkbox and HeaderButton components same)
+
+  // Computed colors for Height Gradient
+  const heightColors = useMemo(() => {
+    if (!meshData || !meshData.vertices || colorMode !== 'height') return null
+
+    const count = meshData.vertices.length / 3
+    const colors = new Float32Array(count * 3)
+    const vertices = meshData.vertices
+
+    // Find Y bounds
+    let minY = Infinity, maxY = -Infinity
+    for (let i = 1; i < vertices.length; i += 3) {
+      if (vertices[i] < minY) minY = vertices[i]
+      if (vertices[i] > maxY) maxY = vertices[i]
+    }
+    const range = maxY - minY || 1
+
+    // Generate gradient (Blue -> Cyan -> Green -> Yellow -> Red)
+    const col = new THREE.Color()
+    for (let i = 0; i < count; i++) {
+      const y = vertices[i * 3 + 1]
+      const t = (y - minY) / range
+      col.setHSL(0.66 - (t * 0.66), 1.0, 0.5) // Blue(0.66) to Red(0.0)
+      colors[i * 3] = col.r
+      colors[i * 3 + 1] = col.g
+      colors[i * 3 + 2] = col.b
+    }
+    return colors
+  }, [meshData, colorMode])
 
   // Simple check box component
   const Checkbox = ({ label, checked, onChange, disabled }) => (
@@ -247,10 +290,11 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
               checked={showWireframe}
               onChange={setShowWireframe}
             />
+            {/* Quality Checkbox is now integrated into Color Panel logic, but kept here for quick toggle */}
             <Checkbox
               label="Quality"
-              checked={showQuality}
-              onChange={setShowQuality}
+              checked={colorMode === 'quality'}
+              onChange={(c) => setColorMode(c ? 'quality' : 'solid')}
               disabled={!hasQualityData}
             />
           </div>
@@ -258,23 +302,17 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
           {/* Action Buttons */}
           <div className="flex items-center gap-2">
             <HeaderButton
+              icon={Paintbrush}
+              label="Color"
+              active={activeTool === 'color'}
+              onClick={() => toggleTool('color')}
+            />
+            <HeaderButton
               icon={BarChart3}
               label="Hist"
               active={showHistogram}
               onClick={() => setShowHistogram(!showHistogram)}
               disabled={!qualityMetrics}
-            />
-            <HeaderButton
-              icon={MousePointer2}
-              label="Select"
-              active={activeTool === 'select'}
-              onClick={() => toggleTool('select')}
-            />
-            <HeaderButton
-              icon={Paintbrush}
-              label="Paint"
-              active={activeTool === 'paint'}
-              onClick={() => toggleTool('paint')}
             />
             <HeaderButton
               icon={Scissors}
@@ -317,23 +355,70 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
                 <MeshObject
                   meshData={meshData}
                   clipping={clipping}
-                  showQuality={showQuality}
+                  showQuality={colorMode === 'quality'}
                   showWireframe={showWireframe}
+                  meshColor={meshColor}
+                  customColors={colorMode === 'height' ? heightColors : null}
                 />
               </Canvas>
             )}
 
             {/* Overlays */}
 
-            {/* Axis Gizmo (Left Bottom) */}
-            <div className="absolute bottom-4 left-4 pointer-events-none">
-              {/* This is usually done with a ViewCube or GizmoHelper in drei, 
-                  but for now we'll stick to our custom or simple overlay if needed.
-                  The screenshot shows a custom colorful axis graphic. 
-                  We'll skip implementing a custom WebGL gizmo for this iteration 
-                  unless strictly requested, as it requires complex setup. 
-              */}
-            </div>
+            {/* Color Panel */}
+            {activeTool === 'color' && (
+              <div className="absolute top-4 right-4 bg-gray-800/90 backdrop-blur p-4 rounded-lg shadow-xl w-64 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-top-2">
+                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                  <Paintbrush className="w-4 h-4" /> Appearance
+                </h3>
+
+                <div className="space-y-4">
+                  {/* Mode Selection */}
+                  <div className="grid grid-cols-3 gap-1 bg-gray-700 p-1 rounded">
+                    {['solid', 'quality', 'height'].map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => setColorMode(mode)}
+                        disabled={mode === 'quality' && !hasQualityData}
+                        className={`text-xs py-1 px-2 rounded capitalize transition-all ${colorMode === mode
+                          ? 'bg-blue-600 text-white shadow'
+                          : 'hover:bg-gray-600 text-gray-400'
+                          } ${mode === 'quality' && !hasQualityData ? 'opacity-30 cursor-not-allowed' : ''}`}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Solid Color Picker */}
+                  {colorMode === 'solid' && (
+                    <div className="space-y-2">
+                      <label className="text-xs text-gray-400">Mesh Color</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={meshColor}
+                          onChange={(e) => setMeshColor(e.target.value)}
+                          className="bg-transparent border-0 w-8 h-8 p-0 cursor-pointer"
+                        />
+                        <span className="text-xs font-mono text-gray-300">{meshColor}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Legend for Gradients */}
+                  {(colorMode === 'quality' || colorMode === 'height') && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] text-gray-400">
+                        <span>Low</span>
+                        <span>High</span>
+                      </div>
+                      <div className="h-3 rounded-full w-full bg-gradient-to-r from-blue-500 via-green-500 to-red-500" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Histogram Overlay */}
             {qualityMetrics && showHistogram && (
