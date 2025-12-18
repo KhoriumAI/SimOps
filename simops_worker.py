@@ -45,6 +45,7 @@ except ImportError:
     PDFReportGenerator = None
 
 from core.geometry_analyzer import analyze_cad_geometry, GeometryAnalysis
+from core.solvers.calculix_adapter import CalculiXAdapter
 
 # Configure logging
 logging.basicConfig(
@@ -110,7 +111,8 @@ class SimulationResult:
 def generate_mesh_with_strategy(
     cad_file: str, 
     output_dir: Path,
-    strategy: Dict
+    strategy: Dict,
+    sim_config: Optional['SimulationConfig'] = None # Added config
 ) -> str:
     """
     Generate CFD mesh using the given strategy.
@@ -124,24 +126,37 @@ def generate_mesh_with_strategy(
     logger.info(f"Meshing with strategy: {strategy['name']}")
     
     # Map strategy params to config
-    # strategy['mesh_size'] is % of diagonal in legacy logic.
-    # CFDMeshConfig uses mesh_size_factor (multiplier for defaults).
-    # Default is diagonal/200 (0.5%).
-    # So if strategy['mesh_size'] is 0.5, that matches default (factor=1.0).
-    # Factor = strategy_size / 0.5
-    
     base_factor = strategy.get('mesh_size', 0.5) / 0.5
     
+    # Overrides from Sidecar
+    second_order = False
+    if sim_config and sim_config.meshing:
+        if sim_config.meshing.second_order:
+            second_order = True
+            logger.info("  [Override] Enabling Second-Order Elements (Sidecar)")
+        if sim_config.meshing.mesh_size_multiplier != 1.0:
+            base_factor *= sim_config.meshing.mesh_size_multiplier
+            logger.info(f"  [Override] Scaling mesh size by {sim_config.meshing.mesh_size_multiplier}")
+
     config = CFDMeshConfig(
         num_layers=strategy.get('num_layers', 5),
         growth_rate=strategy.get('growth_rate', 1.2),
         mesh_size_factor=base_factor,
         create_prisms=True,
         optimize_netgen=strategy.get('optimize', True),
-        smoothing_steps=10
+        smoothing_steps=10,
+        second_order=second_order
     )
     
+    # Pass tagging rules from sidecar if available
+    tagging_rules = sim_config.tagging_rules if sim_config else []
+    
     runner = CFDMeshStrategy(verbose=True)
+    # Note: We need to pass tagging rules to strategy. 
+    # Current API is generate_cfd_mesh(cad, out, config).
+    # We'll update strategy instance with rules before calling generate.
+    runner.tagging_rules = tagging_rules
+    
     success, stats = runner.generate_cfd_mesh(cad_file, str(output_file), config)
     
     if not success:
@@ -150,151 +165,52 @@ def generate_mesh_with_strategy(
     return str(output_file)
 
 
-def run_thermal_solver(mesh_file: str, output_dir: Path, strategy_name: str) -> Dict:
+def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str) -> Dict:
     """
-    Run thermal analysis on the mesh.
-    
-    Uses built-in FEA solver for steady-state heat conduction.
-    
-    Args:
-        mesh_file: Path to mesh file
-        output_dir: Output directory
-        strategy_name: Name of strategy (for file naming)
-        
-    Returns:
-        Dict with solution data
+    Run thermal solver with fallback chain:
+    1. Try CalculiX (professional solver)
+    2. Fall back to Python/SciPy solver (built-in)
     """
-    from scipy.sparse import lil_matrix, csr_matrix
-    from scipy.sparse.linalg import cg, spilu, LinearOperator
-    
-    logger.info("Running thermal solver...")
-    
-    # Material properties
-    thermal_conductivity = 50.0  # W/(m·K) - steel
-    T_hot = 800.0   # K
-    T_cold = 300.0  # K
-    
-    start_time = time.time()
-    
-    # Load mesh
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 0)
-    gmsh.open(mesh_file)
-    
+    # Try CalculiX first
     try:
-        # Extract mesh data
-        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-        node_coords = node_coords.reshape(-1, 3)
+        logger.info(f"Running Thermal Solver via CalculiX...")
+        adapter = CalculiXAdapter()
+        result = adapter.run(Path(mesh_file), Path(output_dir), {})
         
-        tag_to_idx = {int(tag): i for i, tag in enumerate(node_tags)}
-        
-        elem_types, elem_tags, elem_nodes = gmsh.model.mesh.getElements(dim=3)
-        
-        tet_elements = []
-        for i, etype in enumerate(elem_types):
-            if etype == 4:  # Linear tet
-                nodes = elem_nodes[i].reshape(-1, 4)
-                tet_elements.append(nodes)
-                
-        if not tet_elements:
-            raise ValueError("No tetrahedral elements found")
+        if 'elements' in result:
+            result['num_elements'] = len(result['elements'])
+        else:
+            result['num_elements'] = 0
             
-        tet_elements = np.vstack(tet_elements).astype(int)
-        elements = np.array([[tag_to_idx.get(n, 0) for n in elem] for elem in tet_elements])
+        logger.info(f"  [CalculiX] Solver finished. Temp range: {result['min_temp']:.1f}K - {result['max_temp']:.1f}K")
+        return result
         
-        num_nodes = len(node_tags)
-        logger.info(f"  Nodes: {num_nodes:,}, Elements: {len(elements):,}")
-        
-    finally:
-        gmsh.finalize()
-    
-    # Apply BCs (top = hot, bottom = cold)
-    z = node_coords[:, 2]
-    z_min, z_max = np.min(z), np.max(z)
-    z_range = z_max - z_min
-    
-    hot_nodes = np.where(z > z_max - 0.1 * z_range)[0]
-    cold_nodes = np.where(z < z_min + 0.1 * z_range)[0]
-    
-    # Assemble system
-    K = lil_matrix((num_nodes, num_nodes))
-    Q = np.zeros(num_nodes)
-    
-    for elem_idx in elements:
-        coords = node_coords[elem_idx]
-        x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
-        
-        J = np.array([
-            [x[1]-x[0], x[2]-x[0], x[3]-x[0]],
-            [y[1]-y[0], y[2]-y[0], y[3]-y[0]],
-            [z[1]-z[0], z[2]-z[0], z[3]-z[0]],
-        ])
-        
-        detJ = np.linalg.det(J)
-        V = abs(detJ) / 6.0
-        
-        if V < 1e-20:
-            continue
-            
-        try:
-            invJ = np.linalg.inv(J)
-        except:
-            continue
-            
-        dN_ref = np.array([[-1,-1,-1], [1,0,0], [0,1,0], [0,0,1]])
-        dN = dN_ref @ invJ
-        ke = thermal_conductivity * V * (dN @ dN.T)
-        
-        for i, ni in enumerate(elem_idx):
-            for j, nj in enumerate(elem_idx):
-                K[ni, nj] += ke[i, j]
-    
-    # Apply BCs
-    # Use a lower penalty to avoid ill-conditioning (1e20 is too high for float64)
-    # 1e12 gives 12 digits of dominance, leaving sufficient precision for physics
-    penalty = 1e12
-    for n in hot_nodes:
-        K[n, n] += penalty
-        Q[n] = penalty * T_hot
-    for n in cold_nodes:
-        K[n, n] += penalty
-        Q[n] = penalty * T_cold
-        
-    K = K.tocsr()
-    
-    # Solve
-    # Switch to Direct Solver (spsolve) for robustness
-    # CG fails with high number of elements/bad conditioning
-    from scipy.sparse.linalg import spsolve
-    
-    logger.info("  Solving linear system (Direct Solver)...")
-    try:
-        T = spsolve(K, Q)
     except Exception as e:
-        logger.error(f"  Direct solver failed: {e}. Falling back to iterative.")
-        # Fallback to CG if direct runs out of memory
-        ilu = spilu(K.tocsc(), drop_tol=1e-4, fill_factor=10)
-        M = LinearOperator(K.shape, matvec=ilu.solve)
-        T, info = cg(K, Q, M=M, atol=1e-8, maxiter=2000)
-    
-    # Safety Check: Clamp negative temperatures (physically impossible in this setup)
-    # This handles any minor numerical noise around 0
-    T = np.maximum(T, 0.0)
+        logger.warning(f"CalculiX failed ({e}), falling back to Python solver...")
         
-    solve_time = time.time() - start_time
-    
-    logger.info(f"  Temperature range: {np.min(T):.1f} - {np.max(T):.1f} K")
-    logger.info(f"  Solve time: {solve_time:.2f}s")
-    
-    return {
-        'temperature': T,
-        'node_coords': node_coords,
-        'elements': elements,
-        'min_temp': float(np.min(T)),
-        'max_temp': float(np.max(T)),
-        'solve_time': solve_time,
-        'num_elements': len(elements),
-    }
+    # Fallback: Python/SciPy solver
+    try:
+        from simops_pipeline import ThermalSolver, SimOpsConfig
+        
+        config = SimOpsConfig()
+        config.heat_source_temperature = 800.0  # K (Hot end)
+        config.ambient_temperature = 300.0      # K (Cold end)
+        config.thermal_conductivity = 150.0     # W/m·K (Aluminum)
+        
+        solver = ThermalSolver(config, verbose=True)
+        result = solver.solve(str(mesh_file))
+        
+        if 'elements' in result:
+            result['num_elements'] = len(result['elements'])
+        else:
+            result['num_elements'] = 0
+            
+        logger.info(f"  [Python] Solver finished. Temp range: {result['min_temp']:.1f}K - {result['max_temp']:.1f}K")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Python solver also failed: {e}")
+        raise
 
 
 def generate_report(
@@ -468,38 +384,85 @@ def export_vtk_with_temperature(result: Dict, output_file: str) -> str:
     return output_file
 
 
-def run_simulation(file_path: str, output_dir: str = None) -> SimulationResult:
+
+def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
     """
-    Main entry point called by the RQ Worker.
-    
-    Implements the 'Cascading Fallback' strategy - tries multiple
-    mesh strategies until one succeeds.
-    
-    Args:
-        file_path: Path to input CAD file
-        output_dir: Output directory (uses env var if not specified)
-        
-    Returns:
-        SimulationResult with output files and metadata
+    Main entry point for SimOps Worker.
+    Orchestrates the complete simulation pipeline:
+    1. Load Config (Sidecar)
+    2. Analyze Geometry
+    3. Mesh (Cascade)
+    4. Solve (Thermal)
+    5. Report
     """
-    job_name = Path(file_path).stem
-    output_path = Path(output_dir or os.environ.get('OUTPUT_DIR', './output'))
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    logger.info("=" * 60)
-    logger.info(f"   SIMOPS JOB: {job_name}")
-    logger.info("=" * 60)
-    logger.info(f"   Input:  {file_path}")
-    logger.info(f"   Output: {output_path}")
-    logger.info("=" * 60)
-    
     start_time = time.time()
     
-    # Try each strategy in order
+    # Path handling
+    input_path = Path(file_path)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Job ID logic
+    job_name = input_path.stem
+    
+    # ---------------------------------------------------------
+    # 1. Load Configuration (The Sidecar Protocol)
+    # ---------------------------------------------------------
+    # Check for sibling .json file
+    config_path = input_path.with_suffix('.json')
+    from core.config_loader import load_simops_config
+    
+    # Check if a config file exists (even if not explicitly passed, look for sibling)
+    sim_config = None
+    if config_path.exists():
+        logger.info(f"Found sidecar config: {config_path.name}")
+        sim_config = load_simops_config(str(config_path))
+    else:
+        logger.info("No sidecar config found. Using Golden Template defaults.")
+        sim_config = load_simops_config(None) # Load defaults
+        
+    # Override job name if specified in config
+    if sim_config.job_name:
+        job_name = sim_config.job_name
+
+    logger.info(f"Starting job: {job_name}")
+    logger.info(f"Physics: Material={sim_config.physics.material}, "
+                f"Heat={sim_config.physics.heat_load_watts}W")
+        
+    # Validation / GCI Mode
+    if sim_config.validate_mesh:
+        try:
+             from core.convergence.gci_runner import GCIRunner
+             logger.info("="*60)
+             logger.info("  VALIDATION MODE ENABLED: Running Grid Convergence Index Study")
+             logger.info("="*60)
+             
+             gci_runner = GCIRunner(sim_config, file_path, output_path)
+             gci_stats = gci_runner.run_study(levels=3, refinement_ratio=1.3)
+             
+             # We should serialize these stats to disk
+             gci_file = output_path / f"{job_name}_GCI_Report.json"
+             import json
+             with open(gci_file, 'w') as f:
+                  json.dump(gci_stats, f, indent=2)
+                  
+             logger.info(f"GCI Study Complete. Report saved to {gci_file.name}")
+             
+             # Fallthrough: We proceed to run the normal simulation sequence
+             # (likely the 'Fine' one was already run, but user expects a standard result artifact)
+             # Optimization: If GCIRunner saves artifacts in the right place, we could return early.
+             # For now, let's allow the normal flow to run as the "Official" run (using base multipliers)
+             # to ensure consistent output structure.
+             
+        except Exception as e:
+             logger.error(f"GCI Study failed: {e}")
+             # Don't hard fail the job, proceed to standard run
+
+        
     strategies_to_try = STRATEGIES
     
-    # Pre-analyze geometry
     try:
+        # Pre-analyze geometry
         geo_analysis = analyze_cad_geometry(file_path)
         logger.info("[Geometry Analysis]")
         logger.info(f"  Diagonal: {geo_analysis.diagonal:.2f} mm")
@@ -523,7 +486,12 @@ def run_simulation(file_path: str, output_dir: str = None) -> SimulationResult:
         
         try:
             # Step 1: Generate mesh
-            mesh_file = generate_mesh_with_strategy(file_path, output_path, strategy)
+            mesh_file = generate_mesh_with_strategy(
+                file_path, 
+                output_path, 
+                strategy,
+                sim_config=sim_config
+            )
             
             # Step 2: Run thermal solver
             result = run_thermal_solver(mesh_file, output_path, strategy['name'])

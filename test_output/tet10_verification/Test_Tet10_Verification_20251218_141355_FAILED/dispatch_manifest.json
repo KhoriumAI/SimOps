@@ -1,0 +1,19 @@
+{
+  "dispatched_at": "2025-12-18T14:13:55.797168",
+  "original_result": {
+    "job_name": "Test_Tet10_Verification",
+    "input_file": "cad_files/Cylinder.step",
+    "strategy": "HighFi_CFD",
+    "attempts": 1,
+    "mesh_file": "test_output\\tet10_verification\\Cylinder_HighFi_CFD.msh",
+    "vtk_file": "test_output\\tet10_verification\\Test_Tet10_Verification_thermal.vtk",
+    "png_file": null,
+    "pdf_file": "test_output\\tet10_verification\\Test_Tet10_Verification_report.pdf",
+    "min_temp_K": 300.0,
+    "max_temp_K": 800.0,
+    "num_elements": 341386,
+    "solve_time_s": 9.618040323257446,
+    "total_time_s": 85.04839444160461,
+    "completed_at": "2025-12-18T14:13:55.771165"
+  }
+}

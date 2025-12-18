@@ -123,16 +123,30 @@ class SimOpsEventHandler(FileSystemEventHandler):
         if str_path in self.processed:
             return
             
+        # -------------------------------------------------------------
+        # TRACK 2: Sidecar Logic
+        # If this is a .JSON file, ignore it. We only queue the geometry.
+        # The worker will look for the JSON itself.
+        # -------------------------------------------------------------
+        if file_path.suffix.lower() == '.json':
+            logger.info(f"ℹ️ Config file detected: {file_path.name} (Waiting for geometry...)")
+            return
+            
         # Wait for file to finish writing
         # logger.info(f"⏳ Detecting file stability: {file_path.name}")
         # if not self._wait_for_file_stable(file_path):
         #    logger.warning(f"File not stable or locked, skipping: {file_path.name}")
         #    return
-            
+             
         # Mark as processing
         self.processing.add(str_path)
         
         logger.info(f"📥 New CAD file detected: {file_path.name}")
+        
+        # Check for sidecar presence (just for logging)
+        sidecar = file_path.with_suffix('.json')
+        if sidecar.exists():
+             logger.info(f"   + Sidecar config found: {sidecar.name}")
         
         # Queue the job
         try:

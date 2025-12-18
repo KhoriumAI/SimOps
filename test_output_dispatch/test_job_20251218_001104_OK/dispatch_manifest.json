@@ -1,0 +1,10 @@
+{
+  "dispatched_at": "2025-12-18T00:11:04.136816",
+  "original_result": {
+    "job_name": "test_job",
+    "success": true,
+    "strategy": "HighFi",
+    "mesh_file": "test_output_dispatch\\test.msh",
+    "png_file": "test_output_dispatch\\test.png"
+  }
+}
