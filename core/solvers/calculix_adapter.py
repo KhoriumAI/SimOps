@@ -38,8 +38,12 @@ class CalculiXAdapter(ISolver):
         
         logger.info(f"[CalculiX] Converting mesh {mesh_file.name} to INP...")
         
+        # Scale Factor (mm->m default=0.001 if not specified? No, default 1.0. User must config).
+        # Actually MVP Assumption: User inputs Meters or configures scaling.
+        scale_factor = config.get("unit_scaling", 1.0)
+        
         # 1. Convert Mesh and Generate INP
-        stats = self._generate_inp(mesh_file, inp_file, config)
+        stats = self._generate_inp(mesh_file, inp_file, config, scale=scale_factor)
         
         # 2. Run CalculiX
         logger.info(f"[CalculiX] executing {self.ccx_binary} {job_name}...")
