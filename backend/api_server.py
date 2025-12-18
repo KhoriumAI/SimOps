@@ -24,6 +24,7 @@ from config import get_config
 from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
+from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
 
 
@@ -81,6 +82,7 @@ def create_app(config_class=None):
     
     # Register blueprints
     app.register_blueprint(auth_bp)
+    app.register_blueprint(batch_bp)
     
     # Ensure instance folder exists for SQLite database
     instance_dir = Path(__file__).parent / 'instance'
@@ -309,11 +311,19 @@ def register_routes(app):
         """
         strategies = [
             {
+                'id': 'fast_tet_delaunay',
+                'name': 'Tet (Fast)',
+                'description': 'Fast single-pass HXT Delaunay - ideal for batch processing',
+                'element_type': 'tet',
+                'recommended': True,
+                'fast': True
+            },
+            {
                 'id': 'tetrahedral_delaunay',
                 'name': 'Tetrahedral (Delaunay)',
-                'description': 'Classic Delaunay triangulation - reliable for most geometries',
+                'description': 'Exhaustive strategy search - best quality, slower',
                 'element_type': 'tet',
-                'recommended': True
+                'recommended': False
             },
             {
                 'id': 'tetrahedral_frontal',
@@ -359,7 +369,7 @@ def register_routes(app):
         return jsonify({
             'strategies': strategies,
             'names': [s['name'] for s in strategies],
-            'default': 'Tetrahedral (Delaunay)'
+            'default': 'Tet (Fast)'
         })
 
     @app.route('/api/upload', methods=['POST'])

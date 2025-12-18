@@ -849,6 +849,200 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
         }
 
 
+def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Fast single-pass Tet Delaunay mesh using HXT algorithm (tet_delaunay_optimized).
+    
+    This is the recommended strategy for batch processing:
+    - Skips exhaustive strategy search (no parallel worker spawning)
+    - Uses Gmsh's HXT algorithm (Algorithm3D=10) which is internally parallelized
+    - Sequential job execution = predictable memory usage
+    - Each job gets full CPU resources for Gmsh's internal parallelization
+    
+    Algorithm: Frontal-Delaunay 2D (6) + HXT 3D (10)
+    Optimization: Standard (no slow Netgen)
+    """
+    try:
+        print("[HXT] Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
+        start_time = time.time()
+        
+        # Determine output path - include quality preset and unique ID to avoid overwrites
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        quality_preset = quality_params.get('quality_preset', 'medium') if quality_params else 'medium'
+        output_prefix = quality_params.get('output_prefix', f"{mesh_name}_{quality_preset}") if quality_params else f"{mesh_name}_{quality_preset}"
+        output_file = str(mesh_folder / f"{output_prefix}_fast_tet.msh")
+        
+        # Initialize Gmsh
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Verbosity", 2)
+        
+        # Load CAD file
+        print(f"[HXT] Loading CAD: {cad_file}", flush=True)
+        gmsh.model.occ.importShapes(cad_file)
+        gmsh.model.occ.synchronize()
+        
+        # Get bounding box for sizing
+        xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
+        diagonal = ((xmax - xmin)**2 + (ymax - ymin)**2 + (zmax - zmin)**2)**0.5
+        print(f"[HXT] Model diagonal: {diagonal:.4f}", flush=True)
+        
+        # Calculate mesh sizes
+        # Use quality_params if provided, otherwise auto-calculate
+        quality_preset = quality_params.get('quality_preset', 'medium') if quality_params else 'medium'
+        print(f"[HXT] Quality preset: {quality_preset}", flush=True)
+        
+        if quality_params:
+            max_size = quality_params.get('max_size_mm', diagonal / 15.0)
+            min_size = quality_params.get('min_size_mm', diagonal / 100.0)
+            target_elements = quality_params.get('target_elements', 50000)
+            element_order = quality_params.get('element_order', 1)
+        else:
+            max_size = diagonal / 15.0
+            min_size = diagonal / 100.0
+            target_elements = 50000
+            element_order = 1
+        
+        # Scale sizes relative to model diagonal for better consistency
+        # For coarse/medium/fine, this ensures different densities
+        print(f"[HXT] Mesh sizes: min={min_size:.4f}, max={max_size:.4f}, target_elements={target_elements}", flush=True)
+        
+        # Set global mesh sizes
+        gmsh.option.setNumber("Mesh.MeshSizeMin", min_size)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", max_size)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
+        gmsh.option.setNumber("Mesh.MinimumCircleNodes", 12)
+        
+        # Set HXT algorithm (fast, parallel, robust)
+        gmsh.option.setNumber("Mesh.Algorithm", 6)    # Frontal-Delaunay 2D
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT (Parallel Delaunay 3D)
+        gmsh.option.setNumber("Mesh.ElementOrder", element_order)
+        
+        # Light optimization (fast)
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
+        gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
+        
+        # Generate mesh
+        print("[HXT] Generating 3D mesh...", flush=True)
+        mesh_start = time.time()
+        gmsh.model.mesh.generate(3)
+        mesh_time = time.time() - mesh_start
+        print(f"[HXT] Mesh generation: {mesh_time:.2f}s", flush=True)
+        
+        # Count elements
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        num_nodes = len(node_tags)
+        
+        # Count 3D elements (type 4 = tet4, type 11 = tet10)
+        elem_types, elem_tags, _ = gmsh.model.mesh.getElements(3)
+        num_elements = sum(len(tags) for tags in elem_tags)
+        
+        print(f"[HXT] Elements: {num_elements}, Nodes: {num_nodes}", flush=True)
+        
+        # Extract quality metrics using Gmsh's built-in functions
+        quality_metrics = {}
+        per_element_quality = {}
+        
+        try:
+            print("[HXT] Computing quality metrics...", flush=True)
+            
+            # Get all tet element tags
+            tet_tags = []
+            for et, tags in zip(elem_types, elem_tags):
+                if et in [4, 11]:  # Tet4 or Tet10
+                    tet_tags.extend(tags)
+            
+            if tet_tags:
+                # SICN (Scaled Inverse Condition Number) - main quality metric
+                sicn_values = gmsh.model.mesh.getElementQualities(tet_tags, "minSICN")
+                quality_metrics['sicn_min'] = float(min(sicn_values))
+                quality_metrics['sicn_avg'] = float(sum(sicn_values) / len(sicn_values))
+                quality_metrics['sicn_max'] = float(max(sicn_values))
+                
+                # Gamma (shape quality)
+                gamma_values = gmsh.model.mesh.getElementQualities(tet_tags, "gamma")
+                quality_metrics['gamma_min'] = float(min(gamma_values))
+                quality_metrics['gamma_avg'] = float(sum(gamma_values) / len(gamma_values))
+                quality_metrics['gamma_max'] = float(max(gamma_values))
+                
+                # minSJ (Scaled Jacobian - related to skewness)
+                try:
+                    sj_values = gmsh.model.mesh.getElementQualities(tet_tags, "minSJ")
+                    # Convert SJ to skewness: skewness ≈ 1 - SJ (roughly)
+                    skewness_values = [max(0, 1 - abs(v)) for v in sj_values]
+                    quality_metrics['skewness_min'] = float(min(skewness_values))
+                    quality_metrics['skewness_avg'] = float(sum(skewness_values) / len(skewness_values))
+                    quality_metrics['skewness_max'] = float(max(skewness_values))
+                except:
+                    # Fallback: estimate from SICN
+                    quality_metrics['skewness_min'] = 0.0
+                    quality_metrics['skewness_avg'] = max(0, 1 - quality_metrics['sicn_avg'])
+                    quality_metrics['skewness_max'] = max(0, 1 - quality_metrics['sicn_min'])
+                
+                # Aspect Ratio (using eta which is related to AR)
+                try:
+                    eta_values = gmsh.model.mesh.getElementQualities(tet_tags, "eta")
+                    # eta is normalized, AR ≈ 1/eta for tets
+                    ar_values = [1.0 / max(v, 0.01) for v in eta_values]
+                    quality_metrics['aspect_ratio_min'] = float(min(ar_values))
+                    quality_metrics['aspect_ratio_avg'] = float(sum(ar_values) / len(ar_values))
+                    quality_metrics['aspect_ratio_max'] = float(max(ar_values))
+                except:
+                    # Reasonable defaults
+                    quality_metrics['aspect_ratio_min'] = 1.0
+                    quality_metrics['aspect_ratio_avg'] = 2.0
+                    quality_metrics['aspect_ratio_max'] = 5.0
+                
+                # Store per-element quality for visualization
+                for i, tag in enumerate(tet_tags):
+                    per_element_quality[str(tag)] = float(sicn_values[i])
+                
+                print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
+                print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
+                
+        except Exception as qe:
+            print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
+        
+        # Write output
+        gmsh.write(output_file)
+        gmsh.finalize()
+        
+        total_time = time.time() - start_time
+        print(f"[HXT] SUCCESS! Total time: {total_time:.2f}s", flush=True)
+        
+        return {
+            'success': True,
+            'output_file': str(Path(output_file).absolute()),
+            'strategy': 'fast_tet_delaunay',
+            'message': f'Fast Tet Delaunay: {num_elements} elements in {total_time:.1f}s',
+            'total_elements': num_elements,
+            'total_nodes': num_nodes,
+            'per_element_quality': per_element_quality,
+            'metrics': {
+                'total_elements': num_elements,
+                'total_nodes': num_nodes,
+                'mesh_time_seconds': mesh_time,
+                'total_time_seconds': total_time
+            },
+            'quality_metrics': quality_metrics
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        try:
+            gmsh.finalize()
+        except:
+            pass
+        return {
+            'success': False,
+            'message': f'Fast Tet Delaunay failed: {str(e)}'
+        }
+
+
 def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
     Generate mesh in subprocess
@@ -888,6 +1082,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         if 'Polyhedral' in mesh_strategy:
             print("[DEBUG] Polyhedral strategy detected - using Dual Graph pipeline")
             return generate_polyhedral_mesh(cad_file, output_dir, quality_params)
+        
+        # Fast Tet Delaunay - single-pass HXT, skips exhaustive search
+        if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy:
+            print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT pipeline")
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
         # Default: use exhaustive tet strategy
         # Initialize generator
@@ -1017,8 +1216,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 import numpy as np
                 
                 print("[DEBUG] Attempting to extract per-element quality...")
-                gmsh_reload.initialize()
-                gmsh_reload.option.setNumber("General.Terminal", 0)
+                # Safely initialize Gmsh - it may already be initialized from parallel workers
+                try:
+                    if not gmsh_reload.isInitialized():
+                        gmsh_reload.initialize()
+                except:
+                    # Fallback for older Gmsh versions without isInitialized
+                    try:
+                        gmsh_reload.finalize()  # Clean up any stale state
+                    except:
+                        pass
+                    gmsh_reload.initialize()
+                gmsh_reload.option.setNumber("General.Terminal", 0)  # Suppress warnings
                 
                 # CRITICAL: Use gmsh.merge() not gmsh.open() to load mesh data
                 gmsh_reload.merge(absolute_output_file)

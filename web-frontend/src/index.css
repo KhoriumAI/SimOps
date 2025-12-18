@@ -34,3 +34,16 @@ body {
     background-color: #ffffff;
   }
 }
+
+/* Progress bar animation for batch processing */
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(200%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}

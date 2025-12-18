@@ -11,6 +11,7 @@ from flask_jwt_extended import (
 )
 import bcrypt
 from datetime import datetime, timezone
+from email_validator import validate_email, EmailNotValidError
 
 from models import db, User, TokenBlocklist
 
@@ -44,8 +45,13 @@ def register():
     if len(password) < 8:
         return jsonify({'error': 'Password must be at least 8 characters'}), 400
     
-    if '@' not in email or '.' not in email:
-        return jsonify({'error': 'Invalid email format'}), 400
+    # Validate email format using email-validator library
+    try:
+        # Normalize email (lowercase, strip whitespace)
+        validated = validate_email(email, check_deliverability=False)
+        email = validated.normalized  # Use normalized version
+    except EmailNotValidError as e:
+        return jsonify({'error': f'Invalid email: {str(e)}'}), 400
     
     if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already registered'}), 409
@@ -138,22 +144,57 @@ def get_current_user():
 @auth_bp.route('/logout', methods=['POST'])
 @jwt_required()
 def logout():
-    """Logout user"""
-    jwt = get_jwt()
-    jti = jwt['jti']
-    token_type = jwt['type']
-    user_id = int(get_jwt_identity())
-    expires_at = datetime.fromtimestamp(jwt['exp'], tz=timezone.utc)
+    """
+    Logout user - blocks both access and refresh tokens.
     
-    blocked_token = TokenBlocklist(
-        jti=jti,
-        token_type=token_type,
+    Request body (optional):
+        refresh_token: The refresh token to also revoke
+    
+    This ensures both tokens are invalidated, preventing
+    the refresh token from being used to get a new access token.
+    """
+    from flask_jwt_extended import decode_token
+    
+    # Block the access token (from Authorization header)
+    jwt_data = get_jwt()
+    access_jti = jwt_data['jti']
+    user_id = int(get_jwt_identity())
+    access_expires = datetime.fromtimestamp(jwt_data['exp'], tz=timezone.utc)
+    
+    blocked_access = TokenBlocklist(
+        jti=access_jti,
+        token_type='access',
         user_id=user_id,
-        expires_at=expires_at
+        expires_at=access_expires
     )
     
     try:
-        db.session.add(blocked_token)
+        db.session.add(blocked_access)
+        
+        # Also block refresh token if provided in request body
+        data = request.get_json(silent=True) or {}
+        refresh_token = data.get('refresh_token')
+        
+        if refresh_token:
+            try:
+                # Decode the refresh token to get its JTI
+                refresh_data = decode_token(refresh_token)
+                refresh_jti = refresh_data['jti']
+                refresh_expires = datetime.fromtimestamp(refresh_data['exp'], tz=timezone.utc)
+                
+                # Only block if it belongs to the same user
+                if int(refresh_data['sub']) == user_id:
+                    blocked_refresh = TokenBlocklist(
+                        jti=refresh_jti,
+                        token_type='refresh',
+                        user_id=user_id,
+                        expires_at=refresh_expires
+                    )
+                    db.session.add(blocked_refresh)
+            except Exception as e:
+                # Invalid refresh token - ignore, still logout successfully
+                pass
+        
         db.session.commit()
     except Exception:
         pass

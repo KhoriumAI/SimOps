@@ -32,7 +32,10 @@ def get_database_url():
         return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
     
     # Default to SQLite for local development
-    return f"sqlite:///{BASE_DIR / 'instance' / 'mesh_app.db'}"
+    # Ensure the instance directory exists
+    instance_dir = BASE_DIR / 'instance'
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{instance_dir / 'mesh_app.db'}"
 
 
 class Config:
@@ -64,8 +67,20 @@ class Config:
     # File uploads - Local storage (used in development)
     UPLOAD_FOLDER = BASE_DIR / "uploads"
     OUTPUT_FOLDER = BASE_DIR / "outputs"
-    MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100MB
+    MAX_CONTENT_LENGTH = int(os.environ.get('MAX_FILE_SIZE_MB', 500)) * 1024 * 1024  # Default 500MB
     ALLOWED_EXTENSIONS = {'.step', '.stp', '.stl'}
+    
+    # Batch Processing Settings (configurable via .env)
+    BATCH_MAX_FILES = int(os.environ.get('BATCH_MAX_FILES', 10))  # Max files per batch
+    BATCH_MAX_FILE_SIZE = int(os.environ.get('BATCH_MAX_FILE_SIZE_MB', 500)) * 1024 * 1024  # Per file limit
+    BATCH_PARALLEL_JOBS = int(os.environ.get('BATCH_PARALLEL_JOBS', 6))  # Concurrent mesh jobs
+    
+    # Celery / Redis Configuration
+    CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+    CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+    
+    # WebSocket (Flask-SocketIO)
+    SOCKETIO_MESSAGE_QUEUE = os.environ.get('SOCKETIO_MESSAGE_QUEUE', 'redis://localhost:6379/1')
     
     # AWS S3 Configuration (only used when USE_S3=true)
     USE_S3 = False  # Default: use local storage
