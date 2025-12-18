@@ -1,0 +1,70 @@
+# SimOps Docker Ignore
+# =====================
+# Exclude unnecessary files from Docker build context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# GPU experiments (not needed for thermal solver)
+gpu_experiments/
+
+# Desktop GUI (not needed for Docker appliance)
+apps/desktop/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+temp_*
+debug_*
+
+# Large mesh files (should not be in image)
+*.msh
+*.vtk
+*.vtu
+*.stl
+
+# Output directories
+output/
+input/
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup*
+*.bak

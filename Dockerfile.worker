@@ -1,0 +1,73 @@
+# SimOps Worker Dockerfile - Production Optimized
+# ================================================
+# Multi-stage build for smaller image size
+# Contains Gmsh, Python, and solver dependencies
+
+# =================================================================
+# STAGE 1: Build dependencies
+# =================================================================
+FROM python:3.10-slim-bullseye AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements-worker.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements-worker.txt
+
+# =================================================================
+# STAGE 2: Production image
+# =================================================================
+FROM python:3.10-slim-bullseye AS production
+
+# Labels
+LABEL maintainer="SimOps Team"
+LABEL description="SimOps Thermal Simulation Worker"
+LABEL version="1.0"
+
+# Install runtime dependencies (Gmsh/GL only - Bulletproof Base)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglu1-mesa \
+    libxrender1 \
+    libxcursor1 \
+    libxft2 \
+    libxinerama1 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy wheels from builder and install
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/* \
+    && rm -rf /wheels
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash simops
+WORKDIR /app
+
+# Copy application code
+COPY --chown=simops:simops simops_worker.py .
+COPY --chown=simops:simops result_dispatcher.py .
+COPY --chown=simops:simops core/ ./core/
+
+# Create directories with correct permissions
+RUN mkdir -p /input /output /logs \
+    && chown -R simops:simops /input /output /logs /app
+
+# Switch to non-root user
+USER simops
+
+# Environment
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import redis; r=redis.Redis(host='${REDIS_HOST:-redis}'); r.ping()" || exit 1
+
+# Run worker
+CMD ["rq", "worker", "simops", "--url", "redis://redis:6379", "--with-scheduler"]
