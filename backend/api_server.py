@@ -1142,6 +1142,24 @@ try:
     
     # Get all elements efficiently
     elem_types, elem_tags_list, node_tags_list = gmsh.model.mesh.getElements(-1, -1)
+    
+    # Pre-calculate qualities for 2D elements if we need fallbacks
+    # This ensures older meshes or missing quality.json still works
+    fallback_quality = {{}} # tag -> quality
+    
+    try:
+        # Get all 2D element tags
+        tri_tags_all = []
+        for et, tags in zip(elem_types, elem_tags_list):
+            if et in [2, 9]: # Triangles
+                 tri_tags_all.extend(tags)
+        
+        if tri_tags_all:
+             min_sicn = gmsh.model.mesh.getElementQualities(tri_tags_all, "minSICN")
+             for i, tag in enumerate(tri_tags_all):
+                 fallback_quality[int(tag)] = float(min_sicn[i])
+    except:
+        pass
 
     # Debug: Print found types
     print(f"DEBUG: Found element types: {{list(elem_types)}}", file=sys.stderr)
@@ -1229,7 +1247,8 @@ try:
         "vertices": vertices,
         "element_tags": element_tags,
         "entity_tags": entity_tags_list,
-        "num_nodes": len(nodes)
+        "num_nodes": len(nodes),
+        "fallback_quality": fallback_quality # Return on-the-fly quality
     }}
     print("MESH_DATA:" + json.dumps(result))
     
@@ -1266,15 +1285,29 @@ finally:
         vertices = mesh_data['vertices']
         element_tags = mesh_data['element_tags']
         entity_tags = mesh_data.get('entity_tags', []) # New field
+        fallback_quality = mesh_data.get('fallback_quality', {}) # Parse fallback
 
         # Build colors based on quality with smooth gradient
         colors = []
         matched_count = 0
         unmatched_count = 0
         
+        # If per_element_quality is empty (no file), initialize it with fallback
+        # This allows histogram calculation later to work
+        if not per_element_quality and fallback_quality:
+            print("[MESH PARSE] Using fallback quality metrics from geometry")
+            # Convert string keys back to int if needed, but fallback comes from JSON as string keys typically
+            per_element_quality = {k: v for k, v in fallback_quality.items()}
+
         for el_tag in element_tags:
-            q = per_element_quality.get(str(el_tag)) # Ensure string key lookup
-            if q is None: q = per_element_quality.get(int(el_tag)) # Try int just in case
+            # Priority: 1. quality.json (per_element_quality), 2. Fallback (fallback_quality)
+            q = per_element_quality.get(str(el_tag)) 
+            if q is None: q = per_element_quality.get(int(el_tag))
+            
+            # Try fallback if still None
+            if q is None:
+                q = fallback_quality.get(str(el_tag))
+                if q is None: q = fallback_quality.get(str(int(el_tag)) if isinstance(el_tag, float) else str(el_tag))
 
             if q is not None:
                 matched_count += 1
