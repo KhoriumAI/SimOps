@@ -90,7 +90,7 @@ class CalculiXAdapter(ISolver):
         if not frd_file.exists():
             raise FileNotFoundError(f"CalculiX output file not found: {frd_file}")
             
-        results = self._parse_frd(frd_file, stats['node_map'], stats['elements'])
+        results = self._parse_frd(frd_file, stats['node_map'], stats['elements'], config)
         results['solve_time'] = solve_time
         results['mesh_stats'] = stats
         
@@ -137,20 +137,36 @@ class CalculiXAdapter(ISolver):
             
             # Skin Elements (Tri3=2, Tri6=9) for Convection (*FILM)
             surf_types, surf_tags, surf_nodes = gmsh.model.mesh.getElements(dim=2)
-            tri3_elems = []
-            tri6_elems = []
+            tri3_list = []
+            tri6_list = []
             
             for i, etype in enumerate(surf_types):
                  if etype == 2: # Tri3
                      nodes = surf_nodes[i].reshape(-1, 3).astype(int)
                      tags = surf_tags[i].astype(int)
-                     chunk = np.column_stack((tags, nodes))
-                     tri3_elems.append(chunk)
+                     tri3_list.append(np.column_stack((tags, nodes)))
                  elif etype == 9: # Tri6
                      nodes = surf_nodes[i].reshape(-1, 6).astype(int)
                      tags = surf_tags[i].astype(int)
-                     chunk = np.column_stack((tags, nodes))
-                     tri6_elems.append(chunk)
+                     tri6_list.append(np.column_stack((tags, nodes)))
+            
+            # Ensure Unique Connectivity (Crucial for CalculiX shell normal estimation)
+            def unique_elems_by_nodes(chunks):
+                if not chunks: return []
+                combined = np.vstack(chunks)
+                # Sort node IDs per element to create a canonical representation
+                node_keys = [tuple(sorted(row[1:])) for row in combined]
+                # Keep only the first occurrence of each unique node set
+                unique_map = {}
+                for i, key in enumerate(node_keys):
+                    if key not in unique_map:
+                        unique_map[key] = combined[i]
+                return np.array(list(unique_map.values()))
+
+            tri3_elems = unique_elems_by_nodes(tri3_list)
+            tri6_elems = unique_elems_by_nodes(tri6_list)
+
+
             
             # Combine all for parsing/viz return
             if c3d4_elems:
@@ -160,17 +176,42 @@ class CalculiXAdapter(ISolver):
             else:
                 all_elems = np.vstack(c3d4_elems + c3d10_elems)
             
-            # Identify Boundary Nodes (Legacy/Heuristic Support for Fixed Temp)
-            z = node_coords[:, 2]
-            z_min, z_max = np.min(z), np.max(z)
-            z_rng = z_max - z_min
+            # Identify Boundary Nodes from Physical Groups (Semantic Detection)
+            # Look for BC_HeatSource physical group from mesh
+            hot_tags = np.array([], dtype=int)
+            cold_tags = np.array([], dtype=int)
+            heat_source_found = False
             
-            tol = config.get("bc_tolerance", 0.01)
-            hot_mask = z > (z_max - tol * z_rng)
-            cold_mask = z < (z_min + tol * z_rng)
+            physical_groups = gmsh.model.getPhysicalGroups(dim=2)  # Surface groups
+            for dim, ptag in physical_groups:
+                name = gmsh.model.getPhysicalName(dim, ptag)
+                if 'heatsource' in name.lower() or 'heat_source' in name.lower() or 'bc_heatsource' in name.lower():
+                    # Get entities in this physical group
+                    entities = gmsh.model.getEntitiesForPhysicalGroup(dim, ptag)
+                    for entity in entities:
+                        node_tags_entity, _, _ = gmsh.model.mesh.getNodes(dim, entity)
+                        hot_tags = np.concatenate([hot_tags, node_tags_entity.astype(int)])
+                    heat_source_found = True
+                    logger.info(f"[CalculiX] Using BC_HeatSource physical group for hot boundary ({len(hot_tags)} nodes)")
             
-            hot_tags = node_tags[hot_mask].astype(int)
-            cold_tags = node_tags[cold_mask].astype(int)
+            # Fallback to geometric heuristic if no semantic tags found
+            if not heat_source_found:
+                z = node_coords[:, 2]
+                z_min, z_max = np.min(z), np.max(z)
+                z_rng = z_max - z_min
+                tol = config.get("bc_tolerance", 0.01)
+                
+                # NEW: heat_source_at_z_min option (default True for typical "base heater" scenario)
+                if config.get("heat_source_at_z_min", True):
+                    hot_mask = z < (z_min + tol * z_rng)
+                    cold_mask = z > (z_max - tol * z_rng)
+                else:
+                    hot_mask = z > (z_max - tol * z_rng)
+                    cold_mask = z < (z_min + tol * z_rng)
+                
+                hot_tags = node_tags[hot_mask].astype(int)
+                cold_tags = node_tags[cold_mask].astype(int)
+                logger.info(f"[CalculiX] Using geometric fallback for boundaries (heat_source_at_z_min={config.get('heat_source_at_z_min', True)})")
             
             # Write INP
             with open(inp_file, 'w') as f:
@@ -179,8 +220,13 @@ class CalculiXAdapter(ISolver):
                 
                 # Nodes
                 f.write("*NODE\n")
+                # Unit Scaling: User requested MM units. Defaulting to 1.0 (No scaling).
+                scale = config.get("unit_scaling", 1.0) 
+                logger.info(f"[CalculiX] Using mesh scale {scale} (1.0 = mm)")
+
+                
                 for tag, (x,y,z) in zip(node_tags, node_coords):
-                    f.write(f"{int(tag)}, {x:.6f}, {y:.6f}, {z:.6f}\n")
+                    f.write(f"{int(tag)}, {x*scale:.6f}, {y*scale:.6f}, {z*scale:.6f}\n")
                     
                 # Volume Elements
                 if c3d4_elems:
@@ -197,14 +243,15 @@ class CalculiXAdapter(ISolver):
                              f.write(f", {n}")
                          f.write("\n")
 
-                # Skin Elements (S3/S6)
-                if tri3_elems:
+                # Skin Elements (S3/S6) - Re-enabled for convection
+                if len(tri3_elems) > 0:
                     f.write("*ELEMENT, TYPE=S3, ELSET=E_Skin\n")
                     for row in np.vstack(tri3_elems):
                         f.write(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}\n")
 
-                if tri6_elems:
+                if len(tri6_elems) > 0:
                      f.write("*ELEMENT, TYPE=S6, ELSET=E_Skin\n")
+
                      for row in np.vstack(tri6_elems):
                          f.write(f"{row[0]}")
                          for n in row[1:]:
@@ -212,31 +259,79 @@ class CalculiXAdapter(ISolver):
                          f.write("\n")
                     
                 # Materials & Sections
-                k = config.get("thermal_conductivity", 150.0)
-                rho = config.get("density", 2700.0)
-                cp = config.get("specific_heat", 900.0)
+                # Consistent Units: Watts, mm, kg, Kelvin, Seconds
+                # Conductivity: W/(mm K) = W/(m K) * 1e-3
+                # Density: kg/mm^3 = kg/m^3 * 1e-9
+                # Specific Heat: J/(kg K) [unchanged]
+                
+                k_si = config.get("thermal_conductivity", 150.0)
+                rho_si = config.get("density", 2700.0)
+                cp_si = config.get("specific_heat", 900.0)
+                
+                # Scale Thermal Conductivity (W/mK -> W/mmK = * 0.001)
+                if isinstance(k_si, list):
+                    k = [[val * 0.001, t] for val, t in k_si]
+                else:
+                    k = k_si * 0.001
+                
+                # Scale Density (kg/m^3 -> kg/mm^3 = * 1e-9)
+                if isinstance(rho_si, list):
+                    rho = [[val * 1e-9, t] for val, t in rho_si]
+                else:
+                    rho = rho_si * 1e-9
+                
+                # Scale Specific Heat (J/kgK) - Identity (m and mm units both use kg)
+                if isinstance(cp_si, list):
+                    cp = [[val, t] for val, t in cp_si]
+                else:
+                    cp = cp_si
                 
                 f.write("*MATERIAL, NAME=Mat1\n")
-                f.write("*CONDUCTIVITY\n")
-                f.write(f"{k}\n")
-                f.write("*DENSITY\n")
-                f.write(f"{rho}\n")
-                f.write("*SPECIFIC HEAT\n")
-                f.write(f"{cp}\n")
+                
+                def write_param(card_name, value):
+                    f.write(f"{card_name}\n")
+                    if isinstance(value, list):
+                        for pair in value:
+                            # Expecting [Value, Temp]
+                            f.write(f"{pair[0]}, {pair[1]}\n")
+                    else:
+                        f.write(f"{value}\n")
+                        
+                write_param("*CONDUCTIVITY", k)
+                write_param("*DENSITY", rho)
+                write_param("*SPECIFIC HEAT", cp)
                 
                 f.write("*SOLID SECTION, ELSET=E_Vol, MATERIAL=Mat1\n")
                 
-                if tri3_elems or tri6_elems:
-                     # Dummy Shell Section for Skin (Thickness=0.001) to support FILM
+                if len(tri3_elems) > 0 or len(tri6_elems) > 0:
+                     # Shell Section for Skin
+                     # Thickness 1.0mm (standard for mm units) helps avoiding zero-normal issues
                      f.write("*SHELL SECTION, ELSET=E_Skin, MATERIAL=Mat1\n")
-                     f.write("0.001\n")
+                     f.write("1.0\n")
+
+
                 
+                # Create Node Set for All Nodes (for Initial Conditions)
+                f.write("*NSET, NSET=N_All\n")
+                # Write in chunks of 8 or so? No, free format.
+                # Just write one per line or comma sep.
+                for i, tag in enumerate(node_tags):
+                    if i > 0 and i % 10 == 0: f.write("\n")
+                    if i % 10 != 0: f.write(", ")
+                    f.write(f"{int(tag)}")
+                f.write("\n")
+
+                # Initial Conditions (Required for Transient)
+                init_temp = config.get("initial_temperature", config.get("ambient_temperature", 293.0))
+                f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+                f.write(f"N_All, {init_temp}\n")
+
                 # Step
                 f.write("*STEP\n")
                 
-                if config.get("transient", False):
+                if config.get("transient", True):  # Default to transient
                      # Transient Analysis
-                     dt = config.get("time_step", 1.0)
+                     dt = config.get("time_step", 2.0)
                      t_end = config.get("duration", 10.0)
                      f.write("*HEAT TRANSFER, DIRECT\n")
                      f.write(f"{dt}, {t_end}\n")
@@ -247,26 +342,47 @@ class CalculiXAdapter(ISolver):
                 # Boundary Conditions (Conduction)
                 f.write("*BOUNDARY\n")
                 # Legacy Support: Hot Top / Cold Bottom
-                t_hot = config.get("heat_source_temperature", 800.0)
-                t_cold = config.get("ambient_temperature", 300.0)
+                t_hot = config.get("heat_source_temperature", 373.0)  # Default to 373K (100°C)
+                t_cold = config.get("ambient_temperature", 293.0)  # Default to 293K (20°C)
                 
-                for tag in hot_tags:
-                    f.write(f"{tag}, 11, 11, {t_hot}\n")
-                for tag in cold_tags:
-                    f.write(f"{tag}, 11, 11, {t_cold}\n")
+                # Hot BC (Z-Max) - Always applied if T_hot defined (conceptually)
+                # We could make this optional too, but usually we need a source.
+                if config.get("fix_hot_boundary", True):
+                    for tag in hot_tags:
+                        f.write(f"{tag}, 11, 11, {t_hot}\n")
+                        
+                # Cold BC (Z-Min) - Optional (e.g. for convection-only tip)
+                if config.get("fix_cold_boundary", False):  # Default to False for natural convection
+                    for tag in cold_tags:
+                        f.write(f"{tag}, 11, 11, {t_cold}\n")
                     
                 # Convection (*FILM)
+                # DISABLED: Shell-based convection doesn't work - shells not thermally connected!
+                # TODO: Implement *SURFACE-based convection on volume element faces
+                
+                # Convection (*FILM)
                 # Apply to E_Skin faces
-                h = config.get("convection_coeff", 0.0)
+                # Scale h: W/m^2K -> W/mm^2K (factor 1e-6)
+                h_si = config.get("convection_coeff", 25.0) 
+                h = h_si * 1e-6
+                
                 T_inf = config.get("ambient_temperature", 293.0) 
                 
-                if h > 0 and (tri3_elems or tri6_elems):
+                if h_si > 0 and (len(tri3_elems) > 0 or len(tri6_elems) > 0):
+
                      f.write("*FILM\n")
-                     # Apply to Face 1 (Top) of Shells
+                     # For shell elements (Tri3/Tri6), face specification is F1 or F2.
+                     # Using F is for solids only and will cause CCX to error on shells.
                      f.write(f"E_Skin, F1, {T_inf}, {h}\n")
 
+
                 # Output
-                f.write("*NODE FILE\n")
+                # *NODE PRINT generates .frd (ASCII) which is parseable
+                # *NODE FILE generates .12d (binary) which we can't parse
+                if config.get("transient", True):  # Match transient default
+                     f.write("*NODE PRINT, NSET=N_All, FREQUENCY=1\n")
+                else:
+                     f.write("*NODE PRINT, NSET=N_All\n")
                 f.write("NT\n")
                 f.write("*END STEP\n")
                 
@@ -277,65 +393,218 @@ class CalculiXAdapter(ISolver):
         finally:
             gmsh.finalize()
             
-    def _parse_frd(self, frd_file: Path, node_map: Dict, elements: np.ndarray) -> Dict:
+    def _parse_frd(self, frd_file: Path, node_map: Dict, elements: np.ndarray, config: Dict[str, Any] = {}) -> Dict:
         """
         Parses .frd file for NT (Nodal Temperature) values.
-        Returns dict compatible with SimulationResult.
+        Supports Transient (Multiple Steps).
+        Returns dict compatible with SimulationResult, plus 'time_series'.
         """
-        temperatures = {}
-        
-        reading_temps = False
         
         with open(frd_file, 'r') as f:
             lines = f.readlines()
             
-        for i, line in enumerate(lines):
-            # Check for Temperature block
-            # -4 is Nodal Results
-            # NT, NDTEMP, P
-            if line.startswith(" -4") and ("NT" in line or "NDTEMP" in line or "P" in line):
-                reading_temps = True
-                continue
-            
-            if reading_temps:
-                if line.startswith(" -3"): # End of block
-                    break
-                
+        # Data storage
+        all_steps = [] # List of {time: float, temperatures: Dict[nid, float]}
+        
+        current_time = 0.0
+        current_temps = {} # nid -> val
+        reading_nt = False
+        
+        # Check if we found ANY steps
+        found_data = False
+        
+        for line in lines:
+            # 1. Check for Step Header (Time)
+            # Format: "  100CL  101 1.000000000       11008 ..."
+            if line.startswith("  100CL"):
                 parts = line.split()
-                if len(parts) < 2: continue
+                if len(parts) >= 3:
+                    try:
+                        # If we have collected data for previous step, store it
+                        if current_temps:
+                             all_steps.append({'time': current_time, 'data': current_temps})
+                             
+                        # Start new step
+                        current_time = float(parts[2])
+                        current_temps = {} # Reset buffer
+                    except ValueError:
+                        pass
+                        
+            # 2. Check for Temperature Block Start
+            # " -4  NT..." or " -4  NDTEMP..."
+            if line.startswith(" -4") and ("NT" in line or "NDTEMP" in line or "P" in line):
+                reading_nt = True
+                found_data = True
+                continue
                 
-                try:
-                    # -1 123 3.000E+02
-                    if parts[0] == '-1':
+            # 3. Check for Block End
+            if line.startswith(" -3"):
+                if reading_nt:
+                    reading_nt = False
+                    # End of NT block for this step.
+                    # We usually append to all_steps here? 
+                    # But 100CL logic handles "Flush on new step".
+                    # What about the LAST step?
+                    # We need to flush after loop.
+                continue
+                
+            # 4. Parse Data lines
+            if reading_nt:
+                # Format: " -1 <nid> <val>"
+                parts = line.split()
+                if len(parts) < 3: continue
+                
+                if parts[0] == '-1':
+                    try:
                         nid = int(parts[1])
                         val = float(parts[2])
-                        temperatures[nid] = val
-                except:
-                    pass
-                    
-        if not temperatures:
+                        current_temps[nid] = val
+                    except:
+                        pass
+
+        # Flush final step check
+        if current_temps:
+             all_steps.append({'time': current_time, 'data': current_temps})
+             
+        logger.info(f"[CalculiX] Parsed {len(all_steps)} steps from FRD.")
+        print(f"[CalculiX] Parsed {len(all_steps)} steps from FRD.")
+        
+        if not all_steps:
+            # DEBUG: Print header of FRD file to see what's wrong
+            try:
+                print(f"FRD Header (first 20 lines):")
+                for line in lines[:20]:
+                    print(line.strip())
+            except: pass
             logger.warning("Could not parse temperatures from FRD.")
-            
-        # Convert to arrays matching node_map order
+            # Fallback to defaults?
+            all_steps.append({'time': 0.0, 'data': {}})
+
+        # Process Time Series Stats
+        # And determine FINAL result (Last Step)
+        
+        time_series_stats = []
+        final_temps = {}
+        
         sorted_nids = sorted(node_map.keys())
+        
+        for step in all_steps:
+             lbl = step['time']
+             data = step['data']
+             
+             # Stats
+             vals = list(data.values())
+             if vals:
+                 t_min = min(vals)
+                 t_max = max(vals)
+                 t_mean = sum(vals)/len(vals)
+             else:
+                 t_min = 300.0; t_max = 300.0; t_mean = 300.0
+                 
+             time_series_stats.append({
+                 'time': lbl,
+                 'min': t_min,
+                 'max': t_max,
+                 'mean': t_mean
+             })
+             
+             final_temps = data # Update latest
+             
+        # Build full Time Series (Array Data for Visualization)
+        time_series = []
+        for step in all_steps:
+             lbl = step['time']
+             data = step['data']
+             # Fill array aligned with sorted_nids
+             step_T = []
+             for nid in sorted_nids:
+                 step_T.append(data.get(nid, 300.0)) # Fallback to 300K if missing
+             time_series.append({
+                 'time': lbl, 
+                 'temperature': np.array(step_T)
+             })
+             
+        # Convert Final Result to Array
         T_array = []
         parsed_coords = []
         
         for nid in sorted_nids:
-            T_array.append(temperatures.get(nid, 300.0)) # Default if missing
+            T_array.append(final_temps.get(nid, 300.0))
             parsed_coords.append(node_map[nid])
             
         T_array = np.array(T_array)
         parsed_coords = np.array(parsed_coords)
         
-        # Calculate stats
         t_min = float(np.min(T_array)) if len(T_array)>0 else 0.0
         t_max = float(np.max(T_array)) if len(T_array)>0 else 0.0
+
+        # =====================================================================
+        # CONVERGENCE DETECTION
+        # Check if dT (mean temperature change between steps) has flatlined
+        # =====================================================================
+        converged = False
+        convergence_step = None
+        dT_threshold = 0.1  # K - if mean temp changes less than this, consider converged
         
+        if len(time_series_stats) >= 3:
+            # Calculate dT between consecutive steps
+            dT_history = []
+            for i in range(1, len(time_series_stats)):
+                dT = abs(time_series_stats[i]['mean'] - time_series_stats[i-1]['mean'])
+                dT_history.append(dT)
+            
+            # Check for flatline (last 3 steps all below threshold)
+            if len(dT_history) >= 3:
+                last_3_dT = dT_history[-3:]
+                if all(dt < dT_threshold for dt in last_3_dT):
+                    converged = True
+                    convergence_step = time_series_stats[-3]['time']
+                    logger.info(f"  [Convergence] Detected at t={convergence_step:.1f}s (dT < {dT_threshold}K for 3 steps)")
+        
+        if not converged and len(time_series_stats) > 0:
+            logger.info(f"  [Convergence] Not reached in {len(time_series_stats)} steps. Final dT={dT_history[-1]:.3f}K" if len(time_series_stats) > 1 else "  [Convergence] Only 1 step, cannot assess")
+
+        # =====================================================================
+        # HEAT FLUX CALCULATION (Watts convected away)
+        # Q = h * A * (T_surface - T_ambient)
+        # Estimate surface area from mesh and use mean surface temperature
+        # =====================================================================
+        heat_flux_watts = None
+        try:
+            # Get surface nodes (approximate: nodes on outer boundary)
+            # Use radial distance from Z-axis to identify surface
+            r = np.sqrt(parsed_coords[:, 0]**2 + parsed_coords[:, 1]**2)
+            r_max = np.max(r)
+            surface_mask = r > (r_max * 0.95)  # Nodes within 5% of max radius
+            
+            if np.any(surface_mask):
+                T_surface_mean = np.mean(T_array[surface_mask])
+                T_ambient = config.get("ambient_temperature", 293.0) 
+                h = config.get("convection_coeff", 25.0) 
+                
+                
+                # Estimate surface area from bounding box
+                z_range = np.max(parsed_coords[:, 2]) - np.min(parsed_coords[:, 2])
+                circumference = 2 * np.pi * r_max
+                A_lateral = circumference * z_range / 1000**2  # Convert mm² to m²
+                
+                heat_flux_watts = h * A_lateral * (T_surface_mean - T_ambient)
+                logger.info(f"  [Heat Flux] Q = {heat_flux_watts:.1f}W (h={h} W/m²K, A={A_lateral:.4f}m², ΔT={T_surface_mean - T_ambient:.1f}K)")
+        except Exception as e:
+            logger.warning(f"  [Heat Flux] Calculation failed: {e}")
+
         return {
             'temperature': T_array,
             'node_coords': parsed_coords,
             'min_temp': t_min,
             'max_temp': t_max,
-            'elements': elements 
+            'elements': elements,
+            'time_series_stats': time_series_stats,
+            'time_series': time_series,
+            'converged': converged,
+            'convergence_threshold': dT_threshold,
+            'convergence_steps': 3,
+            'final_dT': dT_history[-1] if len(dT_history) > 0 else None,
+            'heat_flux_watts': heat_flux_watts
         }
+

@@ -99,10 +99,24 @@ class SimOpsEventHandler(FileSystemEventHandler):
             
         file_path = PathHandler.normalize(event.src_path)
         
-        # Only process if not already queued
         if str(file_path) not in self.processing and str(file_path) not in self.processed:
             self._process_file(file_path)
+
+    def on_deleted(self, event):
+        """Handle file deletion - allow re-processing if added again"""
+        if event.is_directory:
+            return
             
+        file_path = PathHandler.normalize(event.src_path)
+        str_path = str(file_path)
+        
+        if str_path in self.processed:
+            # logger.info(f"♻️  File removed, clearing cache: {file_path.name}")
+            self.processed.discard(str_path)
+            
+        if str_path in self.processing:
+            self.processing.discard(str_path)
+    
     def _process_file(self, file_path: Path):
         """Process a new CAD file"""
         # Check extension

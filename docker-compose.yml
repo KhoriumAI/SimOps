@@ -144,7 +144,7 @@ services:
   # DASHBOARD: Job Monitor (RQ Dashboard)
   # =================================================================
   dashboard:
-    image: eoranged/rq-dashboard:latest
+    image: cjlapao/rq-dashboard:latest
     container_name: simops_dashboard
     depends_on:
       redis:
@@ -154,11 +154,6 @@ services:
     environment:
       RQ_DASHBOARD_REDIS_URL: redis://redis:6379
     logging: *default-logging
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9181/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     restart: unless-stopped
     deploy:
       resources:
