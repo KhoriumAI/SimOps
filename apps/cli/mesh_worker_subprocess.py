@@ -492,7 +492,9 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         gmsh.model.mesh.addElementsByType(1, 4, tet_tags, tet_nodes_flat)
         
         # Add surface triangles (type 2 = 3-node triangle) to Surface (2)
-        tri_tags = list(range(1, len(surface_faces) + 1))
+        # CRITICAL: Use unique tags (start after tets) to avoid conflicts
+        start_tri_tag = len(tetrahedra) + 1
+        tri_tags = list(range(start_tri_tag, start_tri_tag + len(surface_faces)))
         tri_nodes_flat = (surface_faces + 1).flatten().tolist()
         gmsh.model.mesh.addElementsByType(2, 2, tri_tags, tri_nodes_flat)
         
@@ -506,14 +508,28 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         # Compute quality metrics
         print("[GPU Mesher] Computing quality metrics...")
         try:
-            all_tags = list(range(1, len(tetrahedra) + 1))
+            # Tet Quality
+            all_tags = tet_tags
             sicn_vals = gmsh.model.mesh.getElementQualities(all_tags, "minSICN")
             gamma_vals = gmsh.model.mesh.getElementQualities(all_tags, "gamma")
             
-            per_element_quality = {i+1: float(sicn_vals[i]) for i in range(len(sicn_vals))}
-            per_element_gamma = {i+1: float(gamma_vals[i]) for i in range(len(gamma_vals))}
-            per_element_skewness = {i+1: 1.0 - float(sicn_vals[i]) for i in range(len(sicn_vals))}
-            per_element_aspect_ratio = {i+1: 1.0/float(sicn_vals[i]) if sicn_vals[i] > 0 else 100.0 for i in range(len(sicn_vals))}
+            per_element_quality = {t: float(sicn_vals[i]) for i, t in enumerate(all_tags)}
+            per_element_gamma = {t: float(gamma_vals[i]) for i, t in enumerate(all_tags)}
+            
+            # Map quality to be populated
+            # Add Surface Quality (Triangles)
+            # Triangles don't have volume/gamma in same way, use shape quality (minSICN/minSJ)
+            # Or just default to 1.0 (since they are boundary of valid tets)
+            # Use minSICN for consistency
+            try:
+                tri_sicn = gmsh.model.mesh.getElementQualities(tri_tags, "minSICN")
+                for i, t in enumerate(tri_tags):
+                    per_element_quality[t] = float(tri_sicn[i])
+            except:
+                pass
+
+            per_element_skewness = {t: 1.0 - float(per_element_quality.get(t, 0.5)) for t in all_tags}
+            per_element_aspect_ratio = {t: 1.0/float(per_element_quality.get(t, 0.5)) if per_element_quality.get(t, 0.5) > 0 else 100.0 for t in all_tags}
             
             quality_metrics = {
                 'sicn_min': float(min(sicn_vals)),
@@ -1000,6 +1016,22 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                 for i, tag in enumerate(tet_tags):
                     per_element_quality[str(tag)] = float(sicn_values[i])
                 
+                # Also compute surface quality (Triangles) for visualization
+                # This ensures the "Quality" view in frontend (which renders surface) has data
+                tri_tags = []
+                for et, tags in zip(elem_types, elem_tags):
+                     if et in [2, 9]: # Tri3 or Tri6
+                         tri_tags.extend(tags)
+                
+                if tri_tags:
+                    try:
+                        tri_sicn = gmsh.model.mesh.getElementQualities(tri_tags, "minSICN")
+                        for i, tag in enumerate(tri_tags):
+                            per_element_quality[str(tag)] = float(tri_sicn[i])
+                        print(f"[HXT] Included quality for {len(tri_tags)} surface elements")
+                    except Exception as e:
+                        print(f"[HXT] Warning: Could not compute surface quality: {e}")
+
                 print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
                 print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
                 
