@@ -428,8 +428,28 @@ def start_batch(batch_id):
                             
                             # Get file from storage
                             # For local storage, storage_path IS the full path
-                            # For S3, we'd need to download first
+                            # For S3, download to temp file first
+                            use_s3 = app.config.get('USE_S3', False)
                             input_path = batch_file.storage_path
+                            local_temp_file = None
+                            
+                            if use_s3 and input_path and input_path.startswith('s3://'):
+                                # Download S3 file to local temp directory
+                                file_ext = Path(batch_file.original_filename).suffix
+                                local_temp_dir = Path(tempfile.mkdtemp(prefix='meshgen_batch_'))
+                                local_temp_file = local_temp_dir / f"{batch_file.id}{file_ext}"
+                                try:
+                                    print(f"[BATCH] Downloading from S3: {input_path}", flush=True)
+                                    storage.download_to_local(input_path, str(local_temp_file))
+                                    input_path = str(local_temp_file)
+                                    print(f"[BATCH] Downloaded to: {input_path}", flush=True)
+                                except Exception as e:
+                                    job.status = 'failed'
+                                    job.error_message = f'Failed to download from S3: {str(e)}'
+                                    print(f"[BATCH] Error downloading from S3: {e}", flush=True)
+                                    db.session.commit()
+                                    continue
+                            
                             if not input_path or not os.path.exists(input_path):
                                 job.status = 'failed'
                                 job.error_message = f'Input file not found: {batch_file.storage_path}'
@@ -585,14 +605,43 @@ def start_batch(batch_id):
                             
                             if output_path and output_path.exists():
                                 job.status = 'completed'
-                                job.output_path = str(output_path)
                                 job.output_file_size = output_path.stat().st_size
                                 job.completed_at = datetime.utcnow()
+                                
+                                # Upload to S3 if configured
+                                if use_s3:
+                                    try:
+                                        # Get user email for S3 folder structure
+                                        user_email = batch.user.email if batch.user else None
+                                        mesh_filename = f"{batch_file.id}_{job.quality_preset}_mesh.msh"
+                                        s3_path = storage.save_local_file(
+                                            local_path=str(output_path),
+                                            filename=mesh_filename,
+                                            user_email=user_email,
+                                            file_type='mesh'
+                                        )
+                                        job.output_path = s3_path
+                                        print(f"[BATCH] Uploaded mesh to S3: {s3_path}", flush=True)
+                                        
+                                        # Also upload quality file if it exists
+                                        quality_path = output_path.with_suffix('.quality.json')
+                                        if quality_path.exists():
+                                            storage.save_local_file(
+                                                local_path=str(quality_path),
+                                                filename=quality_path.name,
+                                                user_email=user_email,
+                                                file_type='mesh'
+                                            )
+                                    except Exception as s3_err:
+                                        print(f"[BATCH] Warning: Failed to upload to S3: {s3_err}", flush=True)
+                                        job.output_path = str(output_path)  # Fallback to local path
+                                else:
+                                    job.output_path = str(output_path)
                                 
                                 # Calculate processing time
                                 if job.started_at:
                                     job.processing_time = (job.completed_at - job.started_at).total_seconds()
-                                print(f"[BATCH] ✓ Job completed: {output_path}", flush=True)
+                                print(f"[BATCH] ✓ Job completed: {job.output_path}", flush=True)
                                 
                                 # Update batch counts
                                 batch.completed_jobs = BatchJob.query.filter_by(
@@ -608,6 +657,15 @@ def start_batch(batch_id):
                                 ).count()
                             
                             db.session.commit()
+                            
+                            # Cleanup temp S3 download file
+                            if local_temp_file and Path(local_temp_file).exists():
+                                try:
+                                    Path(local_temp_file).unlink()
+                                    Path(local_temp_file).parent.rmdir()
+                                except Exception:
+                                    pass
+                            
                             print(f"[BATCH] === Job {job_idx + 1}/{total_jobs} complete, continuing... ===", flush=True)
                             
                         except Exception as e:
@@ -620,6 +678,15 @@ def start_batch(batch_id):
                                 batch_id=bid, status='failed'
                             ).count()
                             db.session.commit()
+                            
+                            # Cleanup temp S3 download file on error too
+                            if 'local_temp_file' in locals() and local_temp_file and Path(local_temp_file).exists():
+                                try:
+                                    Path(local_temp_file).unlink()
+                                    Path(local_temp_file).parent.rmdir()
+                                except Exception:
+                                    pass
+                            
                             print(f"[BATCH] === Job {job_idx + 1}/{total_jobs} failed, continuing... ===", flush=True)
                     
                     print(f"[BATCH] === All {total_jobs} jobs processed ===", flush=True)
