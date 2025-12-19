@@ -1114,41 +1114,58 @@ try:
     
     # Get all nodes
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    nodes = {{}}
+    nodes = {}
     for i, tag in enumerate(node_tags):
         nodes[int(tag)] = [node_coords[i*3], node_coords[i*3+1], node_coords[i*3+2]]
     
-    # Get all elements and extract surface
+    # Map elements to entities (Surface IDs)
+    element_to_entity = {}
+    entities = gmsh.model.getEntities(2) # Get all surfaces
+    for dim, entity_tag in entities:
+        # Get elements for this specific surface
+        try:
+            e_types, e_tags, _ = gmsh.model.mesh.getElements(2, entity_tag)
+            for i in range(len(e_types)):
+                for tag in e_tags[i]:
+                    element_to_entity[int(tag)] = int(entity_tag)
+        except:
+            pass
+
+    # Get all unique elements scan
     vertices = []
     element_tags = []
-    face_count = {{}}  # face_key -> count
-    face_data = {{}}   # face_key -> (original_vertices, element_tag)
-    direct_triangles = []
+    entity_tags_list = [] # Parralel to element_tags
     
-    # Get element types present (get all elements from all dimensions)
-    # Try dimension -1 to get all, or iterate through dimensions
+    face_count = {}  # face_key -> count
+    face_data = {}   # face_key -> (original_vertices, element_tag)
+    direct_triangles = [] # (n1, n2, n3, el_tag, entity_tag)
+    
+    # Get all elements efficiently
     elem_types, elem_tags_list, node_tags_list = gmsh.model.mesh.getElements(-1, -1)
 
-    # Debug: Print what element types are found
-    print(f"DEBUG: Found element types: {{list(elem_types)}}", file=sys.stderr)
-    print(f"DEBUG: Element counts: {{[len(t) for t in elem_tags_list]}}", file=sys.stderr)
+    # Debug: Print found types
+    print(f"DEBUG: Found element types: {[list(elem_types)]}", file=sys.stderr)
 
     for et, tags, nodes_per_elem in zip(elem_types, elem_tags_list, node_tags_list):
         if et == 2:  # Triangle (2D surface element)
             nodes_per = 3
             for i, tag in enumerate(tags):
+                el_tag = int(tag)
                 n1 = int(nodes_per_elem[i*nodes_per])
                 n2 = int(nodes_per_elem[i*nodes_per + 1])
                 n3 = int(nodes_per_elem[i*nodes_per + 2])
-                direct_triangles.append((n1, n2, n3, int(tag)))
-        elif et == 4:  # 4-node Tetrahedron (3D volume element)
+                ent_tag = element_to_entity.get(el_tag, 0)
+                direct_triangles.append((n1, n2, n3, el_tag, ent_tag))
+                
+        elif et == 4:  # 4-node Tetrahedron
             nodes_per = 4
             for i, tag in enumerate(tags):
                 n1 = int(nodes_per_elem[i*nodes_per])
                 n2 = int(nodes_per_elem[i*nodes_per + 1])
                 n3 = int(nodes_per_elem[i*nodes_per + 2])
                 n4 = int(nodes_per_elem[i*nodes_per + 3])
-                # 4 faces of tetrahedron with original vertex order
+                
+                # Check faces
                 tet_faces = [
                     ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
                     ((n1, n2, n4), tuple(sorted([n1, n2, n4]))),
@@ -1161,16 +1178,14 @@ try:
                     else:
                         face_count[face_key] = 1
                         face_data[face_key] = (orig_face, int(tag))
-        elif et == 11:  # 10-node second-order Tetrahedron
-            # For 10-node tet: first 4 nodes are corners, remaining 6 are edge midpoints
+                        
+        elif et == 11:  # 10-node Tet
             nodes_per = 10
             for i, tag in enumerate(tags):
-                # Extract corner nodes only (first 4)
                 n1 = int(nodes_per_elem[i*nodes_per])
                 n2 = int(nodes_per_elem[i*nodes_per + 1])
                 n3 = int(nodes_per_elem[i*nodes_per + 2])
                 n4 = int(nodes_per_elem[i*nodes_per + 3])
-                # 4 faces of tetrahedron with original vertex order
                 tet_faces = [
                     ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
                     ((n1, n2, n4), tuple(sorted([n1, n2, n4]))),
@@ -1184,32 +1199,38 @@ try:
                         face_count[face_key] = 1
                         face_data[face_key] = (orig_face, int(tag))
     
-    # Extract boundary faces (appear only once)
-    surface_triangles = []
+    # Extract boundary faces from volumes
+    surface_triangles = [] # (n1, n2, n3, el_tag, entity_tag)
     for face_key, count in face_count.items():
         if count == 1:
             orig_face, el_tag = face_data[face_key]
-            surface_triangles.append((orig_face[0], orig_face[1], orig_face[2], el_tag))
+            # Boundary faces form tets don't have explicit entity tags usually
+            # unless we map them spatially. Use 0 for now.
+            surface_triangles.append((orig_face[0], orig_face[1], orig_face[2], el_tag, 0))
     
-    # Combine triangles
+    # Strategy: If we have direct surface triangles, use them (they have entity tags).
+    # If not, use boundary faces. 
+    # Or combine them?
+    # Simple merge for now.
     all_triangles = direct_triangles + surface_triangles
     
-    # Debug output
-    print(f"DEBUG: direct_triangles={{len(direct_triangles)}}, surface_triangles={{len(surface_triangles)}}", file=sys.stderr)
+    # deduplicate based on node sets if needed? 
+    # For now, just output.
     
-    # Build output
-    for n1, n2, n3, el_tag in all_triangles:
+    for n1, n2, n3, el_tag, ent_tag in all_triangles:
         if n1 in nodes and n2 in nodes and n3 in nodes:
             vertices.extend(nodes[n1])
             vertices.extend(nodes[n2])
             vertices.extend(nodes[n3])
             element_tags.append(el_tag)
-    
-    result = {{
+            entity_tags_list.append(ent_tag)
+            
+    result = {
         "vertices": vertices,
         "element_tags": element_tags,
+        "entity_tags": entity_tags_list,
         "num_nodes": len(nodes)
-    }}
+    }
     print("MESH_DATA:" + json.dumps(result))
     
 except Exception as e:
@@ -1244,18 +1265,20 @@ finally:
         
         vertices = mesh_data['vertices']
         element_tags = mesh_data['element_tags']
-        
+        entity_tags = mesh_data.get('entity_tags', []) # New field
+
         # Build colors based on quality with smooth gradient
         colors = []
         matched_count = 0
         unmatched_count = 0
         
         for el_tag in element_tags:
-            q = per_element_quality.get(el_tag)
+            q = per_element_quality.get(str(el_tag)) # Ensure string key lookup
+            if q is None: q = per_element_quality.get(int(el_tag)) # Try int just in case
+
             if q is not None:
                 matched_count += 1
                 # Smooth gradient from red (0) to green (1)
-                # Red (bad) -> Orange -> Yellow -> Light Green -> Green (good)
                 if q <= 0.1:
                     r, g, b = 0.8, 0.0, 0.0  # Dark red - very bad
                 elif q < 0.3:
@@ -1350,6 +1373,7 @@ finally:
         return {
             "vertices": vertices,
             "colors": colors,
+            "entityTags": entity_tags,  # Pass raw array of surface IDs per triangle
             "numVertices": len(vertices) // 3,
             "numTriangles": len(vertices) // 9,
             "qualityMetrics": quality_summary,
