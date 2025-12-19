@@ -6,6 +6,18 @@ import { BarChart3, TrendingUp, TrendingDown, Minus } from 'lucide-react'
  * Shows the distribution of element quality (SICN values)
  */
 export default function QualityHistogram({ histogramData: serverHistogramData, qualityData, qualityMetrics, isVisible = true }) {
+
+  // Normalize metrics keys (handle both min_sicn and sicn_min naming styles)
+  const metrics = useMemo(() => {
+    if (!qualityMetrics) return null
+    return {
+      min: qualityMetrics.min_sicn ?? qualityMetrics.sicn_min,
+      max: qualityMetrics.max_sicn ?? qualityMetrics.sicn_max,
+      avg: qualityMetrics.avg_sicn ?? qualityMetrics.sicn_avg,
+      count: qualityMetrics.element_count ?? qualityMetrics.total_elements
+    }
+  }, [qualityMetrics])
+
   // Use server-provided histogram data, or generate from raw/metrics
   const histogramData = useMemo(() => {
     // Prefer server-provided histogram data (real data)
@@ -20,11 +32,11 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
       return generateFromRawData(qualityData)
     }
     // Otherwise generate from summary metrics (estimated)
-    if (qualityMetrics) {
-      return generateFromMetrics(qualityMetrics)
+    if (metrics) {
+      return generateFromMetrics(metrics)
     }
     return null
-  }, [serverHistogramData, qualityData, qualityMetrics])
+  }, [serverHistogramData, qualityData, metrics])
 
   // Generate from raw quality values
   function generateFromRawData(data) {
@@ -32,7 +44,7 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
     const histogram = new Array(bins).fill(0)
     let validCount = 0
     let invalidCount = 0
-    
+
     data.forEach(value => {
       if (value < 0) {
         invalidCount++
@@ -44,7 +56,7 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
     })
 
     const maxCount = Math.max(...histogram)
-    
+
     return {
       bins: histogram.map((count, i) => ({
         rangeStart: i / 10,
@@ -60,65 +72,65 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
   }
 
   // Generate approximate histogram from summary metrics
-  function generateFromMetrics(metrics) {
-    if (!metrics) return null
-    
-    const { min_sicn, max_sicn, avg_sicn, element_count } = metrics
-    
-    const mean = avg_sicn ?? 0.5
-    const minVal = min_sicn ?? Math.max(0, mean - 0.3)
-    const maxVal = max_sicn ?? Math.min(1, mean + 0.3)
-    
+  function generateFromMetrics(m) {
+    if (!m) return null
+
+    const { min, max, avg, count } = m
+
+    const mean = avg ?? 0.5
+    const minVal = min ?? Math.max(0, mean - 0.3)
+    const maxVal = max ?? Math.min(1, mean + 0.3)
+
     const bins = 10
     const histogram = []
     const sigma = Math.max(0.1, (maxVal - minVal) / 3)
-    
+
     // Generate Gaussian distribution
     for (let i = 0; i < bins; i++) {
       const binCenter = (i + 0.5) / 10
       let value = 0
-      
+
       // Only generate values within the data range
       if (binCenter >= minVal - 0.1 && binCenter <= maxVal + 0.1) {
         value = Math.exp(-Math.pow(binCenter - mean, 2) / (2 * sigma * sigma))
       }
-      
+
       histogram.push(value)
     }
-    
+
     // Normalize
     const maxVal2 = Math.max(...histogram)
-    
+
     return {
       bins: histogram.map((value, i) => ({
         rangeStart: i / 10,
-        count: Math.round((value / maxVal2) * (element_count || 100)),
+        count: Math.round((value / maxVal2) * (count || 100)),
         normalized: maxVal2 > 0 ? value / maxVal2 : 0,
       })),
-      totalElements: element_count || 0,
-      validCount: element_count || 0,
+      totalElements: count || 0,
+      validCount: count || 0,
       invalidCount: 0,
-      maxCount: element_count || 100,
+      maxCount: count || 100,
       isApproximate: true,
     }
   }
 
   // Quality assessment
   const qualityAssessment = useMemo(() => {
-    if (!qualityMetrics?.avg_sicn) return null
-    
-    const avg = qualityMetrics.avg_sicn
+    if (!metrics?.avg) return null
+
+    const avg = metrics.avg
     if (avg >= 0.7) return { label: 'Excellent', icon: TrendingUp, color: 'text-green-400' }
     if (avg >= 0.5) return { label: 'Good', icon: TrendingUp, color: 'text-blue-400' }
     if (avg >= 0.3) return { label: 'Fair', icon: Minus, color: 'text-yellow-400' }
     if (avg >= 0.1) return { label: 'Poor', icon: TrendingDown, color: 'text-orange-400' }
     return { label: 'Bad', icon: TrendingDown, color: 'text-red-400' }
-  }, [qualityMetrics])
+  }, [metrics])
 
   if (!isVisible) return null
-  
+
   // No data message
-  if (!histogramData && !qualityMetrics) {
+  if (!histogramData && !metrics) {
     return (
       <div className="bg-gray-900/95 backdrop-blur rounded-lg p-3 min-w-[240px] border border-gray-700 shadow-xl">
         <div className="flex items-center gap-2 mb-2">
@@ -128,7 +140,7 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
         <div className="text-gray-400 text-xs text-center py-4">
           <div className="mb-2">📊 No quality data available</div>
           <div className="text-[10px]">
-            Click <span className="text-blue-400 font-medium">"Generate Mesh"</span> to create<br/>
+            Click <span className="text-blue-400 font-medium">"Generate Mesh"</span> to create<br />
             a mesh and view quality metrics.
           </div>
         </div>
@@ -173,7 +185,7 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
               strokeDasharray={y > 0 && y < 1 ? "2,2" : "0"}
             />
           ))}
-          
+
           {/* Bars */}
           {histogramData?.bins?.map((bin, i) => {
             const hasData = bin.normalized > 0
@@ -181,7 +193,7 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
             const x = i * (barWidth + barGap)
             const y = barHeight - height
             const color = hasData ? getBarColor(bin.rangeStart) : '#374151' // Consistent gray for empty
-            
+
             return (
               <g key={i}>
                 <rect
@@ -224,32 +236,32 @@ export default function QualityHistogram({ histogramData: serverHistogramData, q
       </div>
 
       {/* Quality Metrics Summary */}
-      {qualityMetrics && (
+      {metrics && (
         <div className="border-t border-gray-700 pt-2 mt-2">
           <div className="grid grid-cols-3 gap-2 text-center">
             <div>
               <div className="text-[10px] text-gray-500">Min</div>
-              <div className={`font-mono font-medium ${getQualityColor(qualityMetrics.min_sicn)}`}>
-                {qualityMetrics.min_sicn?.toFixed(3) || 'N/A'}
+              <div className={`font-mono font-medium ${getQualityColor(metrics.min)}`}>
+                {metrics.min?.toFixed(3) || 'N/A'}
               </div>
             </div>
             <div>
               <div className="text-[10px] text-gray-500">Avg</div>
-              <div className={`font-mono font-medium ${getQualityColor(qualityMetrics.avg_sicn)}`}>
-                {qualityMetrics.avg_sicn?.toFixed(3) || 'N/A'}
+              <div className={`font-mono font-medium ${getQualityColor(metrics.avg)}`}>
+                {metrics.avg?.toFixed(3) || 'N/A'}
               </div>
             </div>
             <div>
               <div className="text-[10px] text-gray-500">Max</div>
-              <div className={`font-mono font-medium ${getQualityColor(qualityMetrics.max_sicn)}`}>
-                {qualityMetrics.max_sicn?.toFixed(3) || 'N/A'}
+              <div className={`font-mono font-medium ${getQualityColor(metrics.max)}`}>
+                {metrics.max?.toFixed(3) || 'N/A'}
               </div>
             </div>
           </div>
-          
-          {qualityMetrics.element_count && (
+
+          {metrics.count && (
             <div className="text-center mt-2 text-[10px] text-gray-500">
-              {qualityMetrics.element_count.toLocaleString()} elements
+              {metrics.count.toLocaleString()} elements
             </div>
           )}
         </div>
