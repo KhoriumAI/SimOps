@@ -1114,12 +1114,12 @@ try:
     
     # Get all nodes
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    nodes = {}
+    nodes = {{}}
     for i, tag in enumerate(node_tags):
         nodes[int(tag)] = [node_coords[i*3], node_coords[i*3+1], node_coords[i*3+2]]
     
     # Map elements to entities (Surface IDs)
-    element_to_entity = {}
+    element_to_entity = {{}}
     entities = gmsh.model.getEntities(2) # Get all surfaces
     for dim, entity_tag in entities:
         # Get elements for this specific surface
@@ -1136,15 +1136,15 @@ try:
     element_tags = []
     entity_tags_list = [] # Parralel to element_tags
     
-    face_count = {}  # face_key -> count
-    face_data = {}   # face_key -> (original_vertices, element_tag)
+    face_count = {{}}  # face_key -> count
+    face_data = {{}}   # face_key -> (original_vertices, element_tag)
     direct_triangles = [] # (n1, n2, n3, el_tag, entity_tag)
     
     # Get all elements efficiently
     elem_types, elem_tags_list, node_tags_list = gmsh.model.mesh.getElements(-1, -1)
 
     # Debug: Print found types
-    print(f"DEBUG: Found element types: {[list(elem_types)]}", file=sys.stderr)
+    print(f"DEBUG: Found element types: {{list(elem_types)}}", file=sys.stderr)
 
     for et, tags, nodes_per_elem in zip(elem_types, elem_tags_list, node_tags_list):
         if et == 2:  # Triangle (2D surface element)
@@ -1225,12 +1225,12 @@ try:
             element_tags.append(el_tag)
             entity_tags_list.append(ent_tag)
             
-    result = {
+    result = {{
         "vertices": vertices,
         "element_tags": element_tags,
         "entity_tags": entity_tags_list,
         "num_nodes": len(nodes)
-    }
+    }}
     print("MESH_DATA:" + json.dumps(result))
     
 except Exception as e:
