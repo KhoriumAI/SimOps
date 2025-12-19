@@ -1,76 +1,22 @@
-import { useEffect, useRef, useState, useMemo } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, PerspectiveCamera } from '@react-three/drei'
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
+import { Canvas, useThree, useFrame } from '@react-three/fiber'
+import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, MousePointer2, Paintbrush, Scissors, BarChart3, Loader2 } from 'lucide-react'
+import { Box, Loader2, MousePointer2, Tag, X, BarChart3 } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
 
-// Highlighted Face Overlay
-function HighlightedFace({ meshData, selectedTag }) {
-  const geometry = useMemo(() => {
-    if (!meshData || selectedTag === null) return null
-
-    // Find all triangles belonging to this entity tag
-    const indices = []
-    const entityTags = meshData.entityTags || []
-
-    for (let i = 0; i < entityTags.length; i++) {
-      if (entityTags[i] === selectedTag) {
-        // Triangle i (vertices i*3, i*3+1, i*3+2)
-        indices.push(i * 3, i * 3 + 1, i * 3 + 2)
-      }
-    }
-
-    if (indices.length === 0) return null
-
-    const subsetGeo = new THREE.BufferGeometry()
-
-    // Extract vertices for this subset
-    const allVertices = meshData.vertices
-    const subsetVertices = new Float32Array(indices.length * 3)
-
-    for (let j = 0; j < indices.length; j++) {
-      const vIdx = indices[j] // index in flat array
-      subsetVertices[j * 3] = allVertices[vIdx * 3]
-      subsetVertices[j * 3 + 1] = allVertices[vIdx * 3 + 1]
-      subsetVertices[j * 3 + 2] = allVertices[vIdx * 3 + 2]
-    }
-
-    subsetGeo.setAttribute('position', new THREE.BufferAttribute(subsetVertices, 3))
-    subsetGeo.computeVertexNormals()
-
-    // Slight offset to prevent z-fighting
-    subsetGeo.translate(0, 0, 0.001)
-
-    return subsetGeo
-  }, [meshData, selectedTag])
-
-  if (!geometry) return null
-
+function AxesIndicator({ visible }) {
+  if (!visible) return null
   return (
-    <mesh geometry={geometry}>
-      <meshBasicMaterial
-        color="#ffd700"
-        transparent={true}
-        opacity={0.6}
-        side={THREE.DoubleSide}
-        depthTest={false} // Always show on top
-        depthWrite={false}
-      />
-      <meshBasicMaterial
-        color="#ffffff"
-        wireframe={true}
-        transparent={true}
-        opacity={0.8}
-        depthTest={false}
-      />
-    </mesh>
+    <GizmoHelper alignment="bottom-left" margin={[80, 80]}>
+      <GizmoViewport axisColors={['#ff4444', '#44ff44', '#4444ff']} labelColor="white" />
+    </GizmoHelper>
   )
 }
 
-function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor, customColors }) {
+function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces }) {
   const meshRef = useRef()
-  const { camera, gl } = useThree()
+  const { camera, gl, raycaster, pointer } = useThree()
 
   // Enable local clipping
   useEffect(() => {
@@ -87,12 +33,9 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor,
     const vertices = new Float32Array(meshData.vertices)
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
-    // Colors (Float32Array)
-    // Priority: Custom (Height) > Quality (if showQuality) > None
-    const sourceColors = customColors || (meshData.colors && meshData.colors.length > 0 ? meshData.colors : null)
-
-    if (sourceColors) {
-      const colors = new Float32Array(sourceColors)
+    // Colors (Float32Array) - if available (for quality mode)
+    if (meshData.colors && meshData.colors.length > 0) {
+      const colors = new Float32Array(meshData.colors)
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     }
 
@@ -100,9 +43,60 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor,
     geo.computeBoundingBox()
 
     return geo
-  }, [meshData, customColors])
+  }, [meshData])
 
-  // Auto-fit camera
+  // Create gradient colors based on height (Z position in original coords)
+  const gradientGeometry = useMemo(() => {
+    if (!geometry) return null
+    
+    const geo = new THREE.BufferGeometry()
+    
+    // Copy position attribute
+    geo.setAttribute('position', geometry.attributes.position.clone())
+    
+    // Copy normals if available
+    if (geometry.attributes.normal) {
+      geo.setAttribute('normal', geometry.attributes.normal.clone())
+    } else {
+      geo.computeVertexNormals()
+    }
+    
+    const positions = geo.attributes.position.array
+    const vertexCount = positions.length / 3
+    
+    // Find min/max Z (height in original CAD coords)
+    let minZ = Infinity, maxZ = -Infinity
+    for (let i = 0; i < vertexCount; i++) {
+      const z = positions[i * 3 + 2] // Z coordinate
+      minZ = Math.min(minZ, z)
+      maxZ = Math.max(maxZ, z)
+    }
+    
+    // Create gradient colors
+    const colors = new Float32Array(vertexCount * 3)
+    const range = maxZ - minZ || 1
+    
+    // Parse gradient colors
+    const color1 = new THREE.Color(gradientColors?.start || '#4a9eff')
+    const color2 = new THREE.Color(gradientColors?.end || '#ff6b6b')
+    
+    for (let i = 0; i < vertexCount; i++) {
+      const z = positions[i * 3 + 2]
+      const t = (z - minZ) / range // Normalized 0-1
+      
+      // Interpolate between colors
+      colors[i * 3] = color1.r + (color2.r - color1.r) * t
+      colors[i * 3 + 1] = color1.g + (color2.g - color1.g) * t
+      colors[i * 3 + 2] = color1.b + (color2.b - color1.b) * t
+    }
+    
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    geo.computeBoundingBox()
+    
+    return geo
+  }, [geometry, gradientColors])
+
+  // Auto-fit camera (accounting for Z-up to Y-up rotation)
   useEffect(() => {
     if (geometry && camera) {
       const boundingBox = geometry.boundingBox
@@ -112,9 +106,16 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor,
       boundingBox.getSize(size)
       const maxDim = Math.max(size.x, size.y, size.z)
 
-      const distance = maxDim * 2
-      camera.position.set(center.x + distance, center.y + distance, center.z + distance)
-      camera.lookAt(center)
+      // After rotation: original Z becomes Y, original Y becomes -Z
+      // Position camera closer for larger initial view
+      const distance = maxDim * 1.4
+      // Camera looks from front-right-top (isometric-like view)
+      camera.position.set(
+        center.x + distance * 0.8,
+        center.z + distance * 0.6,  // Original Z is now Y
+        -center.y + distance * 0.8  // Original Y is now -Z
+      )
+      camera.lookAt(center.x, center.z, -center.y)
       camera.updateProjectionMatrix()
     }
   }, [geometry, camera])
@@ -132,61 +133,130 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor,
     const planes = []
 
     if (clipping.x) {
+      // X plane: Normal (-1, 0, 0) to cut from right
       const xPos = center.x + (size.x / 2) * (clipping.xValue / 50)
       planes.push(new THREE.Plane(new THREE.Vector3(-1, 0, 0), xPos))
     }
     if (clipping.y) {
+      // Y plane
       const yPos = center.y + (size.y / 2) * (clipping.yValue / 50)
       planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), yPos))
     }
     if (clipping.z) {
+      // Z plane
       const zPos = center.z + (size.z / 2) * (clipping.zValue / 50)
       planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), zPos))
     }
 
     return planes
-  }, [geometry, clipping.enabled, clipping.x, clipping.y, clipping.z, clipping.xValue, clipping.yValue, clipping.zValue])
+  }, [geometry, clipping])
+
+  // Handle face click for selection
+  const handleClick = useCallback((event) => {
+    if (!selectionMode || !meshRef.current || !onFaceSelect) return
+    
+    event.stopPropagation()
+    
+    const intersects = raycaster.intersectObject(meshRef.current)
+    if (intersects.length > 0) {
+      const faceIndex = intersects[0].faceIndex
+      const point = intersects[0].point
+      const normal = intersects[0].face?.normal
+      
+      onFaceSelect({
+        faceIndex,
+        point: { x: point.x, y: point.y, z: point.z },
+        normal: normal ? { x: normal.x, y: normal.y, z: normal.z } : null,
+      })
+    }
+  }, [selectionMode, onFaceSelect, raycaster])
+
+  // Create highlight geometry for selected faces
+  const selectedFaceGeometry = useMemo(() => {
+    if (!selectedFaces || selectedFaces.length === 0 || !geometry) return null
+    
+    const positions = geometry.attributes.position.array
+    const highlightPositions = []
+    
+    selectedFaces.forEach(face => {
+      const idx = face.faceIndex * 9 // 3 vertices * 3 coords
+      if (idx + 8 < positions.length) {
+        for (let i = 0; i < 9; i++) {
+          highlightPositions.push(positions[idx + i])
+        }
+      }
+    })
+    
+    if (highlightPositions.length === 0) return null
+    
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(highlightPositions, 3))
+    geo.computeVertexNormals()
+    return geo
+  }, [selectedFaces, geometry])
 
   if (!geometry) return null
 
-  // Helper to determine if we are effectively showing vertex colors
-  // Case 1: Custom Colors provided (Height mode) -> YES
-  // Case 2: Show Quality is true AND mesh has colors -> YES
-  // Otherwise -> NO (Solid Color)
-  const shouldUseVertexColors = !!customColors || (showQuality && meshData.colors && meshData.colors.length > 0)
+  // Determine which geometry and colors to use
+  const useVertexColors = colorMode === 'quality' && meshData.colors && meshData.colors.length > 0
+  const useGradient = colorMode === 'gradient' && gradientGeometry
+  const activeGeometry = useGradient ? gradientGeometry : geometry
 
   return (
-    <group>
-      {/* Main Solid Mesh */}
-      <mesh ref={meshRef} geometry={geometry} castShadow receiveShadow>
+    // Rotate from Z-up (CAD) to Y-up (Three.js) coordinate system
+    <group rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh 
+        key={`mesh-${colorMode}-${gradientColors?.start}-${gradientColors?.end}`}
+        ref={meshRef} 
+        geometry={activeGeometry} 
+        frustumCulled={true}
+        onClick={handleClick}
+      >
         <meshStandardMaterial
-          vertexColors={shouldUseVertexColors}
-          color={shouldUseVertexColors ? undefined : meshColor}
+          vertexColors={useVertexColors || useGradient}
+          color={useVertexColors || useGradient ? undefined : meshColor}
           side={THREE.DoubleSide}
           flatShading={true}
           clippingPlanes={clippingPlanes}
           clipShadows={true}
-          roughness={0.5}
-          metalness={0.1}
+          roughness={roughness}
+          metalness={metalness}
+          opacity={opacity}
+          transparent={opacity < 1}
         />
       </mesh>
 
-      {/* Wireframe Overlay */}
-      {showWireframe && (
-        <mesh geometry={geometry}>
-          <meshBasicMaterial
-            color="#ffffff"
-            wireframe={true}
-            opacity={0.3}
-            transparent={true}
-            clippingPlanes={clippingPlanes}
+      {/* Highlight selected faces */}
+      {selectedFaceGeometry && (
+        <mesh geometry={selectedFaceGeometry}>
+          <meshBasicMaterial 
+            color="#00ff00" 
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.6}
+            depthTest={false}
           />
         </mesh>
       )}
 
-      {/* Cap for clipping */}
+      {/* Wireframe overlay - shows ALL triangle edges */}
+      {showWireframe && (
+        <group scale={[wireframeScale, wireframeScale, wireframeScale]}>
+          <lineSegments>
+            <wireframeGeometry args={[activeGeometry]} />
+            <lineBasicMaterial 
+              color={wireframeColor} 
+              opacity={wireframeOpacity}
+              transparent={true}
+              linewidth={1}
+            />
+          </lineSegments>
+        </group>
+      )}
+
+      {/* Cap for clipping (Simplified: just show backface with different color) */}
       {clipping.enabled && (
-        <mesh geometry={geometry}>
+        <mesh geometry={activeGeometry}>
           <meshBasicMaterial
             color="#ff5555"
             side={THREE.BackSide}
@@ -198,17 +268,7 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor,
   )
 }
 
-function GridWithAxes({ showAxes }) {
-  if (!showAxes) return null
-  return (
-    <>
-      <gridHelper args={[200, 20, '#444444', '#222222']} />
-      <axesHelper args={[20]} />
-    </>
-  )
-}
-
-export default function MeshViewer({ meshData, qualityMetrics, filename, isLoading, loadingProgress, loadingMessage }) {
+export default function MeshViewer({ meshData, geometryInfo, filename, qualityMetrics, status, isLoading, loadingProgress, loadingMessage }) {
   const [clipping, setClipping] = useState({
     enabled: false,
     x: false,
@@ -219,460 +279,698 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
     zValue: 0
   })
 
-  // UI States
-  const [showAxes, setShowAxes] = useState(false)
-  const [showWireframe, setShowWireframe] = useState(true)
+  const [showQuality, setShowQuality] = useState(false)
+  const [showControls, setShowControls] = useState(false)
+  const [showPaintPanel, setShowPaintPanel] = useState(false)
+  const [showAxes, setShowAxes] = useState(true)
+  const [showWireframe, setShowWireframe] = useState(false)
   const [showHistogram, setShowHistogram] = useState(false)
+  const [showWireframePanel, setShowWireframePanel] = useState(false)
+  
+  // Wireframe options
+  const [wireframeColor, setWireframeColor] = useState('#000000')
+  const [wireframeOpacity, setWireframeOpacity] = useState(0.6)
+  const [wireframeScale, setWireframeScale] = useState(1.0) // Scale factor for mesh when viewing wireframe
+  
+  // Paint/Color options
+  const [meshColor, setMeshColor] = useState('#4a9eff')
+  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
+  const [opacity, setOpacity] = useState(1.0)
+  const [metalness, setMetalness] = useState(0.1)
+  const [roughness, setRoughness] = useState(0.5)
+  const [gradientColors, setGradientColors] = useState({ start: '#4a9eff', end: '#ff6b6b' })
 
-  // Tools
-  const [activeTool, setActiveTool] = useState(null) // 'select', 'paint', 'clip'
+  // Face selection state
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedFaces, setSelectedFaces] = useState([])
+  const [faceNames, setFaceNames] = useState({}) // { faceIndex: name }
+  const [showFacePanel, setShowFacePanel] = useState(false)
+  const [pendingFaceName, setPendingFaceName] = useState('')
 
-  // Color/Style State
-  const [meshColor, setMeshColor] = useState('#3b82f6') // Default Blue
-  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'height'
+  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
+  const isCompleted = status === 'completed'
 
-  // Selection State
-  const [selectedTag, setSelectedTag] = useState(null)
-  const [faceNames, setFaceNames] = useState({})
-  const [editingName, setEditingName] = useState("")
-
-  // Timer State
-  const [elapsedTime, setElapsedTime] = useState(0)
-
-  // Timer Effect
-  useEffect(() => {
-    let interval
-    if (isLoading) {
-      const startTime = Date.now() - (elapsedTime * 1000)
-      interval = setInterval(() => {
-        setElapsedTime(Math.floor((Date.now() - startTime) / 1000))
-      }, 1000)
-    }
-    return () => clearInterval(interval)
-  }, [isLoading])
-
-  // Reset timer on new file
-  useEffect(() => {
-    if (isLoading && loadingProgress === 0) setElapsedTime(0)
-  }, [isLoading, loadingProgress])
-
-
-  const toggleTool = (tool) => {
-    if (tool === 'clip') {
-      const newState = !clipping.enabled
-      setClipping(prev => ({ ...prev, enabled: newState }))
-      setActiveTool(newState ? 'clip' : null)
-    } else if (tool === 'hist') {
-      setShowHistogram(prev => !prev)
-    } else if (tool === 'select') {
-      setActiveTool(activeTool === 'select' ? null : 'select')
-      setSelectedTag(null) // Clear selection when toggling off
-    } else if (tool === 'color') {
-      setActiveTool(activeTool === 'color' ? null : 'color')
-    } else {
-      setActiveTool(activeTool === tool ? null : tool)
-    }
-  }
-
-  const handleMeshClick = (e) => {
-    if (activeTool !== 'select' || !meshData) return
-    e.stopPropagation()
-
-    // Get face index
-    const faceIndex = e.faceIndex
-    if (faceIndex !== undefined && meshData.entityTags) {
-      const tag = meshData.entityTags[faceIndex]
-      if (tag !== undefined) {
-        setSelectedTag(tag === selectedTag ? null : tag)
-        setEditingName(faceNames[tag] || "")
-        console.log("Selected Face Tag:", tag)
+  // Handle face selection
+  const handleFaceSelect = useCallback((faceData) => {
+    if (!selectionMode) return
+    
+    setSelectedFaces(prev => {
+      const exists = prev.find(f => f.faceIndex === faceData.faceIndex)
+      if (exists) {
+        // Deselect if already selected
+        return prev.filter(f => f.faceIndex !== faceData.faceIndex)
       }
+      // Add new selection
+      return [...prev, faceData]
+    })
+    setShowFacePanel(true)
+  }, [selectionMode])
+
+  // Save face name
+  const saveFaceName = useCallback(() => {
+    if (selectedFaces.length > 0 && pendingFaceName.trim()) {
+      const newNames = { ...faceNames }
+      selectedFaces.forEach(face => {
+        newNames[face.faceIndex] = pendingFaceName.trim()
+      })
+      setFaceNames(newNames)
+      setPendingFaceName('')
+      setSelectedFaces([])
+      setShowFacePanel(false)
     }
-  }
+  }, [selectedFaces, pendingFaceName, faceNames])
 
-  const handleSaveName = () => {
-    if (selectedTag !== null) {
-      setFaceNames(prev => ({ ...prev, [selectedTag]: editingName }))
-    }
-  }
+  // Clear selection
+  const clearSelection = useCallback(() => {
+    setSelectedFaces([])
+    setShowFacePanel(false)
+    setPendingFaceName('')
+  }, [])
+  
+  // Gradient presets
+  const gradientPresets = [
+    { name: 'Blue to Red', start: '#4a9eff', end: '#ff6b6b' },
+    { name: 'Green to Yellow', start: '#22c55e', end: '#facc15' },
+    { name: 'Purple to Pink', start: '#8b5cf6', end: '#ec4899' },
+    { name: 'Cyan to Blue', start: '#06b6d4', end: '#3b82f6' },
+    { name: 'Orange to Red', start: '#f97316', end: '#dc2626' },
+    { name: 'Rainbow', start: '#22d3ee', end: '#f43f5e' },
+  ]
 
-  const hasQualityData = meshData?.colors && meshData.colors.length > 0
-
-  // Checkbox Component
-  const Checkbox = ({ label, checked, onChange, disabled }) => (
-    <label className={`flex items-center gap-1.5 cursor-pointer text-xs ${disabled ? 'opacity-50' : 'hover:text-white'}`}>
-      <div className={`w-3.5 h-3.5 border rounded flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-500 bg-transparent'}`}>
-        {checked && <div className="w-1.5 h-1.5 bg-white rounded-[1px]" />}
-      </div>
-      <span className="select-none">{label}</span>
-      <input
-        type="checkbox"
-        className="hidden"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-        disabled={disabled}
-      />
-    </label>
-  )
-
-  // Header Button Component
-  const HeaderButton = ({ icon: Icon, label, active, onClick, disabled }) => (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs transition-all ${active
-        ? 'bg-blue-600 text-white shadow-sm'
-        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700 hover:text-white'
-        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-    >
-      {Icon && <Icon className="w-3.5 h-3.5" />}
-      {label && <span>{label}</span>}
-    </button>
-  )
-
-  // Computed colors for Height Gradient
-  const heightColors = useMemo(() => {
-    if (!meshData || !meshData.vertices || colorMode !== 'height') return null
-
-    const count = meshData.vertices.length / 3
-    const colors = new Float32Array(count * 3)
-    const vertices = meshData.vertices
-
-    // Find Y bounds
-    let minY = Infinity, maxY = -Infinity
-    for (let i = 1; i < vertices.length; i += 3) {
-      if (vertices[i] < minY) minY = vertices[i]
-      if (vertices[i] > maxY) maxY = vertices[i]
-    }
-    const range = maxY - minY || 1
-
-    // Generate gradient (Blue -> Cyan -> Green -> Yellow -> Red)
-    const col = new THREE.Color()
-    for (let i = 0; i < count; i++) {
-      const y = vertices[i * 3 + 1]
-      const t = (y - minY) / range
-      col.setHSL(0.66 - (t * 0.66), 1.0, 0.5) // Blue(0.66) to Red(0.0)
-      colors[i * 3] = col.r
-      colors[i * 3 + 1] = col.g
-      colors[i * 3 + 2] = col.b
-    }
-    return colors
-  }, [meshData, colorMode])
-
+  // Preset color palette
+  const colorPresets = [
+    { name: 'Blue', color: '#4a9eff' },
+    { name: 'Green', color: '#4ade80' },
+    { name: 'Orange', color: '#fb923c' },
+    { name: 'Red', color: '#f87171' },
+    { name: 'Purple', color: '#a78bfa' },
+    { name: 'Cyan', color: '#22d3ee' },
+    { name: 'Gold', color: '#fbbf24' },
+    { name: 'Steel', color: '#94a3b8' },
+  ]
 
   return (
-    <div className="w-full h-full relative bg-[#2a2b2e] flex flex-col group overflow-hidden text-gray-200 font-sans">
-
-      {/* Top Header Bar */}
-      <div className="h-12 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 shrink-0 shadow-md z-10">
-
-        {/* Left: File Info */}
-        <div className="flex items-center gap-3">
-          <div className="bg-yellow-500 text-black text-[10px] font-bold px-1.5 py-0.5 rounded-sm">
-            PREVIEW
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="font-semibold text-white">{filename || 'No File loaded'}</span>
-            {meshData?.numTriangles && (
-              <span className="text-gray-400 border-l border-gray-600 pl-2 ml-1 text-xs">
-                {meshData.numTriangles.toLocaleString()} tris
-              </span>
-            )}
-            {elapsedTime > 0 && isLoading && <span className="text-blue-400 font-mono text-xs border-l border-gray-600 pl-2 ml-1">⏱ {elapsedTime}s</span>}
-          </div>
-        </div>
-
-        {/* Right: Controls */}
-        <div className="flex items-center gap-6">
-
-          {/* Toggles */}
-          <div className="flex items-center gap-4 border-r border-gray-700 pr-6 mr-2">
-            <Checkbox
-              label="Axes"
-              checked={showAxes}
-              onChange={setShowAxes}
-            />
-            <Checkbox
-              label="Wireframe"
-              checked={showWireframe}
-              onChange={setShowWireframe}
-            />
-            {/* Quality Checkbox logic kept for backward compat/quick toggle if needed */}
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex items-center gap-2">
-            <HeaderButton
-              icon={Paintbrush}
-              label="Color"
-              active={activeTool === 'color'}
-              onClick={() => toggleTool('color')}
-            />
-            <HeaderButton
-              icon={MousePointer2}
-              label="Select"
-              active={activeTool === 'select'}
-              onClick={() => toggleTool('select')}
-            />
-            <HeaderButton
-              icon={BarChart3}
-              label="Hist"
-              active={showHistogram}
-              onClick={() => setShowHistogram(!showHistogram)}
-              disabled={!qualityMetrics}
-            />
-            <HeaderButton
-              icon={Scissors}
-              label="Clip"
-              active={clipping.enabled}
-              onClick={() => toggleTool('clip')}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Main 3D Viewport */}
-      <div className="flex-1 relative bg-gradient-to-b from-gray-200 to-gray-300">
-        {!meshData && !isLoading ? (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-            <div className="text-center">
-              <Box className="w-16 h-16 mx-auto mb-4 opacity-20" />
-              <p>No mesh loaded</p>
+    <div className="w-full h-full relative bg-gradient-to-br from-gray-200 to-gray-300">
+      {/* Loading Overlay - Centered */}
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center z-50 bg-gray-900/60 backdrop-blur-sm">
+          <div className="bg-gray-800 rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
+            {/* Animated Spinner */}
+            <div className="relative w-16 h-16 mx-auto mb-4">
+              <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-full bg-blue-500/20"></div>
+              </div>
             </div>
-          </div>
-        ) : (
-          <>
-            {meshData && (
-              <Canvas shadows gl={{ localClippingEnabled: true }}>
-                <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={50} />
-                <OrbitControls enableDamping dampingFactor={0.05} />
-
-                <ambientLight intensity={0.6} />
-                <directionalLight
-                  position={[50, 50, 25]}
-                  intensity={0.8}
-                  castShadow
-                  shadow-mapSize-width={2048}
-                  shadow-mapSize-height={2048}
+            
+            {/* Loading Message */}
+            <p className="text-white font-medium mb-3">
+              {loadingMessage || 'Loading...'}
+            </p>
+            
+            {/* Progress Bar */}
+            {loadingProgress !== undefined && (
+              <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                <div 
+                  className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300 ease-out"
+                  style={{ width: `${loadingProgress}%` }}
                 />
-                <directionalLight position={[-50, -50, -25]} intensity={0.4} />
-
-                <GridWithAxes showAxes={showAxes} />
-
-                {/* Main Mesh - Interactive for Selection */}
-                <group onClick={handleMeshClick}>
-                  <MeshObject
-                    meshData={meshData}
-                    clipping={clipping}
-                    showQuality={colorMode === 'quality'}
-                    showWireframe={showWireframe}
-                    meshColor={meshColor}
-                    customColors={colorMode === 'height' ? heightColors : null}
-                  />
-                </group>
-
-                {/* Highlight Overlay */}
-                {selectedTag !== null && (
-                  <HighlightedFace meshData={meshData} selectedTag={selectedTag} />
-                )}
-              </Canvas>
+              </div>
             )}
+            {loadingProgress !== undefined && (
+              <p className="text-gray-400 text-xs mt-2">{loadingProgress}% complete</p>
+            )}
+          </div>
+        </div>
+      )}
 
-            {/* Overlays */}
+      {/* Empty State */}
+      {!meshData && !isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="text-center text-gray-500">
+            <Box className="w-16 h-16 mx-auto mb-3 opacity-30" />
+            <p className="text-sm">Open a CAD file to begin</p>
+          </div>
+        </div>
+      )}
 
-            {/* Color Panel */}
-            {activeTool === 'color' && (
-              <div className="absolute top-4 right-4 bg-gray-800/90 backdrop-blur p-4 rounded-lg shadow-xl w-64 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-top-2 z-50">
-                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
-                  <Paintbrush className="w-4 h-4" /> Appearance
-                </h3>
+      {meshData && (
+        <>
+          {/* Compact Top Toolbar */}
+          <div className="absolute top-0 left-0 right-0 bg-gray-800/90 backdrop-blur px-3 py-1.5 z-20 flex items-center gap-4 text-xs text-gray-300">
+            {/* File info */}
+            <div className="flex items-center gap-2">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${meshData.isPreview ? 'bg-yellow-600' : 'bg-green-600'}`}>
+                {meshData.isPreview ? 'PREVIEW' : 'MESH'}
+              </span>
+              {filename && <span className="text-white font-medium">{filename}</span>}
+              <span className="text-gray-500">|</span>
+              <span>{meshData.numTriangles?.toLocaleString()} tris</span>
+            </div>
+            
+            <div className="flex-1" />
+            
+            {/* View toggles */}
+            <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+              <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} className="accent-blue-500 w-3 h-3" />
+              Axes
+            </label>
+            <div className="flex items-center gap-1">
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                <input type="checkbox" checked={showWireframe} onChange={(e) => setShowWireframe(e.target.checked)} className="accent-blue-500 w-3 h-3" />
+                Wireframe
+              </label>
+              {showWireframe && (
+                <button
+                  onClick={() => setShowWireframePanel(!showWireframePanel)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${showWireframePanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+                  title="Wireframe Settings"
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+            {hasQualityData && (
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                <input type="checkbox" checked={showQuality} onChange={(e) => { setShowQuality(e.target.checked); if(e.target.checked) setColorMode('quality'); else setColorMode('solid'); }} className="accent-blue-500 w-3 h-3" />
+                Quality
+              </label>
+            )}
+            <button
+              onClick={() => setShowHistogram(!showHistogram)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showHistogram ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              title="Quality Histogram"
+            >
+              <BarChart3 className="w-3 h-3" />
+              Hist
+            </button>
+            <button
+              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${selectionMode ? 'bg-green-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              title="Face Selection Mode"
+            >
+              <MousePointer2 className="w-3 h-3" />
+              Select
+            </button>
+            <button
+              onClick={() => setShowPaintPanel(!showPaintPanel)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showPaintPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+            >
+              <span 
+                className="w-3 h-2 rounded-sm" 
+                style={{ 
+                  background: colorMode === 'gradient' 
+                    ? `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})` 
+                    : meshColor 
+                }}
+              ></span>
+              Paint
+            </button>
+            <button
+              onClick={() => setShowControls(!showControls)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors ${showControls ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+            >
+              Clip
+            </button>
+          </div>
 
-                <div className="space-y-4">
-                  {/* Mode Selection */}
-                  <div className="grid grid-cols-3 gap-1 bg-gray-700 p-1 rounded">
-                    {['solid', 'quality', 'height'].map(mode => (
+          {/* Paint Panel */}
+          {showPaintPanel && (
+            <div className="absolute top-10 left-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-48">
+              <div className="font-medium text-white mb-2 text-sm">🎨 Paint Options</div>
+              
+              {/* Color Mode */}
+              <div className="mb-3">
+                <label className="text-gray-400 text-[10px] uppercase">Color Mode</label>
+                <select 
+                  value={colorMode}
+                  onChange={(e) => { setColorMode(e.target.value); setShowQuality(e.target.value === 'quality'); }}
+                  className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+                >
+                  <option value="solid">Solid Color</option>
+                  {hasQualityData && <option value="quality">Quality Colors</option>}
+                  <option value="gradient">Gradient</option>
+                </select>
+              </div>
+              
+              {/* Color Picker - Solid */}
+              {colorMode === 'solid' && (
+                <div className="mb-3">
+                  <label className="text-gray-400 text-[10px] uppercase">Mesh Color</label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <input 
+                      type="color" 
+                      value={meshColor}
+                      onChange={(e) => setMeshColor(e.target.value)}
+                      className="w-8 h-8 rounded cursor-pointer border-0"
+                    />
+                    <span className="text-gray-400">{meshColor}</span>
+                  </div>
+                  
+                  {/* Preset Colors */}
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {colorPresets.map(preset => (
                       <button
-                        key={mode}
-                        onClick={() => setColorMode(mode)}
-                        disabled={mode === 'quality' && !hasQualityData}
-                        className={`text-xs py-1 px-2 rounded capitalize transition-all ${colorMode === mode
-                          ? 'bg-blue-600 text-white shadow'
-                          : 'hover:bg-gray-600 text-gray-400'
-                          } ${mode === 'quality' && !hasQualityData ? 'opacity-30 cursor-not-allowed' : ''}`}
-                      >
-                        {mode}
-                      </button>
+                        key={preset.name}
+                        onClick={() => setMeshColor(preset.color)}
+                        className={`w-5 h-5 rounded border-2 transition-transform hover:scale-110 ${meshColor === preset.color ? 'border-white' : 'border-transparent'}`}
+                        style={{ backgroundColor: preset.color }}
+                        title={preset.name}
+                      />
                     ))}
                   </div>
-
-                  {/* Solid Color Picker */}
-                  {colorMode === 'solid' && (
-                    <div className="space-y-2">
-                      <label className="text-xs text-gray-400 font-medium">Mesh Base Color</label>
-                      <div className="flex items-center gap-3 bg-gray-900/50 p-2 rounded border border-gray-700">
-                        <input
-                          type="color"
-                          value={meshColor}
-                          onChange={(e) => setMeshColor(e.target.value)}
-                          className="bg-transparent border-0 w-8 h-8 p-0 cursor-pointer rounded"
-                        />
-                        <span className="text-xs font-mono text-gray-300">{meshColor}</span>
-                        <div className="text-[10px] text-gray-500 ml-auto">Click to pick</div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Legend for Gradients */}
-                  {(colorMode === 'quality' || colorMode === 'height') && (
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-[10px] text-gray-400 uppercase font-semibold">
-                        <span>{colorMode === 'quality' ? 'Bad' : 'Low'}</span>
-                        <span>{colorMode === 'quality' ? 'Good' : 'High'}</span>
-                      </div>
-                      <div className={`h-3 rounded-full w-full ${colorMode === 'quality' ? 'bg-gradient-to-r from-red-500 via-yellow-500 to-green-500' : 'bg-gradient-to-r from-blue-500 via-green-500 to-red-500'}`} />
-                    </div>
-                  )}
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* Selection Panel */}
-            {activeTool === 'select' && selectedTag !== null && (
-              <div className="absolute top-4 left-4 bg-gray-800/95 backdrop-blur p-4 rounded-lg shadow-xl w-60 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-left-2 z-50">
-                <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2"><MousePointer2 className="w-4 h-4 text-yellow-500" /> Selected Surface</h3>
-                <div className="space-y-3">
-                  <div className="text-xs text-gray-400">
-                    ID: <span className="font-mono text-white bg-gray-700 px-1 rounded">{selectedTag}</span>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] uppercase text-gray-500 font-bold">Name</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={editingName}
-                        onChange={(e) => setEditingName(e.target.value)}
-                        className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white w-full focus:ring-1 focus:ring-blue-500 outline-none"
-                        placeholder="Enter name..."
+              {/* Gradient Controls */}
+              {colorMode === 'gradient' && (
+                <div className="mb-3">
+                  <label className="text-gray-400 text-[10px] uppercase mb-2 block">Height Gradient</label>
+                  
+                  {/* Gradient Preview */}
+                  <div 
+                    className="h-6 rounded mb-2 border border-gray-600"
+                    style={{ background: `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})` }}
+                  />
+                  
+                  {/* Start/End Color Pickers */}
+                  <div className="flex gap-2 mb-2">
+                    <div className="flex-1">
+                      <label className="text-gray-500 text-[9px]">Bottom</label>
+                      <input 
+                        type="color" 
+                        value={gradientColors.start}
+                        onChange={(e) => setGradientColors(prev => ({ ...prev, start: e.target.value }))}
+                        className="w-full h-6 rounded cursor-pointer border-0"
                       />
-                      <button onClick={handleSaveName} className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-2 py-1 rounded">Save</button>
+                    </div>
+                    <div className="flex-1">
+                      <label className="text-gray-500 text-[9px]">Top</label>
+                      <input 
+                        type="color" 
+                        value={gradientColors.end}
+                        onChange={(e) => setGradientColors(prev => ({ ...prev, end: e.target.value }))}
+                        className="w-full h-6 rounded cursor-pointer border-0"
+                      />
                     </div>
                   </div>
-                  {faceNames[selectedTag] && (
-                    <div className="text-green-400 text-[10px]">Name saved!</div>
-                  )}
+                  
+                  {/* Gradient Presets */}
+                  <label className="text-gray-500 text-[9px]">Presets</label>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {gradientPresets.map(preset => (
+                      <button
+                        key={preset.name}
+                        onClick={() => setGradientColors({ start: preset.start, end: preset.end })}
+                        className="w-8 h-4 rounded border border-gray-600 transition-transform hover:scale-110"
+                        style={{ background: `linear-gradient(to right, ${preset.start}, ${preset.end})` }}
+                        title={preset.name}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Histogram Overlay */}
-            {qualityMetrics && showHistogram && (
-              <div className="absolute top-16 left-4 shadow-xl z-40">
-                <QualityHistogram
-                  qualityMetrics={qualityMetrics}
-                  isVisible={true}
+              )}
+              
+              {/* Opacity */}
+              <div className="mb-3">
+                <div className="flex justify-between text-[10px]">
+                  <label className="text-gray-400 uppercase">Opacity</label>
+                  <span>{Math.round(opacity * 100)}%</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0.1" max="1" step="0.1"
+                  value={opacity}
+                  onChange={(e) => setOpacity(parseFloat(e.target.value))}
+                  className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
                 />
               </div>
-            )}
+              
+              {/* Metalness */}
+              <div className="mb-3">
+                <div className="flex justify-between text-[10px]">
+                  <label className="text-gray-400 uppercase">Metalness</label>
+                  <span>{Math.round(metalness * 100)}%</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0" max="1" step="0.1"
+                  value={metalness}
+                  onChange={(e) => setMetalness(parseFloat(e.target.value))}
+                  className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                />
+              </div>
+              
+              {/* Roughness */}
+              <div className="mb-2">
+                <div className="flex justify-between text-[10px]">
+                  <label className="text-gray-400 uppercase">Roughness</label>
+                  <span>{Math.round(roughness * 100)}%</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0" max="1" step="0.1"
+                  value={roughness}
+                  onChange={(e) => setRoughness(parseFloat(e.target.value))}
+                  className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                />
+              </div>
+              
+              {/* Reset Button */}
+              <button
+                onClick={() => { setMeshColor('#4a9eff'); setOpacity(1); setMetalness(0.1); setRoughness(0.5); setColorMode('solid'); setGradientColors({ start: '#4a9eff', end: '#ff6b6b' }); }}
+                className="w-full mt-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-[10px] transition-colors"
+              >
+                Reset to Default
+              </button>
+            </div>
+          )}
 
-            {/* Clipping Controls (Only when generic Clip is active) */}
-            {clipping.enabled && (
-              <div className="absolute top-4 right-4 bg-gray-800/90 backdrop-blur p-4 rounded-lg shadow-xl w-64 border border-gray-700 text-gray-200">
-                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
-                  <Scissors className="w-4 h-4" /> Clipping Planes
-                </h3>
-
-                <div className="space-y-4">
-                  {/* X Axis */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs">
-                      <label className="flex items-center gap-2 cursor-pointer hover:text-white">
-                        <input
-                          type="checkbox"
-                          checked={clipping.x}
-                          onChange={(e) => setClipping({ ...clipping, x: e.target.checked })}
-                          className="rounded bg-gray-600 border-gray-500"
-                        /> X-Axis
-                      </label>
-                      <span>{clipping.xValue}%</span>
-                    </div>
-                    <input
-                      type="range" min="-50" max="50"
-                      value={clipping.xValue}
-                      onChange={(e) => setClipping({ ...clipping, xValue: parseInt(e.target.value) })}
-                      disabled={!clipping.x}
-                      className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+          {/* Wireframe Settings Panel */}
+          {showWireframe && showWireframePanel && (
+            <div className="absolute top-10 left-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-52">
+              <div className="font-medium text-white mb-3 text-sm">🔲 Wireframe Settings</div>
+              
+              {/* Wireframe Color */}
+              <div className="mb-3">
+                <label className="text-[10px] text-gray-400 uppercase mb-1 block">Color</label>
+                <div className="flex gap-1">
+                  {['#000000', '#ffffff', '#ff0000', '#00ff00', '#0066ff', '#ffff00'].map(color => (
+                    <button
+                      key={color}
+                      onClick={() => setWireframeColor(color)}
+                      className={`w-6 h-6 rounded border-2 transition-all ${wireframeColor === color ? 'border-blue-400 scale-110' : 'border-gray-600'}`}
+                      style={{ backgroundColor: color }}
                     />
+                  ))}
+                </div>
+              </div>
+              
+              {/* Custom Color */}
+              <div className="mb-3">
+                <label className="text-[10px] text-gray-400 uppercase mb-1 block">Custom Color</label>
+                <input
+                  type="color"
+                  value={wireframeColor}
+                  onChange={(e) => setWireframeColor(e.target.value)}
+                  className="w-full h-6 rounded cursor-pointer"
+                />
+              </div>
+              
+              {/* Wireframe Opacity */}
+              <div className="mb-3">
+                <div className="flex justify-between text-[10px] mb-1">
+                  <label className="text-gray-400 uppercase">Opacity</label>
+                  <span>{Math.round(wireframeOpacity * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1" max="1" step="0.1"
+                  value={wireframeOpacity}
+                  onChange={(e) => setWireframeOpacity(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                />
+              </div>
+              
+              {/* Wireframe Scale (Explode) */}
+              <div className="mb-3">
+                <div className="flex justify-between text-[10px] mb-1">
+                  <label className="text-gray-400 uppercase">Scale (Explode)</label>
+                  <span>{wireframeScale.toFixed(2)}x</span>
+                </div>
+                <input
+                  type="range"
+                  min="1" max="1.5" step="0.01"
+                  value={wireframeScale}
+                  onChange={(e) => setWireframeScale(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                />
+                <p className="text-[9px] text-gray-500 mt-1">Scale &gt; 1 to "explode" wireframe outward</p>
+              </div>
+              
+              {/* Reset Wireframe */}
+              <button
+                onClick={() => { setWireframeColor('#000000'); setWireframeOpacity(0.6); setWireframeScale(1.0); }}
+                className="w-full py-1 bg-gray-700 hover:bg-gray-600 rounded text-[10px] transition-colors"
+              >
+                Reset Wireframe
+              </button>
+            </div>
+          )}
+
+          {/* Quality Metrics - Top Right (only show when mesh is completed) */}
+          {isCompleted && qualityMetrics && !showPaintPanel && (
+            <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur rounded p-2.5 z-10 text-[10px] text-gray-300 min-w-[180px]">
+              <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
+              
+              {/* SICN */}
+              <div className="mb-2 pb-2 border-b border-gray-700">
+                <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
+                <div className="grid grid-cols-3 gap-1 text-center">
+                  <div>
+                    <div className="text-[8px] text-gray-500">Min</div>
+                    <div className={(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn) < 0.1 ? 'text-red-400 font-medium' : 'text-green-400 font-medium'}>
+                      {(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn)?.toFixed(3) || 'N/A'}
+                    </div>
                   </div>
-
-                  {/* Y Axis */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs">
-                      <label className="flex items-center gap-2 cursor-pointer hover:text-white">
-                        <input
-                          type="checkbox"
-                          checked={clipping.y}
-                          onChange={(e) => setClipping({ ...clipping, y: e.target.checked })}
-                          className="rounded bg-gray-600 border-gray-500"
-                        /> Y-Axis
-                      </label>
-                      <span>{clipping.yValue}%</span>
-                    </div>
-                    <input
-                      type="range" min="-50" max="50"
-                      value={clipping.yValue}
-                      onChange={(e) => setClipping({ ...clipping, yValue: parseInt(e.target.value) })}
-                      disabled={!clipping.y}
-                      className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
+                  <div>
+                    <div className="text-[8px] text-gray-500">Avg</div>
+                    <div className="text-blue-400 font-medium">{(qualityMetrics.sicn_avg ?? qualityMetrics.avg_sicn)?.toFixed(3) || 'N/A'}</div>
                   </div>
-
-                  {/* Z Axis */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs">
-                      <label className="flex items-center gap-2 cursor-pointer hover:text-white">
-                        <input
-                          type="checkbox"
-                          checked={clipping.z}
-                          onChange={(e) => setClipping({ ...clipping, z: e.target.checked })}
-                          className="rounded bg-gray-600 border-gray-500"
-                        /> Z-Axis
-                      </label>
-                      <span>{clipping.zValue}%</span>
-                    </div>
-                    <input
-                      type="range" min="-50" max="50"
-                      value={clipping.zValue}
-                      onChange={(e) => setClipping({ ...clipping, zValue: parseInt(e.target.value) })}
-                      disabled={!clipping.z}
-                      className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
+                  <div>
+                    <div className="text-[8px] text-gray-500">Max</div>
+                    <div className="text-green-400 font-medium">{(qualityMetrics.sicn_max ?? qualityMetrics.max_sicn)?.toFixed(3) || 'N/A'}</div>
                   </div>
                 </div>
               </div>
-            )}
-          </>
-        )}
+              
+              {/* Gamma */}
+              {((qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined)) && (
+                <div className="mb-2 pb-2 border-b border-gray-700">
+                  <div className="text-[9px] text-gray-500 uppercase mb-1">Gamma (Radius Ratio)</div>
+                  <div className="grid grid-cols-3 gap-1 text-center">
+                    <div>
+                      <div className="text-[8px] text-gray-500">Min</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_min?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Avg</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_avg?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Max</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_max?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Element Count */}
+              <div className="flex justify-between">
+                <span className="text-gray-400">Elements:</span>
+                <span className="font-medium">{(qualityMetrics.total_elements ?? qualityMetrics.element_count)?.toLocaleString() || 'N/A'}</span>
+              </div>
+              {qualityMetrics.poor_elements > 0 && (
+                <div className="flex justify-between text-yellow-400 mt-0.5">
+                  <span>Poor (&lt;0.1):</span>
+                  <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / (qualityMetrics.total_elements ?? qualityMetrics.element_count)) * 100).toFixed(1)}%)</span>
+                </div>
+              )}
+            </div>
+          )}
 
-        {/* Loading Overlay */}
-        {isLoading && (
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex flex-col items-center justify-center text-white">
-            <Loader2 className="w-12 h-12 animate-spin text-blue-500 mb-4" />
-            <h3 className="text-lg font-medium mb-1">{loadingMessage || 'Processing...'}</h3>
-            {elapsedTime > 0 && <div className="text-blue-400 font-mono text-xl mb-4">{elapsedTime}s</div>}
-            {loadingProgress !== undefined && (
-              <div className="w-64 space-y-2">
-                <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all duration-300"
-                    style={{ width: `${loadingProgress}%` }}
+          {/* Quality Histogram Panel */}
+          {showHistogram && (
+            <div className="absolute bottom-3 left-3 z-10">
+              <QualityHistogram
+                histogramData={meshData?.histogramData}
+                qualityMetrics={qualityMetrics ? {
+                  min_sicn: qualityMetrics.sicn_min ?? qualityMetrics.min_sicn ?? qualityMetrics.minSICN,
+                  avg_sicn: qualityMetrics.sicn_avg ?? qualityMetrics.avg_sicn ?? qualityMetrics.avgSICN,
+                  max_sicn: qualityMetrics.sicn_max ?? qualityMetrics.max_sicn ?? qualityMetrics.maxSICN,
+                  element_count: qualityMetrics.total_elements ?? qualityMetrics.element_count ?? qualityMetrics.totalElements,
+                } : null}
+                isVisible={showHistogram}
+              />
+            </div>
+          )}
+
+          {/* Face Selection Panel */}
+          {showFacePanel && selectedFaces.length > 0 && (
+            <div className="absolute bottom-3 right-3 bg-gray-900/95 backdrop-blur rounded-lg p-3 z-10 text-xs text-gray-300 w-56 shadow-xl border border-gray-700">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Tag className="w-4 h-4 text-green-400" />
+                  <span className="font-medium text-white text-sm">Name Face</span>
+                </div>
+                <button onClick={clearSelection} className="text-gray-400 hover:text-white">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              
+              <div className="text-[10px] text-gray-400 mb-2">
+                {selectedFaces.length} face{selectedFaces.length > 1 ? 's' : ''} selected
+              </div>
+              
+              <input
+                type="text"
+                value={pendingFaceName}
+                onChange={(e) => setPendingFaceName(e.target.value)}
+                placeholder="Enter face name..."
+                className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500 mb-2"
+                onKeyDown={(e) => e.key === 'Enter' && saveFaceName()}
+              />
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={saveFaceName}
+                  disabled={!pendingFaceName.trim()}
+                  className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-[11px] font-medium transition-colors"
+                >
+                  Save Name
+                </button>
+                <button
+                  onClick={clearSelection}
+                  className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-white text-[11px] transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Named Faces List */}
+          {Object.keys(faceNames).length > 0 && !showFacePanel && (
+            <div className="absolute bottom-3 right-3 bg-gray-900/95 backdrop-blur rounded-lg p-2 z-10 text-xs text-gray-300 max-w-48 shadow-xl border border-gray-700">
+              <div className="flex items-center gap-1.5 mb-1.5 text-[10px] text-gray-400">
+                <Tag className="w-3 h-3" />
+                <span>Named Faces ({Object.keys(faceNames).length})</span>
+              </div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {Object.entries(faceNames).map(([faceIndex, name]) => (
+                  <div key={faceIndex} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
+                    <span className="text-white truncate">{name}</span>
+                    <button
+                      onClick={() => {
+                        const newNames = { ...faceNames }
+                        delete newNames[faceIndex]
+                        setFaceNames(newNames)
+                      }}
+                      className="text-gray-500 hover:text-red-400 ml-2"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Selection Mode Indicator */}
+          {selectionMode && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-full text-xs font-medium flex items-center gap-2 shadow-lg z-10">
+              <MousePointer2 className="w-4 h-4" />
+              Click on mesh to select faces
+            </div>
+          )}
+
+          <Canvas 
+            gl={{ 
+              localClippingEnabled: true,
+              antialias: true,
+              powerPreference: "high-performance",
+            }}
+            dpr={[1, 1.5]} // Limit pixel ratio for performance
+            performance={{ min: 0.5 }} // Adaptive performance
+            className="!pt-8"
+          >
+            <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
+            <OrbitControls 
+              enableDamping 
+              dampingFactor={0.1} 
+              rotateSpeed={0.8}
+              panSpeed={0.8}
+              zoomSpeed={1.2}
+              enabled={!selectionMode}
+              makeDefault
+            />
+
+            <ambientLight intensity={0.7} />
+            <directionalLight position={[50, 50, 25]} intensity={0.6} />
+            <directionalLight position={[-50, -50, -25]} intensity={0.3} />
+            <hemisphereLight intensity={0.3} />
+
+            <MeshObject
+              meshData={meshData}
+              clipping={clipping}
+              showQuality={showQuality}
+              showWireframe={showWireframe}
+              wireframeColor={wireframeColor}
+              wireframeOpacity={wireframeOpacity}
+              wireframeScale={wireframeScale}
+              meshColor={meshColor}
+              opacity={opacity}
+              metalness={metalness}
+              roughness={roughness}
+              colorMode={colorMode}
+              gradientColors={gradientColors}
+              onFaceSelect={handleFaceSelect}
+              selectionMode={selectionMode}
+              selectedFaces={selectedFaces}
+            />
+
+            <gridHelper args={[200, 20, '#aaaaaa', '#dddddd']} />
+            <AxesIndicator visible={showAxes} />
+          </Canvas>
+
+          {/* Clipping Controls Panel */}
+          {showControls && (
+            <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur p-3 rounded z-10 text-xs text-gray-300 w-48">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-medium text-white">Clipping</span>
+                  <input
+                    type="checkbox"
+                    checked={clipping.enabled}
+                    onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
+                  className="accent-blue-500 w-3 h-3"
                   />
                 </div>
-                <div className="text-xs text-gray-400 text-right">{Math.round(loadingProgress)}%</div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+
+                {clipping.enabled && (
+                <div className="space-y-2">
+                  {[
+                    { axis: 'x', label: 'X', color: 'red' },
+                    { axis: 'y', label: 'Y', color: 'green' },
+                    { axis: 'z', label: 'Z', color: 'blue' }
+                  ].map(({ axis, label }) => (
+                    <div key={axis} className="space-y-0.5">
+                      <div className="flex justify-between">
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={clipping[axis]}
+                            onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
+                            className="accent-blue-500 w-3 h-3"
+                      />
+                          {label}
+                        </label>
+                        <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
+                      </div>
+                      <input
+                        type="range" min="-50" max="50"
+                        value={clipping[`${axis}Value`]}
+                        onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
+                        disabled={!clipping[axis]}
+                        className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                  ))}
+                    </div>
+                )}
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }
