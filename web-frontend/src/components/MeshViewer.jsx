@@ -5,6 +5,69 @@ import * as THREE from 'three'
 import { Box, MousePointer2, Paintbrush, Scissors, BarChart3, Loader2 } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
 
+// Highlighted Face Overlay
+function HighlightedFace({ meshData, selectedTag }) {
+  const geometry = useMemo(() => {
+    if (!meshData || selectedTag === null) return null
+
+    // Find all triangles belonging to this entity tag
+    const indices = []
+    const entityTags = meshData.entityTags || []
+
+    for (let i = 0; i < entityTags.length; i++) {
+      if (entityTags[i] === selectedTag) {
+        // Triangle i (vertices i*3, i*3+1, i*3+2)
+        indices.push(i * 3, i * 3 + 1, i * 3 + 2)
+      }
+    }
+
+    if (indices.length === 0) return null
+
+    const subsetGeo = new THREE.BufferGeometry()
+
+    // Extract vertices for this subset
+    const allVertices = meshData.vertices
+    const subsetVertices = new Float32Array(indices.length * 3)
+
+    for (let j = 0; j < indices.length; j++) {
+      const vIdx = indices[j] // index in flat array
+      subsetVertices[j * 3] = allVertices[vIdx * 3]
+      subsetVertices[j * 3 + 1] = allVertices[vIdx * 3 + 1]
+      subsetVertices[j * 3 + 2] = allVertices[vIdx * 3 + 2]
+    }
+
+    subsetGeo.setAttribute('position', new THREE.BufferAttribute(subsetVertices, 3))
+    subsetGeo.computeVertexNormals()
+
+    // Slight offset to prevent z-fighting
+    subsetGeo.translate(0, 0, 0.001)
+
+    return subsetGeo
+  }, [meshData, selectedTag])
+
+  if (!geometry) return null
+
+  return (
+    <mesh geometry={geometry}>
+      <meshBasicMaterial
+        color="#ffd700"
+        transparent={true}
+        opacity={0.6}
+        side={THREE.DoubleSide}
+        depthTest={false} // Always show on top
+        depthWrite={false}
+      />
+      <meshBasicMaterial
+        color="#ffffff"
+        wireframe={true}
+        transparent={true}
+        opacity={0.8}
+        depthTest={false}
+      />
+    </mesh>
+  )
+}
+
 function MeshObject({ meshData, clipping, showQuality, showWireframe, meshColor, customColors }) {
   const meshRef = useRef()
   const { camera, gl } = useThree()
@@ -157,9 +220,8 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
   })
 
   // UI States
-  const [showAxes, setShowAxes] = useState(false) // Default off matching screenshot
-  const [showWireframe, setShowWireframe] = useState(true) // Default on matching screenshot
-  const [showQuality, setShowQuality] = useState(false)
+  const [showAxes, setShowAxes] = useState(false)
+  const [showWireframe, setShowWireframe] = useState(true)
   const [showHistogram, setShowHistogram] = useState(false)
 
   // Tools
@@ -169,11 +231,31 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
   const [meshColor, setMeshColor] = useState('#3b82f6') // Default Blue
   const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'height'
 
-  // Initialize defaults based on screenshot
+  // Selection State
+  const [selectedTag, setSelectedTag] = useState(null)
+  const [faceNames, setFaceNames] = useState({})
+  const [editingName, setEditingName] = useState("")
+
+  // Timer State
+  const [elapsedTime, setElapsedTime] = useState(0)
+
+  // Timer Effect
   useEffect(() => {
-    // If quality metrics exist, maybe auto-enable quality view? 
-    // Screenshot shows Quality unchecked though.
-  }, [qualityMetrics])
+    let interval
+    if (isLoading) {
+      const startTime = Date.now() - (elapsedTime * 1000)
+      interval = setInterval(() => {
+        setElapsedTime(Math.floor((Date.now() - startTime) / 1000))
+      }, 1000)
+    }
+    return () => clearInterval(interval)
+  }, [isLoading])
+
+  // Reset timer on new file
+  useEffect(() => {
+    if (isLoading && loadingProgress === 0) setElapsedTime(0)
+  }, [isLoading, loadingProgress])
+
 
   const toggleTool = (tool) => {
     if (tool === 'clip') {
@@ -182,6 +264,9 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
       setActiveTool(newState ? 'clip' : null)
     } else if (tool === 'hist') {
       setShowHistogram(prev => !prev)
+    } else if (tool === 'select') {
+      setActiveTool(activeTool === 'select' ? null : 'select')
+      setSelectedTag(null) // Clear selection when toggling off
     } else if (tool === 'color') {
       setActiveTool(activeTool === 'color' ? null : 'color')
     } else {
@@ -189,9 +274,61 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
     }
   }
 
+  const handleMeshClick = (e) => {
+    if (activeTool !== 'select' || !meshData) return
+    e.stopPropagation()
+
+    // Get face index
+    const faceIndex = e.faceIndex
+    if (faceIndex !== undefined && meshData.entityTags) {
+      const tag = meshData.entityTags[faceIndex]
+      if (tag !== undefined) {
+        setSelectedTag(tag === selectedTag ? null : tag)
+        setEditingName(faceNames[tag] || "")
+        console.log("Selected Face Tag:", tag)
+      }
+    }
+  }
+
+  const handleSaveName = () => {
+    if (selectedTag !== null) {
+      setFaceNames(prev => ({ ...prev, [selectedTag]: editingName }))
+    }
+  }
+
   const hasQualityData = meshData?.colors && meshData.colors.length > 0
 
-  // ... (keeping Checkbox and HeaderButton components same)
+  // Checkbox Component
+  const Checkbox = ({ label, checked, onChange, disabled }) => (
+    <label className={`flex items-center gap-1.5 cursor-pointer text-xs ${disabled ? 'opacity-50' : 'hover:text-white'}`}>
+      <div className={`w-3.5 h-3.5 border rounded flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-500 bg-transparent'}`}>
+        {checked && <div className="w-1.5 h-1.5 bg-white rounded-[1px]" />}
+      </div>
+      <span className="select-none">{label}</span>
+      <input
+        type="checkbox"
+        className="hidden"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        disabled={disabled}
+      />
+    </label>
+  )
+
+  // Header Button Component
+  const HeaderButton = ({ icon: Icon, label, active, onClick, disabled }) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs transition-all ${active
+        ? 'bg-blue-600 text-white shadow-sm'
+        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700 hover:text-white'
+        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+    >
+      {Icon && <Icon className="w-3.5 h-3.5" />}
+      {label && <span>{label}</span>}
+    </button>
+  )
 
   // Computed colors for Height Gradient
   const heightColors = useMemo(() => {
@@ -222,37 +359,6 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
     return colors
   }, [meshData, colorMode])
 
-  // Simple check box component
-  const Checkbox = ({ label, checked, onChange, disabled }) => (
-    <label className={`flex items-center gap-1.5 cursor-pointer text-xs ${disabled ? 'opacity-50' : 'hover:text-white'}`}>
-      <div className={`w-3.5 h-3.5 border rounded flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'border-gray-500 bg-transparent'}`}>
-        {checked && <div className="w-1.5 h-1.5 bg-white rounded-[1px]" />}
-      </div>
-      <span className="select-none">{label}</span>
-      <input
-        type="checkbox"
-        className="hidden"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-        disabled={disabled}
-      />
-    </label>
-  )
-
-  // Header Button
-  const HeaderButton = ({ icon: Icon, label, active, onClick, disabled }) => (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs transition-all ${active
-        ? 'bg-blue-600 text-white shadow-sm'
-        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700 hover:text-white'
-        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-    >
-      {Icon && <Icon className="w-3.5 h-3.5" />}
-      {label && <span>{label}</span>}
-    </button>
-  )
 
   return (
     <div className="w-full h-full relative bg-[#2a2b2e] flex flex-col group overflow-hidden text-gray-200 font-sans">
@@ -272,6 +378,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
                 {meshData.numTriangles.toLocaleString()} tris
               </span>
             )}
+            {elapsedTime > 0 && isLoading && <span className="text-blue-400 font-mono text-xs border-l border-gray-600 pl-2 ml-1">⏱ {elapsedTime}s</span>}
           </div>
         </div>
 
@@ -290,13 +397,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
               checked={showWireframe}
               onChange={setShowWireframe}
             />
-            {/* Quality Checkbox is now integrated into Color Panel logic, but kept here for quick toggle */}
-            <Checkbox
-              label="Quality"
-              checked={colorMode === 'quality'}
-              onChange={(c) => setColorMode(c ? 'quality' : 'solid')}
-              disabled={!hasQualityData}
-            />
+            {/* Quality Checkbox logic kept for backward compat/quick toggle if needed */}
           </div>
 
           {/* Action Buttons */}
@@ -306,6 +407,12 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
               label="Color"
               active={activeTool === 'color'}
               onClick={() => toggleTool('color')}
+            />
+            <HeaderButton
+              icon={MousePointer2}
+              label="Select"
+              active={activeTool === 'select'}
+              onClick={() => toggleTool('select')}
             />
             <HeaderButton
               icon={BarChart3}
@@ -352,14 +459,22 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
 
                 <GridWithAxes showAxes={showAxes} />
 
-                <MeshObject
-                  meshData={meshData}
-                  clipping={clipping}
-                  showQuality={colorMode === 'quality'}
-                  showWireframe={showWireframe}
-                  meshColor={meshColor}
-                  customColors={colorMode === 'height' ? heightColors : null}
-                />
+                {/* Main Mesh - Interactive for Selection */}
+                <group onClick={handleMeshClick}>
+                  <MeshObject
+                    meshData={meshData}
+                    clipping={clipping}
+                    showQuality={colorMode === 'quality'}
+                    showWireframe={showWireframe}
+                    meshColor={meshColor}
+                    customColors={colorMode === 'height' ? heightColors : null}
+                  />
+                </group>
+
+                {/* Highlight Overlay */}
+                {selectedTag !== null && (
+                  <HighlightedFace meshData={meshData} selectedTag={selectedTag} />
+                )}
               </Canvas>
             )}
 
@@ -367,7 +482,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
 
             {/* Color Panel */}
             {activeTool === 'color' && (
-              <div className="absolute top-4 right-4 bg-gray-800/90 backdrop-blur p-4 rounded-lg shadow-xl w-64 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-top-2">
+              <div className="absolute top-4 right-4 bg-gray-800/90 backdrop-blur p-4 rounded-lg shadow-xl w-64 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-top-2 z-50">
                 <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
                   <Paintbrush className="w-4 h-4" /> Appearance
                 </h3>
@@ -393,15 +508,16 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
                   {/* Solid Color Picker */}
                   {colorMode === 'solid' && (
                     <div className="space-y-2">
-                      <label className="text-xs text-gray-400">Mesh Color</label>
-                      <div className="flex items-center gap-2">
+                      <label className="text-xs text-gray-400 font-medium">Mesh Base Color</label>
+                      <div className="flex items-center gap-3 bg-gray-900/50 p-2 rounded border border-gray-700">
                         <input
                           type="color"
                           value={meshColor}
                           onChange={(e) => setMeshColor(e.target.value)}
-                          className="bg-transparent border-0 w-8 h-8 p-0 cursor-pointer"
+                          className="bg-transparent border-0 w-8 h-8 p-0 cursor-pointer rounded"
                         />
                         <span className="text-xs font-mono text-gray-300">{meshColor}</span>
+                        <div className="text-[10px] text-gray-500 ml-auto">Click to pick</div>
                       </div>
                     </div>
                   )}
@@ -409,12 +525,40 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
                   {/* Legend for Gradients */}
                   {(colorMode === 'quality' || colorMode === 'height') && (
                     <div className="space-y-1">
-                      <div className="flex justify-between text-[10px] text-gray-400">
-                        <span>Low</span>
-                        <span>High</span>
+                      <div className="flex justify-between text-[10px] text-gray-400 uppercase font-semibold">
+                        <span>{colorMode === 'quality' ? 'Bad' : 'Low'}</span>
+                        <span>{colorMode === 'quality' ? 'Good' : 'High'}</span>
                       </div>
-                      <div className="h-3 rounded-full w-full bg-gradient-to-r from-blue-500 via-green-500 to-red-500" />
+                      <div className={`h-3 rounded-full w-full ${colorMode === 'quality' ? 'bg-gradient-to-r from-red-500 via-yellow-500 to-green-500' : 'bg-gradient-to-r from-blue-500 via-green-500 to-red-500'}`} />
                     </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Selection Panel */}
+            {activeTool === 'select' && selectedTag !== null && (
+              <div className="absolute top-4 left-4 bg-gray-800/95 backdrop-blur p-4 rounded-lg shadow-xl w-60 border border-gray-700 text-gray-200 animate-in fade-in slide-in-from-left-2 z-50">
+                <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2"><MousePointer2 className="w-4 h-4 text-yellow-500" /> Selected Surface</h3>
+                <div className="space-y-3">
+                  <div className="text-xs text-gray-400">
+                    ID: <span className="font-mono text-white bg-gray-700 px-1 rounded">{selectedTag}</span>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase text-gray-500 font-bold">Name</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white w-full focus:ring-1 focus:ring-blue-500 outline-none"
+                        placeholder="Enter name..."
+                      />
+                      <button onClick={handleSaveName} className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-2 py-1 rounded">Save</button>
+                    </div>
+                  </div>
+                  {faceNames[selectedTag] && (
+                    <div className="text-green-400 text-[10px]">Name saved!</div>
                   )}
                 </div>
               </div>
@@ -422,7 +566,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
 
             {/* Histogram Overlay */}
             {qualityMetrics && showHistogram && (
-              <div className="absolute top-4 left-4 shadow-xl">
+              <div className="absolute top-16 left-4 shadow-xl z-40">
                 <QualityHistogram
                   qualityMetrics={qualityMetrics}
                   isVisible={true}
@@ -514,6 +658,7 @@ export default function MeshViewer({ meshData, qualityMetrics, filename, isLoadi
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex flex-col items-center justify-center text-white">
             <Loader2 className="w-12 h-12 animate-spin text-blue-500 mb-4" />
             <h3 className="text-lg font-medium mb-1">{loadingMessage || 'Processing...'}</h3>
+            {elapsedTime > 0 && <div className="text-blue-400 font-mono text-xl mb-4">{elapsedTime}s</div>}
             {loadingProgress !== undefined && (
               <div className="w-64 space-y-2">
                 <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
