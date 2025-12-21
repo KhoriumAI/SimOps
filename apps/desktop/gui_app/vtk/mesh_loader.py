@@ -233,10 +233,22 @@ except Exception as e:
                     import pyvista as pv
                     try:
                         mesh = pv.read(str(fallback_path))
-                        self.log_debug(f"PyVista read success. Points: {mesh.n_points}")
+                        self.log_debug(f"PyVista read success. Type: {type(mesh)}")
+                        self.log_debug(f"Points: {mesh.n_points}, Cells: {mesh.n_cells}")
                         
+                        poly_data = None
                         if mesh.n_points > 0:
-                            poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+                            # Handle MultiBlock (which foamToVTK sometimes produces)
+                            if isinstance(mesh, pv.MultiBlock):
+                                self.log_debug("Detected MultiBlock dataset, combining...")
+                                mesh = mesh.combine()
+                            
+                            # Convert to surface for rendering
+                            if hasattr(mesh, 'extract_surface'):
+                                poly_data = mesh.extract_surface()
+                            else:
+                                poly_data = mesh.cast_to_unstructured_grid().extract_surface()
+                                
                             self.viewer.current_poly_data = poly_data
                             
                             mapper = vtk.vtkPolyDataMapper()
@@ -245,11 +257,34 @@ except Exception as e:
                             self.viewer.current_actor = vtk.vtkActor()
                             self.viewer.current_actor.SetMapper(mapper)
                             self.viewer.current_actor.GetProperty().SetColor(0.2, 0.7, 0.4)
+                            self.viewer.current_actor.GetProperty().SetRepresentationToSurface()
+                            self.viewer.current_actor.GetProperty().BackfaceCullingOff()
                             self.viewer.current_actor.GetProperty().EdgeVisibilityOn()
+                            
+                            # Calculate average cell size for dynamic visibility
+                            if mesh.n_cells > 0:
+                                bounds = mesh.bounds
+                                print(f"[MESH_LOADER] Bounds: {bounds}")
+                                vol = (bounds[1]-bounds[0]) * (bounds[3]-bounds[2]) * (bounds[5]-bounds[4])
+                                if vol > 0:
+                                    self.viewer.avg_cell_size = (vol / mesh.n_cells) ** (1/3)
+                                else:
+                                    self.viewer.avg_cell_size = 0.1 # Fallback
+                                print(f"[MESH_LOADER] Calculated avg cell size: {self.viewer.avg_cell_size}")
                             
                             self.viewer.renderer.AddActor(self.viewer.current_actor)
                             self.viewer.renderer.ResetCamera()
+                            
+                            # Log camera position
+                            cam = self.viewer.renderer.GetActiveCamera()
+                            print(f"[MESH_LOADER] Camera Pos: {cam.GetPosition()}, Focal: {cam.GetFocalPoint()}, Dist: {cam.GetDistance()}")
+                            
                             self.viewer.vtk_widget.GetRenderWindow().Render()
+                            
+                            # Trigger initial visibility check
+                            if hasattr(self.viewer, 'check_edge_visibility'):
+                                self.log_debug("Triggering initial edge visibility check")
+                                self.viewer.check_edge_visibility()
                             
                             self.log_debug("Render setup complete. Updating label.")
                             self.viewer.info_label.setText(
@@ -257,9 +292,11 @@ except Exception as e:
                                 f"{fallback_path.name}<br>"
                                 f"Nodes: {mesh.n_points:,} * Cells: {mesh.n_cells:,}"
                             )
+
                             return "SUCCESS"
                         else:
                             self.log_debug("Mesh has 0 points.")
+
                     except Exception as e:
                         self.log_debug(f"PyVista Exception: {e}")
                         import traceback

@@ -273,12 +273,18 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             
             # Reinitialize Gmsh with controlled threading
             self.log_message(f"[Performance] Reinitializing Gmsh with {OPTIMAL_THREAD_COUNT} threads for optimal speed/stability balance")
+            
+            # Record if we were initialized to know if we should re-initialize
+            was_initialized = self.gmsh_initialized
             self.finalize_gmsh()
             self.initialize_gmsh(thread_count=OPTIMAL_THREAD_COUNT)
             
             # CRITICAL: Reload the CAD file since we finalized Gmsh
             if not self.load_cad_file(input_file):
                 self.log_message("[ERROR] Failed to reload CAD file after Gmsh reinitialization", level="ERROR")
+                # If we failed to reload, try to restore previous state if it was initialized
+                if was_initialized and not self.gmsh_initialized:
+                   self.initialize_gmsh()
                 return False
             
 
@@ -461,7 +467,10 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             self.log_message(f"{'='*60}")
 
             # Finalize the mesh
-            gmsh.initialize(['-terminal', '1'])
+            managed_session = gmsh.isInitialized()
+            if not managed_session:
+                gmsh.initialize(['-terminal', '1'])
+            
             try:
                 gmsh.model.add("Finalizer")
                 gmsh.merge(best_mesh_path)
@@ -481,7 +490,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 gmsh.write(output_file)
                 
             finally:
-                gmsh.finalize()
+                # Only finalize if we were the ones who initialized it
+                if not managed_session:
+                    gmsh.finalize()
                 
             # Cleanup
             try:

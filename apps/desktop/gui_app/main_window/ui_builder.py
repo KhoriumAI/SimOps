@@ -283,7 +283,7 @@ class UIBuilder:
             "Tetrahedral (Delaunay)", 
             "Tetrahedral (GPU Delaunay)", 
             "Hex Dominant (Subdivision)", 
-            "Hex Dominant Testing", 
+            "Hex Meshing (cfMesh)", 
             "Polyhedral (Dual)"
         ])
         self.window.mesh_strategy.setCurrentIndex(0)

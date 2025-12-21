@@ -53,6 +53,7 @@ class VTK3DViewer(QFrame):
         self.current_tetrahedra = []
         self.current_hexahedra = []
         self.current_quality_data = {}
+        self.avg_cell_size = 0.05 # Default Fallback
         
         # Initialize modules
         self.quality_renderer = QualityRenderer(self)
@@ -63,6 +64,53 @@ class VTK3DViewer(QFrame):
         
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
+
+    def check_edge_visibility(self):
+        """Dynamically toggle edges based on zoom level to prevent black blob effect"""
+        if not self.current_actor or not hasattr(self, 'avg_cell_size') or self.avg_cell_size <= 0: return
+        
+        # Heuristic: hide edges if cell projected size < 5 pixels (increased from 3.0)
+        MIN_PIXELS_PER_CELL = 5.0 
+        
+        cam = self.renderer.GetActiveCamera()
+        if cam.GetParallelProjection():
+            height_world = cam.GetParallelScale() * 2
+        else:
+            dist = cam.GetDistance()
+            fov = cam.GetViewAngle()
+            import math
+            height_world = 2 * dist * math.tan(math.radians(fov) / 2)
+            
+        win_size = self.vtk_widget.GetRenderWindow().GetSize()
+        if not win_size or win_size[1] == 0: return
+        win_height = win_size[1]
+        
+        pixels_per_world = win_height / height_world
+        cell_size_px = self.avg_cell_size * pixels_per_world
+        
+        # print(f"[DEBUG] cell_size_px: {cell_size_px:.2f} (avg_size: {self.avg_cell_size:.4f})")
+        
+        prop = self.current_actor.GetProperty()
+        current_vis = prop.GetEdgeVisibility()
+        
+        # Dynamic Line Width
+        # Thinner lines when zoomed out (but not less than 1.0)
+        # target_width = max(1.0, min(3.0, cell_size_px / 15.0))
+        target_width = max(1.0, min(1.5, cell_size_px / 40.0))
+        prop.SetLineWidth(target_width)
+        
+        print(f"[VIEWER_DEBUG] target_width: {target_width:.2f} (cell_px: {cell_size_px:.1f})")
+        
+        if current_vis == 1:
+            if cell_size_px < (MIN_PIXELS_PER_CELL * 0.8):
+                prop.SetEdgeVisibility(0)
+                print(f"[VIEWER_DEBUG] Hiding edges (cell_px={cell_size_px:.1f} < {MIN_PIXELS_PER_CELL * 0.8})")
+                self.vtk_widget.GetRenderWindow().Render()
+        else:
+            if cell_size_px > (MIN_PIXELS_PER_CELL * 1.2):
+                prop.SetEdgeVisibility(1)
+                print(f"[VIEWER_DEBUG] Showing edges (cell_px={cell_size_px:.1f} > {MIN_PIXELS_PER_CELL * 1.2})")
+                self.vtk_widget.GetRenderWindow().Render()
 
     def _setup_lighting(self):
         self.renderer.SetAmbient(0.4, 0.4, 0.4)

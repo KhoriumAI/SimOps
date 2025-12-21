@@ -291,167 +291,62 @@ def get_mesh_data(project_id: str):
         return jsonify({"error": "Mesh not ready"}), 400
 
     try:
-        # Parse .msh file and extract nodes/elements
-        mesh_data = parse_msh_file(project.output_file)
-        return jsonify(mesh_data)
+        # Parse .msh file and return geometry
+        return parse_msh_file_optimized(project.output_file)
     except Exception as e:
         return jsonify({"error": f"Failed to parse mesh file: {str(e)}"}), 500
-
-
-    return parse_msh_file_optimized(msh_filepath)
 
 
 def parse_msh_file_optimized(msh_filepath: str):
     """
     Parse Gmsh .msh file and return optimized flat arrays for Three.js BufferGeometry.
-    Also loads quality data if available.
+    Includes ALL quality metrics for visualization.
     """
     vertices = []
-    indices = []
-    colors = []  # RGB 0-1
+    colors = [] # Default RGB
+    
+    # Store quality data arrays for client-side filtering/coloring
+    quality_arrays = {
+        "sicn": [],
+        "gamma": [],
+        "skewness": [],
+        "aspect_ratio": []
+    }
     
     # Check for quality file
     quality_filepath = Path(msh_filepath).with_suffix('.quality.json')
-    per_element_quality = {}
-    quality_metrics = {}
+    per_element_data = {
+        "quality": {}, # SICN
+        "gamma": {},
+        "skewness": {},
+        "aspect_ratio": {}
+    }
     
     if quality_filepath.exists():
         try:
             with open(quality_filepath, 'r') as f:
                 qdata = json.load(f)
-                per_element_quality = qdata.get('per_element_quality', {})
-                # Normalize keys to strings just in case
-                per_element_quality = {str(k): v for k, v in per_element_quality.items()}
-                
-                # Get threshold for coloring
-                quality_metrics = {
-                    'sicn_10_percentile': qdata.get('quality_threshold_10', 0.3)
-                }
+                # Load all available metrics
+                per_element_data["quality"] = {str(k): v for k, v in qdata.get('per_element_quality', {}).items()}
+                per_element_data["gamma"] = {str(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
+                per_element_data["skewness"] = {str(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
+                per_element_data["aspect_ratio"] = {str(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
         except Exception as e:
             print(f"Failed to load quality file: {e}")
 
-    # 1. Read Nodes
-    nodes_map = {} # tag -> index in vertices array (0, 1, 2...)
-    
-    try:
-        with open(msh_filepath, 'r') as f:
-            lines = f.readlines()
-            
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            if line == "$Nodes":
-                i += 2 # Skip header
-                while i < len(lines) and lines[i].strip() != "$EndNodes":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4: # Block header
-                        num_nodes = int(parts[3])
-                        i += 1
-                        # Read tags
-                        tags = []
-                        for _ in range(num_nodes):
-                            tags.append(int(lines[i].strip()))
-                            i += 1
-                        # Read coords
-                        for tag in tags:
-                            coords = lines[i].strip().split()
-                            # Append to flat vertices array
-                            vertices.extend([float(coords[0]), float(coords[1]), float(coords[2])])
-                            # Map tag to vertex index (vertices array index / 3)
-                            nodes_map[tag] = (len(vertices) // 3) - 1
-                            i += 1
-                    else:
-                        i += 1
-                        
-            elif line == "$Elements":
-                i += 2 # Skip header
-                while i < len(lines) and lines[i].strip() != "$EndElements":
-                    parts = lines[i].strip().split()
-                    if len(parts) == 4: # Block header
-                        elem_type = int(parts[2])
-                        num_elems = int(parts[3])
-                        i += 1
-                        
-                        # We only care about triangles (type 2) for surface rendering
-                        # If we want to see inside, we'd need a different approach (clipping volume)
-                        # But standard WebGL usually renders surfaces.
-                        if elem_type == 2: # Triangle
-                            for _ in range(num_elems):
-                                # tag node1 node2 node3
-                                el_parts = lines[i].strip().split()
-                                if len(el_parts) >= 4:
-                                    el_tag = el_parts[0]
-                                    n1, n2, n3 = int(el_parts[1]), int(el_parts[2]), int(el_parts[3])
-                                    
-                                    if n1 in nodes_map and n2 in nodes_map and n3 in nodes_map:
-                                        indices.extend([nodes_map[n1], nodes_map[n2], nodes_map[n3]])
-                                        
-                                        # Determine color based on quality
-                                        # Default green
-                                        r, g, b = 0.2, 0.7, 0.4
-                                        
-                                        if per_element_quality:
-                                            q = per_element_quality.get(el_tag)
-                                            if q is not None:
-                                                threshold = quality_metrics.get('sicn_10_percentile', 0.3)
-                                                if q <= threshold:
-                                                    r, g, b = 1.0, 0.0, 0.0 # Red (Worst)
-                                                elif q < 0.3:
-                                                    r, g, b = 1.0, 0.5, 0.0 # Orange
-                                                elif q < 0.5:
-                                                    r, g, b = 1.0, 1.0, 0.0 # Yellow
-                                                elif q < 0.7:
-                                                    r, g, b = 0.5, 1.0, 0.0 # Yellow-Green
-                                                else:
-                                                    r, g, b = 0.2, 0.7, 0.4 # Green (Good)
-                                        
-                                        # Add color for EACH vertex of the triangle (flat shading look requires splitting vertices usually, 
-                                        # but for smooth shading we share. For flat look in Three.js with shared vertices, 
-                                        # we might need to use 'flatShading: true' material, but vertex colors blend.
-                                        # To get true flat faceted colors with shared vertices is tricky in indexed geometry.
-                                        # We'll provide colors per vertex. If vertices are shared, color will blend.
-                                        # To match desktop "Flat" look perfectly, we might need non-indexed geometry (de-indexed).
-                                        # BUT de-indexed is 3x memory.
-                                        # Let's try to map colors to faces? Three.js BufferGeometry colors are per vertex.
-                                        # We will rely on the frontend to de-index if it wants perfect flat shading with colors,
-                                        # OR we just de-index here. De-indexing is safer for "Low Poly" look.
-                                        pass 
-                                i += 1
-                        else:
-                            # Skip other types
-                            for _ in range(num_elems):
-                                i += 1
-                    else:
-                        i += 1
-            else:
-                i += 1
-                
-    except Exception as e:
-        print(f"Error parsing mesh: {e}")
-        return {"error": str(e)}
+    # Helper to get color from value (0.0 to 1.0) - Green to Red
+    # Note: client side can re-color, but we provide defaults
+    def get_color(val):
+        # 0.0 (Bad) -> Red, 1.0 (Good) -> Green
+        # Simple lerp
+        r = 1.0 - val
+        g = val
+        b = 0.0
+        # Boost for visibility
+        if val < 0.1: r, g, b = 1.0, 0.0, 0.0
+        elif val > 0.9: r, g, b = 0.0, 1.0, 0.0
+        return [r, g, b]
 
-    # Post-processing: To achieve the "Flat" look with per-face colors like the desktop app,
-    # we MUST de-index the geometry (explode it).
-    # This means every triangle has 3 unique vertices.
-    
-    flat_vertices = []
-    flat_colors = []
-    # We don't need indices for non-indexed geometry
-    
-    # Re-read elements to build de-indexed arrays
-    # This is inefficient (reading twice), but safer for memory in Python than holding massive arrays in memory if we can stream.
-    # Actually, let's just process the indices we collected.
-    
-    # We need to reconstruct the color logic per face
-    # We have indices [n1, n2, n3, n4, n5, n6...]
-    # We need to map these back to the element tags to get quality... 
-    # The previous loop didn't store element tags with indices.
-    # Let's redo the loop structure slightly to be single-pass de-indexed.
-    
-    vertices = [] # Clear
-    colors = []
-    
     try:
         with open(msh_filepath, 'r') as f:
             lines = f.readlines()
@@ -481,7 +376,7 @@ def parse_msh_file_optimized(msh_filepath: str):
             else:
                 i += 1
                 
-        # Second pass: Elements -> De-indexed Vertices + Colors
+        # Second pass: Elements -> Vertices + Colors + Metrics
         i = 0
         while i < len(lines):
             line = lines[i].strip()
@@ -494,11 +389,14 @@ def parse_msh_file_optimized(msh_filepath: str):
                         num_elems = int(parts[3])
                         i += 1
                         
-                        if elem_type == 2: # Triangle
+                        # Type 2 (Triangle) - Surface
+                        # Type 4 (Tetrahedron) - Volume (we only show surface faces for performance unless requested)
+                        # For now, we only render Triangles (surfaces)
+                        if elem_type == 2: 
                             for _ in range(num_elems):
                                 el_parts = lines[i].strip().split()
                                 if len(el_parts) >= 4:
-                                    el_tag = el_parts[0]
+                                    el_tag = str(el_parts[0])
                                     n1, n2, n3 = int(el_parts[1]), int(el_parts[2]), int(el_parts[3])
                                     
                                     if n1 in nodes_coords and n2 in nodes_coords and n3 in nodes_coords:
@@ -507,25 +405,26 @@ def parse_msh_file_optimized(msh_filepath: str):
                                         vertices.extend(nodes_coords[n2])
                                         vertices.extend(nodes_coords[n3])
                                         
-                                        # Determine color
-                                        r, g, b = 0.2, 0.7, 0.4 # Default Green
-                                        if per_element_quality:
-                                            q = per_element_quality.get(el_tag)
-                                            if q is not None:
-                                                threshold = quality_metrics.get('sicn_10_percentile', 0.3)
-                                                if q <= threshold:
-                                                    r, g, b = 1.0, 0.0, 0.0
-                                                elif q < 0.3:
-                                                    r, g, b = 1.0, 0.5, 0.0
-                                                elif q < 0.5:
-                                                    r, g, b = 1.0, 1.0, 0.0
-                                                elif q < 0.7:
-                                                    r, g, b = 0.5, 1.0, 0.0
+                                        # Get metrics (fallback to defaults)
+                                        sicn = per_element_data["quality"].get(el_tag, 1.0)
+                                        gamma = per_element_data["gamma"].get(el_tag, 1.0)
+                                        skew = per_element_data["skewness"].get(el_tag, 0.0)
+                                        ar = per_element_data["aspect_ratio"].get(el_tag, 1.0)
                                         
-                                        # Add color for 3 vertices
-                                        colors.extend([r, g, b, r, g, b, r, g, b])
+                                        # Add to quality arrays (3 times per face)
+                                        for _ in range(3):
+                                            quality_arrays["sicn"].append(sicn)
+                                            quality_arrays["gamma"].append(gamma)
+                                            quality_arrays["skewness"].append(skew)
+                                            quality_arrays["aspect_ratio"].append(ar)
+
+                                        # Base color (SICN-based)
+                                        c = get_color(sicn)
+                                        colors.extend(c * 3) # 3 vertices
+                                        
                                 i += 1
                         else:
+                            # Skip other types
                             for _ in range(num_elems):
                                 i += 1
                     else:
@@ -539,6 +438,7 @@ def parse_msh_file_optimized(msh_filepath: str):
     return {
         "vertices": vertices,
         "colors": colors,
+        "metrics": quality_arrays,
         "numVertices": len(vertices) // 3,
         "numTriangles": len(vertices) // 9
     }

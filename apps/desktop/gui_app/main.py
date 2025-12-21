@@ -479,7 +479,7 @@ class ModernMeshGenGUI(QMainWindow):
             "Tetrahedral (GPU Delaunay)",
             # Exhaustive merged into Delaunay
             "Hex Dominant (Subdivision)",
-            "Hex Dominant Testing",
+            "Hex Meshing (cfMesh)",
             "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
@@ -488,7 +488,7 @@ class ModernMeshGenGUI(QMainWindow):
             "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
             "Exhaustive (Parallel Race): Tries ALL strategies, picks best score\n"
             "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
-            "Hex Dominant Testing: Visualize CoACD components\n"
+            "Hex Meshing (cfMesh): Uses OpenFOAM cfMesh or snappyHexMesh for robust hex generation\n"
             "Polyhedral (Dual): Polyhedral cells from tet dual"
         )
         self.mesh_strategy.currentTextChanged.connect(self.on_strategy_changed)
@@ -2948,6 +2948,9 @@ class ModernMeshGenGUI(QMainWindow):
                 else:
                     # Standard mesh loading
                     self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
+                    self.add_log(f"[DEBUG] Viewer type: {type(self.viewer)}")
+                    import inspect
+                    self.add_log(f"[DEBUG] load_mesh_file location: {inspect.getsourcefile(self.viewer.load_mesh_file)}")
                     
                     elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
                     self.load_start_time = time.time()

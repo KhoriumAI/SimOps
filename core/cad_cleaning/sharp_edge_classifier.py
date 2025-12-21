@@ -70,7 +70,11 @@ def classify_sharp_edges(
             
             # Get curve midpoint parameter
             param_bounds = gmsh.model.getParametrizationBounds(dim, curve_tag)
-            t_mid = (param_bounds[0][0] + param_bounds[0][1]) / 2.0
+            # param_bounds is ([min_list], [max_list])
+            # For 1D curve: min_list=[t_min], max_list=[t_max]
+            t_min = param_bounds[0][0]
+            t_max = param_bounds[1][0]
+            t_mid = (t_min + t_max) / 2.0
             
             # Get point on curve at midpoint
             point = gmsh.model.getValue(dim, curve_tag, [t_mid])

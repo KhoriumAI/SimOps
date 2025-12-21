@@ -144,6 +144,10 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         
         print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}", flush=True)
         
+        # Ensure per_element_quality exists in result (GUI expects it)
+        if 'per_element_quality' not in result:
+            result['per_element_quality'] = {}
+        
         return result
         
     except Exception as e:
@@ -617,20 +621,15 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
 
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
-    Generate hex-dominant mesh using CoACD + subdivision pipeline
+    Generate hex-dominant mesh using subdivision pipeline (NO CoACD).
     
     Steps:
-    1. High-fidelity STEP → STL
-    2. CoACD convex decomposition
-    3. Discrete mesh approach (merge cleaned STLs)
-    4. Surface classification → volume
-    5. Subdivision algorithm (tets → 4 hexes each)
+    1. Import STEP directly to Gmsh
+    2. Generate 3D tetrahedral mesh
+    3. Apply subdivision algorithm (tets → 4 hexes each)
     """
     try:
-        import trimesh
-        save_stl = quality_params.get('save_stl', False) if quality_params else False
-        
-        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
+        print("[HEX-DOM] Starting hex-dominant subdivision pipeline...")
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -638,114 +637,31 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         mesh_name = Path(cad_file).stem
         output_file = str(mesh_folder / f"{mesh_name}_hex_mesh.msh")
         
-        # Temporary STL path
-        temp_dir = Path(tempfile.gettempdir())
-        stl_file = temp_dir / f"{mesh_name}_step1.stl"
-        
-        # Step 1: STEP → STL
-        print("[HEX-DOM] Step 1: Converting STEP to STL...")
-        step1 = HighFidelityDiscretization()
-        success = step1.convert_step_to_stl(cad_file, str(stl_file))
-        if not success:
-            return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
-        
-        if save_stl:
-            saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
-            import shutil
-            shutil.copy(stl_file, saved_stl_step1)
-            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
-        
-        # Step 2: CoACD Decomposition
-        print("[HEX-DOM] Step 2: CoACD convex decomposition...")
-        step2 = ConvexDecomposition()
-        parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
-        
-        if not parts:
-            return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
-        
-        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
-        
-        # INTERMEDIATE UPDATE: CoACD Parts
-        try:
-            # We want to visualize the convex decomposition.
-            # We can write a simple MSH file where each part is a discrete entity or has a different physical tag.
-            # Since we have (verts, faces) for each part, we can use Gmsh to build a multi-volume model.
-            
-            gmsh.initialize()
-            gmsh.model.add("coacd_debug")
-            
-            for i, (verts, faces) in enumerate(parts):
-                # Create a discrete surface for each part
-                s_tag = i + 1
-                gmsh.model.addDiscreteEntity(2, s_tag)
-                
-                # Add nodes
-                num_nodes = len(verts)
-                node_tags = [j + 1 for j in range(num_nodes)] # Local to this part, will need offset if merging, but here we add to entity
-                # Actually, addDiscreteEntity + addNodes works per entity.
-                
-                # Flatten verts
-                flat_verts = verts.flatten().tolist()
-                gmsh.model.mesh.addNodes(2, s_tag, node_tags, flat_verts)
-                
-                # Add elements (triangles)
-                tri_tags = [j + 1 for j in range(len(faces))]
-                flat_faces = (faces + 1).flatten().tolist() # Face indices are 0-based in trimesh, 1-based in gmsh nodes
-                gmsh.model.mesh.addElementsByType(s_tag, 2, tri_tags, flat_faces)
-                
-            coacd_temp = str(mesh_folder / f"{mesh_name}_coacd_temp.msh")
-            gmsh.write(coacd_temp)
-            print(f"[DISPLAY_UPDATE] phase=coacd file={coacd_temp}", flush=True)
-            gmsh.finalize()
-            
-        except Exception as e:
-            print(f"[HEX-DOM] Warning: Failed to save CoACD intermediate: {e}")
-            if gmsh.isInitialized():
-                gmsh.finalize()
-        
-        # Step 3-5: Hex Meshing
-        print("[HEX-DOM] Step 3-5: Generating hex mesh via subdivision...")
-        
+        # Initialize Gmsh
         gmsh.initialize()
-        gmsh.model.add("hex_dom_final")
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.model.add("hex_subdivision")
         
-        # Set tolerances
-        gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
-        gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
+        # Step 1: Import STEP directly
+        print("[HEX-DOM] Step 1: Importing STEP geometry...")
+        gmsh.merge(cad_file)
+        gmsh.model.occ.synchronize()
         
-        # Clean and merge each part
-        for i, (verts, faces) in enumerate(parts):
-            chunk_mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-            chunk_mesh.merge_vertices()
-            chunk_mesh.remove_degenerate_faces()
-            chunk_mesh.remove_duplicate_faces()
-            
-            chunk_file = temp_dir / f"temp_chunk_{i}.stl"
-            chunk_mesh.export(str(chunk_file))
-            gmsh.merge(str(chunk_file))
-            chunk_file.unlink()  # Delete temp file
+        # Set mesh size from quality params
+        mesh_size = 2.0  # Default
+        if quality_params and 'max_size_mm' in quality_params:
+            mesh_size = float(quality_params['max_size_mm'])
+        elif quality_params and 'max_element_size' in quality_params:
+            mesh_size = float(quality_params['max_element_size'])
         
-        # Classify surfaces to create volumes
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
+        print(f"[HEX-DOM] Using mesh size: {mesh_size} mm")
+        
+        # Step 2: Generate 3D tet mesh
         try:
-            angle = 40
-            gmsh.model.mesh.classifySurfaces(angle * 3.14159 / 180, True, False, 180 * 3.14159 / 180)
-            gmsh.model.mesh.createGeometry()
-            
-            s = gmsh.model.getEntities(2)
-            l = gmsh.model.geo.addSurfaceLoop([s[i][1] for i in range(len(s))])
-            gmsh.model.geo.addVolume([l])
-            gmsh.model.geo.synchronize()
-            
-            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces")
-        except Exception as e:
-            gmsh.finalize()
-            return {'success': False, 'message': f'Step 3 failed: Surface classification - {e}'}
-        
-        # Generate 3D tet mesh first
-        try:
+            print("[HEX-DOM] Step 2: Generating tetrahedral mesh...")
             gmsh.model.mesh.generate(3)
-            print("[HEX-DOM] Generated intermediate tet mesh")
+            print("[HEX-DOM] Tetrahedral mesh generated")
             
             # INTERMEDIATE UPDATE: Unstructured Tet Mesh (Before subdivision)
             tet_temp = str(mesh_folder / f"{mesh_name}_tet_temp.msh")
@@ -754,10 +670,10 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
 
         except Exception as e:
             gmsh.finalize()
-            return {'success': False, 'message': f'Step 4 failed: Tet meshing - {e}'}
+            return {'success': False, 'message': f'Tet meshing failed: {e}'}
         
-        # Apply subdivision (tet → hex)
-        print("[HEX-DOM] Applying subdivision algorithm...")
+        # Step 3: Apply subdivision (tet → hex)
+        print("[HEX-DOM] Step 3: Applying subdivision algorithm...")
         gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
         gmsh.model.mesh.refine()
         
@@ -778,24 +694,22 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         # Extract per-element quality for visualization
         try:
-            from core.quality import compute_element_quality_gmsh
-            
             # Get hex elements (type 5 = 8-node hex)
             hex_tags, hex_nodes = gmsh.model.mesh.getElementsByType(5)
             
             if len(hex_tags) > 0:
                 # Compute quality for each hex
-                per_element_quality = []
-                for tag in hex_tags:
+                per_element_quality = {}
+                for i, tag in enumerate(hex_tags):
                     quality = gmsh.model.mesh.getElementQualities([tag], "minSICN")
-                    per_element_quality.append(quality[0] if quality else 0.5)
+                    per_element_quality[str(i+1)] = float(quality[0] if quality else 0.5)
                 
                 print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
             else:
-                per_element_quality = []
+                per_element_quality = {}
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
-            per_element_quality = []
+            per_element_quality = {}
         
         gmsh.finalize()
         
@@ -812,14 +726,12 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'metrics': {
                 'num_hexes': num_hexes,
                 'num_tets': num_tets,
-                'hex_ratio': (num_hexes / total_3d * 100) if total_3d > 0 else 0,
-                'volume_error_pct': stats['volume_error_pct'],
-                'num_parts': len(parts)
+                'hex_ratio': (num_hexes / total_3d * 100) if total_3d > 0 else 0
             },
             'quality_metrics': {
-                'min_quality': min(per_element_quality) if per_element_quality else 0,
-                'max_quality': max(per_element_quality) if per_element_quality else 1,
-                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0
+                'min_quality': min(per_element_quality.values()) if per_element_quality else 0,
+                'max_quality': max(per_element_quality.values()) if per_element_quality else 1,
+                'avg_quality': sum(per_element_quality.values()) / len(per_element_quality) if per_element_quality else 0
             }
         }
         
@@ -913,7 +825,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
+        if 'Hex Meshing (cfMesh)' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
             # Try OpenFOAM (cfMesh or snappy) first
             if check_any_openfoam_available():
                 print("[DEBUG] OpenFOAM available - using robust hex pipeline")
@@ -929,7 +841,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         
         if 'GPU Delaunay' in mesh_strategy:
             print("[DEBUG] GPU Delaunay strategy detected - using GPU Fill & Filter pipeline")
-            return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
+            if GPU_AVAILABLE:
+                return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
+            else:
+                print("[DEBUG] GPU not available - falling back to default tetrahedral strategy")
+                # Fall through to default strategy below
             
         # Polyhedral (Dual)
         if 'Polyhedral' in mesh_strategy:

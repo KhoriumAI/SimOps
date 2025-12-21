@@ -4,7 +4,7 @@ import FileUpload from './components/FileUpload'
 import ProcessStatus from './components/ProcessStatus'
 import Terminal from './components/Terminal'
 import QualityReport from './components/QualityReport'
-import { Download } from 'lucide-react'
+import { Download, ChevronDown, ChevronUp, Settings, ArrowUp, ArrowDown } from 'lucide-react'
 
 const API_BASE = '/api'
 
@@ -16,13 +16,35 @@ function App() {
   const [isPolling, setIsPolling] = useState(false)
   const [selectedStrategy, setSelectedStrategy] = useState('Tetrahedral (Delaunay)')
 
+  // Advanced Settings State
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [workerCount, setWorkerCount] = useState(4)
+  const [minSize, setMinSize] = useState(0.5)
+  const [elementType, setElementType] = useState('Tet4')
+  const [ansysMode, setAnsysMode] = useState('None')
+  const [scoreThreshold, setScoreThreshold] = useState(0.5)
+  const [exhaustiveOrder, setExhaustiveOrder] = useState([
+    'Delaunay', 'Frontal', 'HXT', 'MMG3D', 'Netgen', 'Quartet'
+  ])
+
   const strategies = [
     'Tetrahedral (Delaunay)',
     'Tetrahedral (Frontal)',
     'Tetrahedral (HXT - Parallel)',
     'Hex-Dominant (Recombined)',
-    'Quad-Dominant (2D)'
+    'Quad-Dominant (2D)',
+    'Exhaustive (Parallel Race)'
   ]
+
+  const moveStrategy = (index, direction) => {
+    const newOrder = [...exhaustiveOrder]
+    if (direction === 'up' && index > 0) {
+      [newOrder[index], newOrder[index - 1]] = [newOrder[index - 1], newOrder[index]]
+    } else if (direction === 'down' && index < newOrder.length - 1) {
+      [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]]
+    }
+    setExhaustiveOrder(newOrder)
+  }
 
   // Poll project status
   useEffect(() => {
@@ -92,14 +114,22 @@ function App() {
     if (!currentProject) return
 
     try {
+      const payload = {
+        mesh_strategy: selectedStrategy,
+        worker_count: workerCount,
+        min_size: minSize,
+        element_order: elementType,
+        ansys_mode: ansysMode,
+        score_threshold: scoreThreshold,
+        exhaustive_strategies: exhaustiveOrder
+      }
+
       const response = await fetch(`${API_BASE}/projects/${currentProject}/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          mesh_strategy: selectedStrategy
-        })
+        body: JSON.stringify(payload)
       })
 
       if (response.ok) {
@@ -163,43 +193,158 @@ function App() {
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Controls */}
-        <div className="w-80 border-r border-gray-700 flex flex-col bg-gray-800">
-          <div className="p-4 space-y-4">
+        <div className="w-96 border-r border-gray-700 flex flex-col bg-gray-800">
+          <div className="p-4 space-y-4 overflow-y-auto custom-scrollbar">
             <FileUpload onFileUpload={handleFileUpload} />
 
             {currentProject && (
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-gray-400">Meshing Strategy</label>
-                <select
-                  value={selectedStrategy}
-                  onChange={(e) => setSelectedStrategy(e.target.value)}
-                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                  disabled={isGenerating}
-                >
-                  {strategies.map(s => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-              </div>
-            )}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-400">Meshing Strategy</label>
+                  <select
+                    value={selectedStrategy}
+                    onChange={(e) => setSelectedStrategy(e.target.value)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                    disabled={isGenerating}
+                  >
+                    {strategies.map(s => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
 
-            {currentProject && (
-              <button
-                onClick={handleGenerateMesh}
-                disabled={!canGenerate || isGenerating}
-                className={`w-full px-4 py-3 rounded-lg font-semibold transition-colors ${canGenerate && !isGenerating
-                  ? 'bg-green-600 hover:bg-green-700'
-                  : 'bg-gray-600 cursor-not-allowed'
-                  }`}
-              >
-                {isGenerating ? 'Generating...' : 'Generate Mesh'}
-              </button>
+                {/* Advanced Settings Checkbox/Toggle */}
+                <div className="border border-gray-700 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setShowAdvanced(!showAdvanced)}
+                    className="w-full flex items-center justify-between p-3 bg-gray-700/50 hover:bg-gray-700 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <Settings className="w-4 h-4" />
+                      Advanced Settings
+                    </div>
+                    {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </button>
+
+                  {showAdvanced && (
+                    <div className="p-3 bg-gray-800 space-y-4">
+                      {/* Worker Count */}
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-xs text-gray-400">
+                          <span>Parallel Workers</span>
+                          <span>{workerCount}</span>
+                        </div>
+                        <input
+                          type="range" min="1" max="32"
+                          value={workerCount}
+                          onChange={(e) => setWorkerCount(parseInt(e.target.value))}
+                          className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Element Type */}
+                      <div className="space-y-1">
+                        <span className="block text-xs text-gray-400">Element Type</span>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => setElementType('Tet4')}
+                            className={`flex-1 py-1 text-xs rounded border ${elementType === 'Tet4' ? 'bg-blue-600 border-blue-600' : 'border-gray-600 hover:bg-gray-700'}`}
+                          >
+                            Tet4 (Linear)
+                          </button>
+                          <button
+                            onClick={() => setElementType('Tet10')}
+                            className={`flex-1 py-1 text-xs rounded border ${elementType === 'Tet10' ? 'bg-blue-600 border-blue-600' : 'border-gray-600 hover:bg-gray-700'}`}
+                          >
+                            Tet10 (Quad)
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Min Size */}
+                      <div className="space-y-1">
+                        <span className="block text-xs text-gray-400">Min Element Size (mm)</span>
+                        <input
+                          type="number" step="0.1" min="0"
+                          value={minSize}
+                          onChange={(e) => setMinSize(parseFloat(e.target.value))}
+                          className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+
+                      {/* ANSYS Export */}
+                      <div className="space-y-1">
+                        <span className="block text-xs text-gray-400">ANSYS Export Mode</span>
+                        <select
+                          value={ansysMode}
+                          onChange={(e) => setAnsysMode(e.target.value)}
+                          className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="None">None</option>
+                          <option value="CFD (Fluent)">ANSYS CFD (Fluent)</option>
+                          <option value="FEA (Mechanical)">ANSYS FEA (Mechanical)</option>
+                        </select>
+                      </div>
+
+                      {/* Exhaustive Settings */}
+                      {selectedStrategy.includes('Exhaustive') && (
+                        <div className="pt-2 border-t border-gray-700 mt-2 space-y-3">
+                          <h4 className="text-xs font-bold text-gray-300">Exhaustive Race Config</h4>
+
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-xs text-gray-400">
+                              <span>Score Threshold (Lower is fast)</span>
+                              <span>{scoreThreshold}</span>
+                            </div>
+                            <input
+                              type="range" min="0.1" max="1.0" step="0.05"
+                              value={scoreThreshold}
+                              onChange={(e) => setScoreThreshold(parseFloat(e.target.value))}
+                              className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <span className="block text-xs text-gray-400">Strategy Priority</span>
+                            <div className="bg-gray-900 rounded p-1 space-y-1 max-h-32 overflow-y-auto">
+                              {exhaustiveOrder.map((strat, idx) => (
+                                <div key={strat} className="flex items-center justify-between bg-gray-800 px-2 py-1 rounded text-xs">
+                                  <span>{strat}</span>
+                                  <div className="flex gap-1">
+                                    <button onClick={() => moveStrategy(idx, 'up')} disabled={idx === 0} className="hover:text-blue-400 disabled:opacity-30">
+                                      <ArrowUp className="w-3 h-3" />
+                                    </button>
+                                    <button onClick={() => moveStrategy(idx, 'down')} disabled={idx === exhaustiveOrder.length - 1} className="hover:text-blue-400 disabled:opacity-30">
+                                      <ArrowDown className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={handleGenerateMesh}
+                  disabled={!canGenerate || isGenerating}
+                  className={`w-full px-4 py-3 rounded-lg font-semibold transition-colors ${canGenerate && !isGenerating
+                    ? 'bg-green-600 hover:bg-green-700'
+                    : 'bg-gray-600 cursor-not-allowed'
+                    }`}
+                >
+                  {isGenerating ? 'Generating...' : 'Generate Mesh'}
+                </button>
+              </div>
             )}
           </div>
 
           {currentProject && (
             <>
-              <div className="flex-1 overflow-auto p-4 space-y-4">
+              <div className="flex-1 overflow-auto p-4 space-y-4 border-t border-gray-700">
                 <ProcessStatus status={projectStatus} />
 
                 {/* Iterations */}
@@ -239,12 +384,12 @@ function App() {
         {/* Right Panel - 3D Viewer and Terminal */}
         <div className="flex-1 flex flex-col">
           {/* 3D Viewer */}
-          <div className="flex-1 border-b border-gray-700">
+          <div className="flex-1 border-b border-gray-700 relative">
             <MeshViewer meshData={meshData} />
           </div>
 
           {/* Terminal */}
-          <div className="h-64">
+          <div className="h-48">
             <Terminal logs={logs} />
           </div>
         </div>
