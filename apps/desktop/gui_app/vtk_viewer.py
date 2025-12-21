@@ -1103,6 +1103,11 @@ class VTK3DViewer(QFrame):
             with open(debug_log, 'a') as f:
                 f.write(f"Actor created and added to renderer\n")
                 f.write(f"Renderer actor count: {self.renderer.GetActors().GetNumberOfItems()}\n")
+
+            # CRITICAL: Enable edges for wireframe visualization
+            actor.GetProperty().EdgeVisibilityOn()
+            actor.GetProperty().SetEdgeColor(0.2, 0.2, 0.2)  # Dark gray edges
+            actor.GetProperty().SetLineWidth(1.0)
             
             print("[POLY-VIZ] Resetting camera and rendering...")
             

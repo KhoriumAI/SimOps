@@ -116,9 +116,10 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     # For concave, this can fail. Using center of bbox is a 50/50 gamble.
     # Ideally ray cast. 
     # Fallback: assume origin (0,0,0) or center if provided.
-    # Note: STL is in mm, but blockMesh converts to meters (0.001).
-    # We must scale this point to match the background mesh units (Meters).
-    location_in_mesh = center * 0.001 
+    # Note: STL is in mm, and we want blockMesh to stay in mm to match.
+    # So we use convertToMeters 1 (or 0.001 if we wanted meters, but STL is mm)
+    # To fix intersection issues, we stick to MM for everything.
+    location_in_mesh = center  # No scaling needed if convertToMeters is 1
     
     # Generate blockMeshDict
     # Calculate number of cells based on cell_size * 2 (coarser background)
@@ -133,7 +134,7 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     object      blockMeshDict;
 }}
 
-convertToMeters 0.001; // STL is likely in mm
+convertToMeters 1; // STL is in mm, keep background in mm
 
 vertices
 (
