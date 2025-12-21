@@ -1,0 +1,19 @@
+{
+  "dispatched_at": "2025-12-18T14:16:53.609202",
+  "original_result": {
+    "job_name": "Test_GCI_Verification",
+    "input_file": "cad_files/Cylinder.step",
+    "strategy": "HighFi_CFD",
+    "attempts": 1,
+    "mesh_file": "test_output\\gci_verification\\Cylinder_HighFi_CFD.msh",
+    "vtk_file": "test_output\\gci_verification\\Test_GCI_Verification_thermal.vtk",
+    "png_file": null,
+    "pdf_file": "test_output\\gci_verification\\Test_GCI_Verification_report.pdf",
+    "min_temp_K": 300.0,
+    "max_temp_K": 800.0,
+    "num_elements": 341386,
+    "solve_time_s": 8.514872550964355,
+    "total_time_s": 166.99785995483398,
+    "completed_at": "2025-12-18T14:16:53.587299"
+  }
+}

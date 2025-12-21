@@ -1,0 +1,78 @@
+# SimOps Worker Dockerfile - Production Optimized
+# ================================================
+# Multi-stage build for smaller image size
+# Contains Gmsh, Python, and solver dependencies
+
+# =================================================================
+# STAGE 1: Build dependencies
+# =================================================================
+FROM python:3.10-slim-bullseye AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements-worker.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements-worker.txt
+
+# =================================================================
+# STAGE 2: Production image
+# =================================================================
+FROM python:3.10-slim-bullseye AS production
+
+# Labels
+LABEL maintainer="SimOps Team"
+LABEL description="SimOps Thermal Simulation Worker"
+LABEL version="1.0"
+
+# Install runtime dependencies (Gmsh/GL/VTK/OSMesa/Xvfb - Headless Graphics Stack)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libgl1-mesa-dri \
+    libglu1-mesa \
+    libosmesa6 \
+    libxrender1 \
+    libxcursor1 \
+    libxft2 \
+    libxinerama1 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgomp1 \
+    xvfb \
+    xauth \
+    calculix-ccx \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy wheels from builder and install
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/* \
+    && rm -rf /wheels
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash simops
+WORKDIR /app
+
+# Copy application code
+COPY --chown=simops:simops simops_worker.py .
+COPY --chown=simops:simops result_dispatcher.py .
+COPY --chown=simops:simops simops_pipeline.py .
+COPY --chown=simops:simops core/ ./core/
+
+# Define input/output/logs volume mount points
+RUN mkdir -p /input /output /logs \
+    && chown -R simops:simops /input /output /logs /app
+
+# Switch to non-root user
+USER simops
+
+# Environment variables for Headless VTK/PyVista
+ENV PYTHONUNBUFFERED=1
+ENV PYVISTA_OFF_SCREEN=true
+ENV PYVISTA_USE_IPYVTK=true
+ENV VTK_X11_OFFSCREEN=true
+
+# Start the worker with xvfb-run to provide a virtual display
+# Using sh -c to ensure the process receives proper signal handling and logs are flushed
+CMD ["sh", "-c", "xvfb-run -a -s '-screen 0 1024x768x24' rq worker simops --url redis://redis:6379 --with-scheduler"]

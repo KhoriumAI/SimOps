@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Test_Sidecar_Cylinder
+Input:    cad_files/Cylinder.step
+Time:     2025-12-18T10:06:47.298491
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 150.00 mm
+  Min Dim:  50.00 mm
+  Est. Wall:16.67 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_CFD: CalculiX binary 'ccx' not found in PATH
+- MedFi_Robust: CalculiX binary 'ccx' not found in PATH
+- LowFi_Emergency: Mesh generation failed: float division by zero
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

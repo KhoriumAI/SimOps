@@ -1,0 +1,19 @@
+{
+  "dispatched_at": "2025-12-18T10:40:30.838533",
+  "original_result": {
+    "job_name": "Loft",
+    "input_file": "input\\Loft.step",
+    "strategy": "HighFi_CFD",
+    "attempts": 1,
+    "mesh_file": "output_loft_run\\Loft_HighFi_CFD.msh",
+    "vtk_file": "output_loft_run\\Loft_thermal.vtk",
+    "png_file": null,
+    "pdf_file": "output_loft_run\\Loft_report.pdf",
+    "min_temp_K": -25.065073404932026,
+    "max_temp_K": 800.0,
+    "num_elements": 144090,
+    "solve_time_s": 20.389366388320923,
+    "total_time_s": 44.00290131568909,
+    "completed_at": "2025-12-18T10:40:30.827888"
+  }
+}
