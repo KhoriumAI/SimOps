@@ -1292,11 +1292,15 @@ class VTK3DViewer(QFrame):
             local_offset = point_offset
             all_points.extend(vertices)
             
+            point_offset += len(vertices)
+            
+            # --- HANDLE DIFFERENT CELL TYPES ---
             if element['type'] == 'tetrahedron':
                 for face_indices in tet_faces:
                     tri_indices = [local_offset + i for i in face_indices]
                     all_triangles.append(tri_indices)
                     face_to_element_id.append(element['id'])
+                    
             elif element['type'] == 'hexahedron':
                 for quad in hex_faces:
                     a, b, c, d = quad
@@ -1304,6 +1308,28 @@ class VTK3DViewer(QFrame):
                     face_to_element_id.append(element['id'])
                     all_triangles.append([local_offset + a, local_offset + c, local_offset + d])
                     face_to_element_id.append(element['id'])
+            
+            elif element['type'] == 'polyhedron':
+                # For polyhedra, we need to extract faces dynamically
+                # This assumes 'faces' key contains list of face indices (list of lists)
+                # If not available in element dict, we might need to fetch from vtk grid
+                
+                # Check if we have face definitions
+                if 'faces' in element:
+                    for face in element['faces']:
+                        # Triangulate simple face
+                        if len(face) >= 3:
+                            # Fan triangulation
+                            pivot = local_offset + face[0] # Note: face indices must be relative to node list
+                            for i in range(1, len(face) - 1):
+                                b = local_offset + face[i]
+                                c = local_offset + face[i+1]
+                                all_triangles.append([pivot, b, c])
+                                face_to_element_id.append(element['id'])
+                else: 
+                     # Fallback: Just try to grab faces from original cell if accessible
+                     print(f"[DEBUG] Polyhedron {element.get('id')} missing 'faces' key, skipping cross-section render")
+                     pass
             
             point_offset += len(vertices)
         
@@ -1530,20 +1556,35 @@ class VTK3DViewer(QFrame):
         """Remove clipping and restore original mesh"""
         if not self.current_poly_data or not self.current_actor:
             return
-        
-        # Restore original unclipped data
-        mapper = self.current_actor.GetMapper()
-        mapper.SetInputData(self.current_poly_data)
-        self.current_actor.GetProperty().SetOpacity(1.0)  # Restore full opacity
-        
-        # Hide above-cut actor
+            
+        # Hide auxiliary actors first
         if hasattr(self, 'above_cut_actor') and self.above_cut_actor:
             self.above_cut_actor.VisibilityOff()
-        
-        # Hide cross-section actor
+            
         if self.cross_section_actor:
             self.cross_section_actor.VisibilityOff()
+            
+        # RESTORE ORIGINAL STATE
+        # If we swapped actors (LOD -> Standard), we should probably stick with standard for now 
+        # to avoid complexity, or just reset the mapper input.
         
+        # Ensure we have a mapper
+        mapper = self.current_actor.GetMapper()
+        if not mapper:
+             # Should practically never happen for a valid actor
+             print("[ERROR] Actor has no mapper during clip removal")
+             return
+
+        # Restore full opacity
+        self.current_actor.GetProperty().SetOpacity(1.0)
+        
+        # Reset input to original full mesh
+        # CRITICAL FIX: Ensure input is valid
+        if self.current_poly_data.GetNumberOfPoints() > 0:
+            mapper.SetInputData(self.current_poly_data)
+        else:
+            print("[WARN] Original poly data is empty, cannot restore mesh view")
+            
         self.vtk_widget.GetRenderWindow().Render()
 
     def update_quality_visualization(self, metric="SICN (Min)", opacity=1.0, min_val=0.0, max_val=1.0):

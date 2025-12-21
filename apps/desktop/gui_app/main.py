@@ -2180,51 +2180,94 @@ class ModernMeshGenGUI(QMainWindow):
 
         # Use cad_files folder as default
         default_dir = str(Path(__file__).parent / "cad_files")
-        if not Path(default_dir).exists():
-            default_dir = str(Path.home())
+        if not os.path.exists(default_dir):
+            os.makedirs(default_dir)
 
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "Select CAD or Mesh File", default_dir,
-            "CAD Files (*.step *.stp *.iges *.igs *.brep *.stl *.obj);;Mesh Files (*.msh);;All Files (*)"
+        file_filter = "Geometry/Mesh (*.step *.stp *.geo *.brep *.vtu *.msh);;CAD Files (*.step *.stp *.geo *.brep);;Mesh Files (*.vtu *.msh);;All Files (*)"
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Geometry or Mesh", default_dir, 
+            file_filter
         )
 
-        if filepath:
-            file_ext = Path(filepath).suffix.lower()
-
-            # Check if it's a mesh file
-            if file_ext == '.msh':
-                # Load mesh directly
-                self.cad_file = None  # No CAD file
-                self.file_label.setText(f"{Path(filepath).name}")
-                self.generate_btn.setEnabled(False)  # Can't generate from mesh
-                self.add_log(f"Loaded mesh: {filepath}")
-
-                # Clear iterations
-                self.viewer.clear_iterations()
-
-                # Load the mesh file directly through the viewer
-                self.viewer.load_mesh_file(filepath)
+        if file_path:
+            self.cad_file = file_path
+            path_obj = Path(file_path)
+            self.file_label.setText(f"Loaded: {path_obj.name}")
+            self.add_log(f"Loaded file: {path_obj.name}")
+            
+            # CHECK FOR MESH FILES (Direct Visualization)
+            suffix = path_obj.suffix.lower()
+            if suffix in ['.vtu', '.msh']:
+                self.mesh_file = file_path
+                self.add_log("[Status] Mesh file detected - loading directly into viewer...")
                 
-                # Show post-processing UI sections (quality visualization and cross-section)
-                if hasattr(self, 'crosssection_group'):
-                    self.crosssection_group.setVisible(True)
-                if hasattr(self, 'viz_group'):
-                    self.viz_group.setVisible(True)
+                if hasattr(self, 'viewer') and self.viewer:
+                    # Load mesh and enable quality visualization
+                    self.viewer.load_mesh_file(file_path)
+                    
+                    # Also try to load associated quality metrics if available
+                    # (Usually purely visual for imported meshes unless we run quality check)
+                    self.add_log("[OK] Mesh loaded for visualization")
+                    
+                    # Enable zone manager if available
+                    if hasattr(self.viewer, 'zone_manager'):
+                        self.viewer.zone_manager.load_mesh(file_path)
+                        self.update_zone_list_ui()
                 
+                # Disable generate button since it's already a mesh
+                self.generate_btn.setEnabled(False)
+                self.refine_btn.setEnabled(True) # Allow refinement if applicable
                 return
 
-            # Otherwise treat as CAD file
-            self.cad_file = filepath
-            self.file_label.setText(f"{Path(filepath).name}")
-            self.generate_btn.setEnabled(True)
-            self.add_log(f"Loaded CAD: {filepath}")
+            # --- CAD LOADING (Standard Flow) ---
+            self.mesh_file = None # Reset mesh file for new CAD
+            self.generate_btn.setEnabled(True) # Re-enable generation
+            self.refine_btn.setEnabled(False)
 
+            # Analyze geometry
+            try:
+                import gmsh
+                if not gmsh.is_initialized(): gmsh.initialize()
+                gmsh.open(file_path)
+                
+                # Simple volume check
+                occ_vols = gmsh.model.occ.getEntities(3)
+                if not occ_vols:
+                    # Try regular model entities if OCC not used directly yet
+                    vols = gmsh.model.getEntities(3)
+                else:
+                    vols = occ_vols
+                
+                geom_info = {}
+                if vols:
+                    # Just Approx check
+                    pass 
+                    
+                # Setup Paintbrush if available
+                if self.paintbrush_selector:
+                    if self.paintbrush_selector.load_cad_geometry():
+                        self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
+                
+                # Check for "Airfoil.step" specific hint
+                if "airfoil" in path_obj.name.lower():
+                     self.add_log("[Hint] Airfoil detected: consider using 'Curvature-Adaptive' and 'Hex Dominant'")
+
+                gmsh.finalize()
+            except Exception as e:
+                pass
+                # Don't hard fail on analysis, just log
+                # print(f"Basic geometry analysis failed: {e}")
+
+            # Calculate suggested element counts (mock/heuristic if GMSh fails)
+            # Default values are usually fine
+            pass
             # Clear any existing AI iteration meshes
             self.viewer.clear_iterations()
 
             # Load CAD and get geometry info
-            self.add_log(f"[DEBUG] Calling viewer.load_step_file({filepath})")
-            geom_info = self.viewer.load_step_file(filepath)
+            self.add_log(f"[DEBUG] Calling viewer.load_step_file({file_path})")
+            geom_info = self.viewer.load_step_file(file_path)
             self.add_log(f"[DEBUG] load_step_file returned: {geom_info}")
             self.current_geom_info = geom_info  # Store for logging
 

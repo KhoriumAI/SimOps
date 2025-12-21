@@ -111,17 +111,84 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     min_pt = min_b - margin
     max_pt = max_b + margin
     
-    # Identify a point inside the mesh (approximation)
-    # For a convex object, centroid is usually safe.
-    # For concave, this can fail. Using center of bbox is a 50/50 gamble.
-    # Ideally ray cast. 
-    # Fallback: assume origin (0,0,0) or center if provided.
-    # Note: STL is in mm, and we want blockMesh to stay in mm to match.
-    # So we use convertToMeters 1 (or 0.001 if we wanted meters, but STL is mm)
-    # To fix intersection issues, we stick to MM for everything.
-    location_in_mesh = center  # No scaling needed if convertToMeters is 1
-    
-    # Generate blockMeshDict
+    # Identify a point inside the mesh
+    # Robust approach: Ray Casting Midpoint (Deep Internal Point)
+    # Surface normal offset is risky for thin/curved geometries (airfoils).
+    # Centroid fails for hollow objects (bagels).
+    # Best: Cast a ray through the object and pick the midpoint of the first solid segment.
+    location_in_mesh = center
+    try:
+        import trimesh
+        import numpy as np
+        mesh = trimesh.load(stl_path)
+        
+        found_robust_point = False
+        
+        # Method 1: Ray Casting Midpoint (Primary)
+        # Cast a ray from outside, through the centroid.
+        # Use Z-axis ray
+        ray_origin = mesh.bounds[0] - [1.0, 1.0, 1.0] # Guaranteed outside
+        ray_direction = (mesh.centroid - ray_origin)
+        ray_direction = ray_direction / np.linalg.norm(ray_direction)
+        
+        # Get all intersections
+        # intersections is a (N, 3) array of points
+        intersections, index_ray, index_tri = mesh.ray.intersects_location(
+            ray_origins=[ray_origin],
+            ray_directions=[ray_direction]
+        )
+        
+        if len(intersections) >= 2:
+            # Sort intersections by distance from origin
+            dists = np.linalg.norm(intersections - ray_origin, axis=1)
+            sorted_indices = np.argsort(dists)
+            sorted_intersects = intersections[sorted_indices]
+            
+            # Pick midpoint between first entry (0) and first exit (1)
+            # This is "deep" inside the first volume encountered
+            first_entry = sorted_intersects[0]
+            first_exit = sorted_intersects[1]
+            midpoint = (first_entry + first_exit) / 2.0
+            
+            # Verify just in case (e.g. grazing incidence)
+            if mesh.contains([midpoint])[0]:
+                location_in_mesh = midpoint
+                print(f"[OpenFOAM] Found deep internal point via Ray Casting Midpoint: {location_in_mesh}", flush=True)
+                found_robust_point = True
+
+        # Method 2: Fallback to Surface Normal Offset (Secondary)
+        if not found_robust_point:
+             print("[OpenFOAM] Ray casting inconclusive, falling back to Surface Normal Offset...", flush=True)
+             num_faces = len(mesh.faces)
+             stride = max(1, int(num_faces / 50)) # More sparse is fine
+             
+             scale = 1.0
+             if hasattr(mesh, 'extents'): scale = np.max(mesh.extents)
+             epsilon = scale * 1e-4 # Slightly larger to be safe
+             
+             for i in range(0, num_faces, stride):
+                normal = mesh.face_normals[i]
+                face_center = mesh.vertices[mesh.faces[i]].mean(axis=0)
+                
+                # Check Inward
+                test_pt = face_center - (normal * epsilon)
+                if mesh.contains([test_pt])[0]:
+                    location_in_mesh = test_pt
+                    print(f"[OpenFOAM] Found internal point via Normal Offset: {location_in_mesh}", flush=True)
+                    found_robust_point = True
+                    break
+        
+        # Method 3: Centroid (Last Resort)
+        if not found_robust_point:
+             print("[OpenFOAM] WARNING: Could not find robust internal point. Using Centroid.", flush=True)
+             if hasattr(mesh, 'centroid'):
+                 location_in_mesh = mesh.centroid
+             else:
+                 location_in_mesh = center # BBox center
+
+    except Exception as e:
+        print(f"[OpenFOAM] Error finding internal point: {e}. Using BBox center.", flush=True)
+        location_in_mesh = center
     # Calculate number of cells based on cell_size * 2 (coarser background)
     n_cells = ((max_pt - min_pt) / (cell_size * 2.0)).astype(int)
     n_cells = [max(1, n) for n in n_cells]
