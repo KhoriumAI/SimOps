@@ -1,0 +1,11 @@
+
+        {
+          "version": "1.0",
+          "job_name": "Test_Structural",
+          "physics": {
+            "simulation_type": "structural",
+            "gravity_load_g": 1.0,
+            "material": "Steel"
+          }
+        }
+        

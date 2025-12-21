@@ -1,0 +1,31 @@
+{
+    "version": "1.0",
+    "job_name": "CFD_Airflow_Demo",
+    "physics": {
+        "simulation_type": "cfd",
+        "inlet_velocity": 5.0,
+        "kinematic_viscosity": 1.5e-5,
+        "material": "Air",
+        "unit_scaling": 0.001
+    },
+    "tagging_rules": [
+        {
+            "tag_name": "BC_Inlet",
+            "entity_type": "surface",
+            "selector": {
+                "type": "z_min"
+            }
+        },
+        {
+            "tag_name": "BC_Outlet",
+            "entity_type": "surface",
+            "selector": {
+                "type": "z_max"
+            }
+        }
+    ],
+    "meshing": {
+        "second_order": false,
+        "mesh_size_multiplier": 1.0
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "version": "1.0",
+    "job_name": "Structural_Gravity_Demo",
+    "physics": {
+        "simulation_type": "structural",
+        "gravity_load_g": 9.81,
+        "material": "Aluminum 6061",
+        "fix_cold_boundary": true,
+        "unit_scaling": 0.001
+    },
+    "meshing": {
+        "second_order": true,
+        "mesh_size_multiplier": 1.0
+    }
+}

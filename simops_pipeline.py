@@ -527,6 +527,49 @@ def generate_temperature_visualization(
     return output_file
 
 
+def cleanup_output_dir(output_dir: str):
+    """
+    Delete massive temporary files while keeping human-readable results.
+    Rules:
+    - Keep: .png, .pdf, .json, .vtk, .vtu, .msh, .inp, .log
+    - Delete CalculiX: .frd, .spool, .cvg, .rout, .equ, .f, .dat (if large)
+    - Delete OpenFOAM: numeric time dirs, processor* dirs, polyMesh, postProcessing
+    """
+    path = Path(output_dir)
+    if not path.exists():
+        return
+
+    # Files to delete by extension
+    temp_extensions = [
+        '.frd', '.spool', '.cvg', '.rout', '.equ', '.f', '.dat',
+        '.12d', '.12i', '.sta', '.msg'
+    ]
+    
+    for item in path.iterdir():
+        # 1. Clear numeric directories (OpenFOAM time steps)
+        if item.is_dir():
+            try:
+                # Is it a number? (e.g. "0.1" or "10")
+                float(item.name)
+                # Don't delete "0" as it usually contains initial conditions for reference/debugging
+                if item.name != "0":
+                    shutil.rmtree(item)
+            except ValueError:
+                # Check for other OpenFOAM dirs
+                if item.name.startswith('processor') or item.name in ['polyMesh', 'postProcessing', 'VTK']:
+                    shutil.rmtree(item)
+        
+        # 2. Clear known temp file extensions
+        elif item.is_file():
+            if item.suffix.lower() in temp_extensions:
+                # Ensure we don't delete files that are also in our 'Keep' list by mistake
+                # (None of the extensions in temp_extensions are in the Keep list)
+                try:
+                    item.unlink()
+                except Exception as e:
+                    print(f"  [Warning] Could not delete {item.name}: {e}")
+
+
 def export_vtk_with_temperature(
     node_coords: np.ndarray,
     elements: np.ndarray,
@@ -702,6 +745,12 @@ def run_simops_pipeline(
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f, indent=2)
     log(f"  Metadata:        {metadata_file}")
+    
+    # Step 4: Cleanup temporary files
+    log("")
+    log("STEP 4: CLEANUP TEMPORARY FILES")
+    log("-" * 70)
+    cleanup_output_dir(str(output_path))
     
     log("")
     log("=" * 70)

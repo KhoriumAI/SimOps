@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "job_name": "Test_E2E_CFD",
+  "physics": {
+    "simulation_type": "cfd",
+    "inlet_velocity": 5.0,
+    "kinematic_viscosity": 1.5e-05,
+    "material": "Air"
+  },
+  "meshing": {
+    "mesh_size_multiplier": 2.0
+  }
+}

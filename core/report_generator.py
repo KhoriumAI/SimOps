@@ -100,7 +100,13 @@ class SimOpsReportGenerator:
             # This is optional but improves quality for complex shapes
             
             # Filled contour plot
-            levels = np.linspace(T_min, T_max, 21)
+            if abs(T_max - T_min) < 1e-6:
+                # Handle constant temperature case
+                T_mid = T_min
+                levels = np.linspace(T_mid - 0.5, T_mid + 0.5, 21)
+            else:
+                levels = np.linspace(T_min, T_max, 21)
+                
             cntr = ax.tricontourf(triang, self.temp, levels=levels, cmap='turbo', extend='both')
             
             # Add contour lines
@@ -191,7 +197,11 @@ class SimOpsReportGenerator:
             
             T_min = self.results.get('min_temp', np.min(self.temp))
             T_max = self.results.get('max_temp', np.max(self.temp))
-            levels = np.linspace(T_min, T_max, 21)
+            
+            if abs(T_max - T_min) < 1e-6:
+                 levels = np.linspace(T_min - 0.5, T_min + 0.5, 21)
+            else:
+                 levels = np.linspace(T_min, T_max, 21)
             
             for name, xi, yi, rect in views:
                 ax = fig_summary.add_axes(rect)

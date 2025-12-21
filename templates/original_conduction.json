@@ -1,0 +1,19 @@
+{
+    "version": "1.0",
+    "job_name": "Golden_Thermal_Conduction",
+    "physics": {
+        "simulation_type": "thermal",
+        "material": "Aluminum",
+        "heat_source_temperature": 373.0,
+        "ambient_temperature": 293.0,
+        "convection_coeff": 25.0,
+        "transient": true,
+        "fix_hot_boundary": true,
+        "fix_cold_boundary": false,
+        "heat_source_at_z_min": true
+    },
+    "meshing": {
+        "second_order": false,
+        "mesh_size_multiplier": 1.0
+    }
+}

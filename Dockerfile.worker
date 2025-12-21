@@ -42,8 +42,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     xauth \
     calculix-ccx \
+    wget \
+    gnupg \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# OpenFOAM Installation (ESI Version - usually more compatible)
+RUN wget -q -O - https://dl.openfoam.com/add-debian-repo.sh | bash \
+    && apt-get install -y --no-install-recommends \
+    openfoam2312-default \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+    
+# Add OpenFOAM environment to .bashrc for the user
+RUN echo "source /usr/lib/openfoam/openfoam2312/etc/bashrc" >> /etc/bash.bashrc
+    
+# Add OpenFOAM environment to .bashrc for the user
+RUN echo "source /opt/openfoam10/etc/bashrc" >> /etc/bash.bashrc
 
 # Copy wheels from builder and install
 COPY --from=builder /wheels /wheels

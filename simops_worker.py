@@ -60,6 +60,13 @@ except ImportError:
 
 from core.geometry_analyzer import analyze_cad_geometry, GeometryAnalysis
 from core.solvers.calculix_adapter import CalculiXAdapter
+from core.solvers.calculix_structural import CalculiXStructuralAdapter
+from core.solvers.cfd_solver import CFDSolver
+from core.reporting.cfd_report import CFDPDFReportGenerator
+try:
+    from core.reporting.structural_report import StructuralPDFReportGenerator
+except ImportError:
+    StructuralPDFReportGenerator = None
 
 
 # Configure logging
@@ -69,14 +76,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# -----------------------------------------------------------------------------
+# CONSOLE CAPTURE UTILS
+# -----------------------------------------------------------------------------
+class ConsoleCapturer:
+    """
+    Context manager that captures stdout/stderr to a file 
+    while still printing to the real console (tee).
+    """
+    def __init__(self, log_file: Path):
+        self.log_file = log_file
+        self.file_handle = None
+        self.stdout_orig = sys.stdout
+        self.stderr_orig = sys.stderr
+
+    def __enter__(self):
+        self.file_handle = open(self.log_file, 'a', encoding='utf-8')
+        # Write header
+        self.file_handle.write(f"\\n=== LOG START: {datetime.now().isoformat()} ===\\n")
+        
+        class Tee:
+            def __init__(self, original, file):
+                self.original = original
+                self.file = file
+            def write(self, message):
+                self.original.write(message)
+                self.file.write(message)
+                self.file.flush() # Ensure realtime persistence
+            def flush(self):
+                self.original.flush()
+                self.file.flush()
+                
+        sys.stdout = Tee(self.stdout_orig, self.file_handle)
+        sys.stderr = Tee(self.stderr_orig, self.file_handle)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout = self.stdout_orig
+        sys.stderr = self.stderr_orig
+        if self.file_handle:
+            self.file_handle.write(f"\\n=== LOG END: {datetime.now().isoformat()} ===\\n")
+            self.file_handle.close()
 
 # =============================================================================
 # CASCADING FALLBACK STRATEGIES
 # =============================================================================
 STRATEGIES = [
     {
-        "name": "HighFi_CFD",
-        "description": "High fidelity CFD mesh with boundary layers",
+        "name": "HighFi_Layered",
+        "description": "High fidelity mesh with boundary layers (CFD/Thermal)",
         "mesh_size": 0.5,
         "num_layers": 5,
         "growth_rate": 1.2,
@@ -335,6 +383,12 @@ def generate_vtk_isometric_view(
     """
     if not HAVE_VTK:
         return False
+
+    # Safety Check: If data is uniform (e.g. parsing failed), skip render
+    # A crash is worse than no plot.
+    if temperature is None or len(temperature) == 0 or np.all(temperature == temperature[0]):
+        logger.warning("VTK Render Skipped: Temperature data is uniform/empty (Parsing likely failed).")
+        return False
         
     try:
         # 1. Create PyVista PolyData from surface triangles
@@ -359,11 +413,11 @@ def generate_vtk_isometric_view(
         pl.add_mesh(mesh, 
                    scalars='Temperature', 
                    cmap='magma', 
-                   clim=[vmin, vmax], 
-                   smooth_shading=True, # Phong shading equivalent
-                   show_edges=False,
-                   specular=0.5,        # Shiny
-                   specular_power=15)
+                   clim=[vmin, vmax],
+                   smooth_shading=False, # Disabled to prevent LLVMpipe segfaults
+                   show_edges=False)
+                   # specular=0.5,      # Disabled to prevent LLVMpipe segfaults
+                   # specular_power=15)
         
         pl.view_isometric()
         pl.camera.zoom(1.2) # Zoom to fill frame
@@ -681,12 +735,21 @@ def generate_report(
              max_frames = 20
              if len(ts_data) > max_frames:
                  step_size = len(ts_data) // max_frames
+                 full_ts = ts_data # Keep reference to original
                  ts_data = ts_data[::step_size]
-                 if result['time_series'][-1] not in ts_data:
-                     ts_data.append(result['time_series'][-1])
+                 
+                 # Ensure last frame is included (compare times to avoid numpy ambiguous truth value error)
+                 last_time = full_ts[-1]['time']
+                 if not any(abs(frame['time'] - last_time) < 1e-6 for frame in ts_data):
+                     ts_data.append(full_ts[-1])
              
              frames = []
              logger.info(f"  Generating Animation ({len(ts_data)} frames)...")
+             
+             # Extract surface mesh once to optimize loop
+             surf_tris = None
+             if 'elements' in result:
+                 surf_tris = extract_surface_mesh(node_coords, np.array(result['elements']))
              
              for step_idx, step in enumerate(ts_data):
                  t_val = step['time']
@@ -699,7 +762,7 @@ def generate_report(
                  
                  # Surface Plot if possible, else scatter
                  tric = ax_anim.plot_trisurf(node_coords[:,0], node_coords[:,1], node_coords[:,2], 
-                                      triangles=extract_surface_mesh(node_coords, np.array(result['elements'])) if 'elements' in result else None,
+                                      triangles=surf_tris,
                                       cmap='magma', shade=False, vmin=T_min, vmax=T_max)
                  
                  ax_anim.view_init(elev=30, azim=45 + (step_idx * 5)) # Rotating camera!
@@ -712,6 +775,7 @@ def generate_report(
                  buf.seek(0)
                  frames.append(Image.open(buf))
                  plt.close(fig_anim)
+
              
              # Save GIF
              if frames:
@@ -821,17 +885,318 @@ def export_vtk_with_temperature(result: Dict, output_file: str) -> str:
     return output_file
 
 
+def export_vtk_structural(result: Dict, output_file: str) -> str:
+    """Export structural results (Displacement, Stress) to VTK"""
+    node_coords = result['node_coords']
+    elements = result['elements']
+    disp = result.get('displacement') # shape (N, 3)
+    stress = result.get('stress') # shape (N, 6) or (N, 1) von mises?
+    von_mises = result.get('von_mises')
+    
+    with open(output_file, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("SimOps Structural Result\n")
+        f.write("ASCII\n")
+        f.write("DATASET UNSTRUCTURED_GRID\n")
+        
+        f.write(f"POINTS {len(node_coords)} float\n")
+        # Apply displacement scale 1.0 for visualization? Or store deformed?
+        # VTK usually stores undeformed and Vectors.
+        for p in node_coords:
+            f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+            
+        num_cells = len(elements)
+        f.write(f"\nCELLS {num_cells} {num_cells * 5}\n")
+        for elem in elements:
+            # VTK expects 0-indexed. Solver returns 0-indexed from adapter?
+            # CalculiXAdapter returns 0-indexed.
+            f.write(f"4 {elem[0]} {elem[1]} {elem[2]} {elem[3]}\n")
+            
+        f.write(f"\nCELL_TYPES {num_cells}\n")
+        for _ in range(num_cells):
+            f.write("10\n") # Tet4
+            
+        f.write(f"\nPOINT_DATA {len(node_coords)}\n")
+        
+        if disp is not None:
+            f.write("VECTORS Displacement float\n")
+            for d in disp:
+                f.write(f"{d[0]:.6f} {d[1]:.6f} {d[2]:.6f}\n")
+                
+        if von_mises is not None:
+            f.write("SCALARS VonMisesStress float 1\n")
+            f.write("LOOKUP_TABLE default\n")
+            for s in von_mises:
+                f.write(f"{s:.6f}\n")
+                
+    return output_file
 
-def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
+
+    return output_file
+
+
+def generate_structural_viz(
+    result: Dict,
+    output_path: Path
+) -> bool:
+    """
+    Generates a high-quality isometric view of Von Mises Stress.
+    Returns True if successful.
+    """
+    if not HAVE_VTK:
+        return False
+        
+    try:
+        # Create PyVista PolyData
+        node_coords = result['node_coords']
+        elements = result['elements']
+        von_mises = result.get('von_mises')
+        
+        if von_mises is None:
+            return False
+            
+        n_faces = len(elements) * 4 # Tet4 has 4 faces
+        # Actually, simpler to just use UnstructuredGrid for volume rendering? 
+        # Or Surface. Let's use the same surface extraction logic as Thermal for consistency?
+        # Extract surface mesh
+        surf_idx = extract_surface_mesh(node_coords, elements)
+        
+        # Build PolyData for surface
+        # PyVista/VTK format for triangles: [3, p0, p1, p2, 3, ...]
+        faces_flat = np.column_stack((
+            np.full(len(surf_idx), 3),
+            surf_idx
+        )).flatten()
+        
+        cloud = pv.PolyData(node_coords, faces_flat)
+        cloud.point_data['Von Mises Stress (MPa)'] = von_mises
+        
+        # Setup Plotter
+        pl = pv.Plotter(off_screen=True)
+        pl.set_background('white')
+        
+        pl.add_mesh(cloud, 
+                   cmap='jet', 
+                   smooth_shading=False, # Disabled to prevent Segfaults
+                   show_edges=False)
+                   # specular=0.5,
+                   # specular_power=15)
+        
+        # FIX: Ensure scale is correct for engineering units
+        pl.enable_parallel_projection()
+        pl.view_isometric()
+        pl.camera.zoom(1.2)
+        
+        # Log bounds for debugging aspect ratio
+        b = cloud.bounds
+        logger.info(f"[Viz] Bounds: X[{b[0]:.3f}, {b[1]:.3f}] Y[{b[2]:.3f}, {b[3]:.3f}] Z[{b[4]:.3f}, {b[5]:.3f}]")
+        
+        # Add scalar bar title
+        # pl.add_scalar_bar(title="Von Mises Stress (MPa)")
+        
+        pl.screenshot(str(output_path), transparent_background=True)
+        pl.close()
+        
+        return True
+        
+    except Exception as e:
+        logger.warning(f"VTK Structural Render failed: {e}")
+        return False
+
+
+def run_structural_solver(mesh_file: Path, output_dir: Path, strategy_name: str, sim_config: Optional['SimulationConfig'] = None) -> Dict:
+    """Run Structural Solver via CalculiX"""
+    logger.info("Running Structural Solver via CalculiX...")
+    adapter = CalculiXStructuralAdapter()
+    
+    # Config
+    adapter_config = {}
+    if sim_config and hasattr(sim_config, 'physics'):
+        phy = sim_config.physics
+        adapter_config['gravity_load_g'] = phy.gravity_load_g
+        adapter_config['tip_load'] = getattr(phy, 'tip_load', None)
+        adapter_config['youngs_modulus'] = phy.youngs_modulus
+        adapter_config['poissons_ratio'] = phy.poissons_ratio
+        if hasattr(phy, 'density'):
+            adapter_config['density'] = phy.density
+            
+    # Run
+    try:
+        result = adapter.run(mesh_file, output_dir, adapter_config)
+        return result
+    except Exception as e:
+        logger.error(f"Structural Solver Failed: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+
+
+def run_cfd_simulation(
+    file_path: str,
+    output_dir: Path,
+    job_name: str,
+    sim_config: Optional['SimulationConfig'],
+    update_status_callback=None
+) -> SimulationResult:
+    """
+    Dedicated pipeline for CFD simulations suitable for OpenFOAM.
+    """
+    # 1. Mesh
+    if update_status_callback: update_status_callback("Meshing (CFD)...")
+    
+    # We use HighFi_Layered strategy by default for CFD
+    strategy = next((s for s in STRATEGIES if s['name'] == 'HighFi_Layered'), STRATEGIES[0])
+    
+    try:
+        mesh_file = generate_mesh_with_strategy(
+            file_path, 
+            output_dir, 
+            strategy, 
+            sim_config=sim_config
+        )
+    except Exception as e:
+        logger.error(f"CFD Meshing failed: {e}")
+        return SimulationResult(success=False, strategy_name="CFD_HighFi", error=str(e))
+
+    # 2. Solve
+    if update_status_callback: update_status_callback("Solving (OpenFOAM)...")
+    
+    solver = CFDSolver()
+    
+    # Config for solver
+    solver_config = {
+        'u_inlet': [1.0, 0.0, 0.0], # Default, override from config
+        'kinematic_viscosity': 1e-5
+    }
+    
+    if sim_config and hasattr(sim_config, 'physics'):
+        phy = sim_config.physics
+        # Map physics props
+        # Looking for fluid props or generic props
+        if hasattr(phy, 'inlet_velocity'): 
+            # If scalar, assume X direction
+            v = phy.inlet_velocity
+            solver_config['u_inlet'] = [v, 0.0, 0.0] if isinstance(v, (int, float)) else v
+            
+        if hasattr(phy, 'kinematic_viscosity'):
+            solver_config['kinematic_viscosity'] = phy.kinematic_viscosity
+            
+    try:
+        # Run Solver
+        try:
+            result_data = solver.run(Path(mesh_file), output_dir, solver_config)
+        except Exception as e:
+            logger.warning(f"CFD Solver failed (likely missing OpenFOAM): {e}")
+            logger.warning("Proceeding with Mesh-Only visualization/report.")
+            
+            # Fallback Result Data
+            mesh_vtk = Path(mesh_file).with_suffix('.vtk')
+            if not mesh_vtk.exists():
+                 raise RuntimeError(f"Solver failed and Mesh VTK missing: {e}")
+                 
+            result_data = {
+                 'vtk_file': str(mesh_vtk),
+                 'solve_time': 0,
+                 'converged': False,
+                 'reynolds': 'N/A',
+                 'cd': 'N/A',
+                 'cl': 'N/A'
+            }
+        
+        # 3. Visualization
+        if update_status_callback: update_status_callback("Visualizing...")
+        
+        from core.reporting.velocity_viz import generate_velocity_streamlines, generate_mesh_viz
+        
+        viz_path = output_dir / f"{job_name}_velocity.png"
+        vtk_path = Path(result_data['vtk_file'])
+        
+        viz_success = generate_velocity_streamlines(str(vtk_path), str(viz_path), title=f"Flow: {job_name}")
+        
+        if not viz_success:
+             logger.warning("Velocity visualization failed (or no data). Falling back to Mesh Viz.")
+             generate_mesh_viz(str(vtk_path), str(viz_path), title=f"Mesh: {job_name} (Solver Skipped/Failed)")
+
+        # 4. Report
+
+        if update_status_callback: update_status_callback("Generating Report...")
+        
+        # Prepare report data
+        converged = result_data.get('converged', True)
+        # Update status string for clearer reporting if failed
+        report_status = "CONVERGED" if converged else ("SKIPPED" if result_data['solve_time']==0 else "DIVERGED")
+
+        report_data = {
+            'converged': converged,
+            'status_override': report_status, # Pass this to PDF generator if it supports it, or hacked in via 'converged' flag logic? 
+            # Actually, standard PDF generator uses 'converged' bool to print red/green.
+            # We might want to pass a string or handle it there.
+            # For now, let's stick to boolean but maybe update the logic if possible.
+            'solve_time': result_data.get('solve_time', 0),
+            'reynolds_number': result_data.get('reynolds', 'N/A'),
+            'drag_coefficient': result_data.get('cd', 'N/A'),
+            'lift_coefficient': result_data.get('cl', 'N/A'),
+            'u_inlet': solver_config['u_inlet'][0],
+            'mesh_cells': 0, # TODO: Parse from logs
+            'strategy_name': strategy['name']
+        }
+        
+        pdf_gen = CFDPDFReportGenerator()
+        pdf_file = pdf_gen.generate(
+            job_name=job_name,
+            output_dir=output_dir,
+            data=report_data,
+            image_paths=[str(viz_path)]
+        )
+        
+        return SimulationResult(
+            success=True,
+            strategy_name=strategy['name'],
+            mesh_file=str(mesh_file),
+            vtk_file=str(vtk_path),
+            png_file=str(viz_path),
+            report_file=str(pdf_file),
+            solve_time=result_data.get('solve_time', 0)
+        )
+    except Exception as e:
+        logger.error(f"CFD Solver/Report failed: {e}")
+        return SimulationResult(success=False, strategy_name="CFD_OpenFOAM", error=str(e))
+    finally:
+        # LOG CFD METRICS
+        if 'result_data' in locals():
+            logger.info("-" * 40)
+            logger.info(f"   RESULTS SUMMARY: {job_name}")
+            logger.info(f"   Converged: {result_data.get('converged', 'N/A')}")
+            logger.info(f"   Solve Time: {result_data.get('solve_time', 0):.2f} s")
+            logger.info(f"   Reynolds:   {result_data.get('reynolds', 'N/A')}")
+            # If using fallback, these will be N/A. If OpenFOAM runs, we might see values if parsed.
+            logger.info("-" * 40)
+
+
+
+def run_simulation(file_path: str, output_dir: str, config_path: Optional[str] = None) -> SimulationResult:
     """
     Main entry point for SimOps Worker.
-    Orchestrates the complete simulation pipeline:
-    1. Load Config (Sidecar)
-    2. Analyze Geometry
-    3. Mesh (Cascade)
-    4. Solve (Thermal)
-    5. Report
+    Orchestrates the complete simulation pipeline.
+    
+    Args:
+        file_path: Path to CAD file
+        output_dir: Path to directory for results
+        config_path: Optional explicit path to sidecar JSON. 
+                     If None, looks for [file_path].json
     """
+    # 0. Setup Output Directory & Console Capture
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    console_log = output_path / "worker_console.log"
+    
+    # Wrap entire execution in capture
+    with ConsoleCapturer(console_log):
+        return _run_simulation_internal(file_path, output_path, config_path)
+
+def _run_simulation_internal(file_path: str, output_path: Path, config_path_str: Optional[str]) -> SimulationResult:
+    """Internal logic to allow wrapping"""
     job = get_current_job()
     def update_job_status(status: str):
         if job:
@@ -844,33 +1209,72 @@ def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
     
     # Path handling
     input_path = Path(file_path)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    # output_path is passed in
     
     # Job ID logic
     job_name = input_path.stem
+    # If file was renamed to USED_name, strip the prefix for the Job Name for cleanliness
+    if job_name.startswith("USED_"):
+        job_name = job_name.replace("USED_", "", 1)
     
     # ---------------------------------------------------------
-    # 1. Load Configuration (The Sidecar Protocol)
+    # 1. Load Configuration
     # ---------------------------------------------------------
-    # Check for sibling .json file
-    config_path = input_path.with_suffix('.json')
+    if config_path_str:
+        config_path = Path(config_path_str)
+        logger.info(f"Using explicit sidecar config: {config_path.name}")
+    else:
+        config_path = input_path.with_suffix('.json')
+    
     from core.config_loader import load_simops_config
     
-    # Check if a config file exists (even if not explicitly passed, look for sibling)
     sim_config = None
     if config_path.exists():
         logger.info(f"Found sidecar config: {config_path.name}")
         sim_config = load_simops_config(str(config_path))
     else:
         logger.info("No sidecar config found. Using Golden Template defaults.")
-        sim_config = load_simops_config(None) # Load defaults
+        sim_config = load_simops_config(None) 
         
-    # Override job name if specified in config
     if sim_config.job_name:
         job_name = sim_config.job_name
 
     logger.info(f"Starting job: {job_name}")
+
+    # DISPATCH: Check for CFD type
+    # Check physics.simulation_type (defaulting to thermal)
+    sim_type = "thermal"
+    if sim_config and hasattr(sim_config, 'physics'):
+        sim_type = getattr(sim_config.physics, 'simulation_type', 'thermal')
+    
+    if sim_type == 'cfd':
+        logger.info(">>> DISPATCHING TO CFD PIPELINE <<<")
+        result = run_cfd_simulation(
+            file_path, output_path, job_name, sim_config, update_job_status
+        )
+        
+        # Dispatch result (shared logic)
+        metadata = {
+            'job_name': job_name,
+            'input_file': file_path,
+            'strategy': result.strategy_name,
+            'success': result.success,
+            'vtk_file': result.vtk_file,
+            'report_file': result.report_file,
+            'completed_at': datetime.now().isoformat()
+        }
+        meta_file = output_path / f"{job_name}_result.json"
+        with open(meta_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+            
+        try:
+             dispatcher = ResultDispatcher(output_path)
+             dispatcher.dispatch_result(metadata)
+        except: pass
+            
+        return result
+
+    # --- Standard Thermal Cascade ---
     logger.info(f"Physics: Material={sim_config.physics.material}, "
                 f"Heat={sim_config.physics.heat_load_watts}W")
         
@@ -884,8 +1288,8 @@ def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
         logger.info(f"  Est. Wall: {geo_analysis.estimated_wall_thickness:.2f} mm")
         
         if geo_analysis.is_too_small_for_highfi:
-            logger.warning("  [!] Geometry too small/thin for HighFi CFD. Skipping to robust strategies.")
-            strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_CFD"]
+            logger.warning("  [!] Geometry too small/thin for HighFi. Skipping to robust strategies.")
+            strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_Layered"]
             
     except Exception as e:
         logger.warning(f"Geometry analysis failed: {e}. Proceeding with full cascade.")
@@ -908,72 +1312,164 @@ def run_simulation(file_path: str, output_dir: str) -> SimulationResult:
                 sim_config=sim_config
             )
             
-            # Step 2: Run thermal solver
-            update_job_status(f"Solving ({strategy['name']})...")
-            result = run_thermal_solver(mesh_file, output_path, strategy['name'], sim_config)
-            
-            # Step 3: Generate report
-            report_files = generate_report(job_name, output_path, result, strategy['name'], sim_config=sim_config, mesh_file=str(mesh_file))
-            png_file = report_files.get('png')
-            pdf_file = report_files.get('pdf')
-            
-            # Step 4: Export VTK for GUI
-            vtk_file = output_path / f"{job_name}_thermal.vtk"
-            export_vtk_with_temperature(result, str(vtk_file))
-            
-            # Success!
-            total_time = time.time() - start_time
-            
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info(f"   [OK] SUCCESS with {strategy['name']}")
-            logger.info(f"   Total time: {total_time:.1f}s")
-            logger.info("=" * 60)
-            
-            # Write metadata
-            metadata = {
-                'job_name': job_name,
-                'input_file': file_path,
-                'strategy': strategy['name'],
-                'attempts': attempt_num,
-                'mesh_file': str(mesh_file),
-                'vtk_file': str(vtk_file),
-                'png_file': str(png_file) if png_file else None,
-                'pdf_file': str(pdf_file) if pdf_file else None,
-                'transient_png': report_files.get('transient') if report_files else None,
-                'animation_gif': report_files.get('animation') if report_files else None,
-                'min_temp_K': result['min_temp'],
-                'max_temp_K': result['max_temp'],
-                'num_elements': result['num_elements'],
-                'solve_time_s': result['solve_time'],
-                'total_time_s': total_time,
-                'completed_at': datetime.now().isoformat(),
-                'success': True,
-            }
-            
-            meta_file = output_path / f"{job_name}_result.json"
-            with open(meta_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            # Step 2: Run Solver (Dispatch)
+            sim_type = "thermal"
+            if sim_config and hasattr(sim_config, 'physics'):
+                sim_type = getattr(sim_config.physics, 'simulation_type', "thermal")
 
-            # DISPATCH RESULTS
-            try:
-                dispatcher = ResultDispatcher(output_path)
-                dispatcher.dispatch_result(metadata)
-            except Exception as e:
-                logger.error(f"Dispatch failed (but results are safe): {e}")
+            update_job_status(f"Solving ({strategy['name']}) [{sim_type}]...")
+            
+            if sim_type == "structural":
+                # --- STRUCTURAL SIMULATION ---
+                result = run_structural_solver(Path(mesh_file), output_path, strategy['name'], sim_config)
                 
-            return SimulationResult(
-                success=True,
-                strategy_name=strategy['name'],
-                mesh_file=str(mesh_file),
-                vtk_file=str(vtk_file),
-                png_file=str(png_file),
-                report_file=str(pdf_file) if pdf_file else None,
-                min_temp=result['min_temp'],
-                max_temp=result['max_temp'],
-                num_elements=result['num_elements'],
-                solve_time=result['solve_time'],
-            )
+                if not result.get('success', False):
+                    raise RuntimeError(f"Structural Solver failed: {result.get('error')}")
+                    
+                # Export VTK
+                vtk_file = output_path / f"{job_name}_structural.vtk"
+                export_vtk_structural(result, str(vtk_file))
+                
+                # Visualize (Stress)
+                png_file = output_path / f"{job_name}_stress.png"
+                has_viz = generate_structural_viz(result, png_file)
+                
+                # Report
+                report_file = None
+                if StructuralPDFReportGenerator:
+                    try:
+                        gen = StructuralPDFReportGenerator()
+                        
+                        # Pack Data
+                        report_data = {
+                            'success': True,
+                            'strategy_name': strategy['name'],
+                            'max_stress': np.max(result.get('von_mises', [0])),
+                            'max_displacement': np.max(result.get('displacement_magnitude', [0])),
+                            'num_elements': result.get('num_elements', 0),
+                            'solve_time': result.get('solve_time', 0),
+                            'load_info': "Gravity" if (sim_config and getattr(sim_config.physics, 'gravity_load_g', 0) > 0) else "Tip Load",
+                            'max_strain': result.get('max_strain', 0.0),
+                            'reaction_force_z': result.get('reaction_force_z', 0.0)
+                        }
+                        # Small fix: config_overrides is not available here, use sim_config
+                        # Better: pass info from result if adapter put it there, or just generic.
+                        
+                        pdf_path = gen.generate(
+                            job_name,
+                            output_path,
+                            report_data,
+                            image_paths=[str(png_file)] if has_viz else []
+                        )
+                        report_file = str(pdf_path)
+                        logger.info(f"   [Report] Saved to {report_file}")
+                    except Exception as e:
+                        logger.error(f"Structural Report Gen Failed: {e}", exc_info=True)
+                        # Create error flag file
+                        with open(output_path / "REPORT_ERROR.txt", "w") as f:
+                            f.write(str(e))
+
+                total_time = time.time() - start_time
+                
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info(f"   [OK] STRUCTURAL SUCCESS with {strategy['name']}")
+                logger.info("=" * 60)
+                
+                return SimulationResult(
+                    success=True,
+                    strategy_name=strategy['name'],
+                    mesh_file=str(mesh_file),
+                    vtk_file=str(vtk_file),
+                    png_file=str(png_file) if has_viz else None, 
+                    report_file=report_file,
+                    solve_time=result.get('solve_time', 0)
+                )
+
+            else:
+                # --- THERMAL SIMULATION (Default) ---
+                result = run_thermal_solver(Path(mesh_file), output_path, strategy['name'], sim_config)
+                
+                if not result.get('success', False):
+                     raise RuntimeError(f"Thermal Solver failed: {result.get('error')}")
+
+                # Step 3: Generate report
+                report_files = generate_report(job_name, output_path, result, strategy['name'], sim_config=sim_config, mesh_file=str(mesh_file))
+                png_file = report_files.get('png')
+                pdf_file = report_files.get('pdf')
+                
+                # Step 4: Export VTK for GUI
+                vtk_file = output_path / f"{job_name}_thermal.vtk"
+                export_vtk_with_temperature(result, str(vtk_file))
+                
+                # Success!
+                total_time = time.time() - start_time
+                
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info(f"   [OK] SUCCESS with {strategy['name']}")
+                logger.info(f"   Total time: {total_time:.1f}s")
+                logger.info("=" * 60)
+                
+                # Write metadata
+                metadata = {
+                    'job_name': job_name,
+                    'input_file': file_path,
+                    'strategy': strategy['name'],
+                    'attempts': attempt_num,
+                    'mesh_file': str(mesh_file),
+                    'vtk_file': str(vtk_file),
+                    'png_file': str(png_file) if png_file else None,
+                    'pdf_file': str(pdf_file) if pdf_file else None,
+                    'transient_png': report_files.get('transient') if report_files else None,
+                    'animation_gif': report_files.get('animation') if report_files else None,
+                    'min_temp_K': result.get('min_temp'),
+                    'max_temp_K': result.get('max_temp'),
+                    'num_elements': result.get('num_elements', 0),
+                    'solve_time_s': result.get('solve_time', 0),
+                    'total_time_s': total_time,
+                    'completed_at': time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    'success': True,
+                }
+
+                # LOG METRICS FOR VERIFICATION
+                logger.info("-" * 40)
+                logger.info(f"   RESULTS SUMMARY: {job_name}")
+                if 'max_stress' in metadata:
+                    logger.info(f"   Max Stress:       {metadata['max_stress']:.4e} Pa ({(metadata['max_stress']/1e6):.2f} MPa)")
+                if 'max_disp' in result:
+                     logger.info(f"   Max Displacement: {result['max_disp']:.4e} m") # Check units, usually mm in adapter? Adapter result is mm?
+                     # Adapter: 'max_disp': np.max(disp_mag)
+                     # Adapter Units: mm usually? "Coordinates... * scale"
+                     # Let's assume mm per CalculiX adapter comments found earlier.
+                if 'reaction_force_z' in result:
+                    logger.info(f"   Reaction Force Z: {result['reaction_force_z']:.4e} N")
+                logger.info("-" * 40)
+
+                
+                meta_file = output_path / f"{job_name}_result.json"
+                with open(meta_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+                # DISPATCH RESULTS
+                try:
+                    dispatcher = ResultDispatcher(output_path)
+                    dispatcher.dispatch_result(metadata)
+                except Exception as e:
+                    logger.error(f"Dispatch failed (but results are safe): {e}")
+                    
+                return SimulationResult(
+                    success=True,
+                    strategy_name=strategy['name'],
+                    mesh_file=str(mesh_file),
+                    vtk_file=str(vtk_file),
+                    png_file=str(png_file),
+                    report_file=str(pdf_file) if pdf_file else None,
+                    min_temp=result.get('min_temp'),
+                    max_temp=result.get('max_temp'),
+                    num_elements=result.get('num_elements', 0),
+                    solve_time=result.get('solve_time', 0),
+                )
             
         except Exception as e:
             logger.error(f"[X] {strategy['name']} FAILED: {e}")

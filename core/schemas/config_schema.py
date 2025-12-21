@@ -61,6 +61,29 @@ class PhysicsConfig(BaseModel):
     heat_source_at_z_min: bool = Field(default=True, description="Heat source at Z_min (base). Default True for typical 'base heater' scenario.")
     unit_scaling: float = Field(default=1.0, description="Scale factor for node coordinates (e.g. 0.001 for mm -> m)")
 
+    # Flux Boundary Conditions
+    surface_flux_wm2: Optional[float] = Field(default=None, description="Surface Heat Flux in W/m^2 (applied to Heat Source boundary).")
+    volumetric_heat_wm3: Optional[float] = Field(default=None, description="Volumetric Heat Generation in W/m^3.")
+
+    # Simulation Selector
+    simulation_type: Literal["thermal", "structural", "cfd"] = Field(default="thermal", description="Type of simulation")
+    
+    # CFD Specifics
+    kinematic_viscosity: float = Field(default=1e-5, description="Fluid kinematic viscosity (m2/s)")
+    
+    # Structural - Gravity
+    gravity_load_g: float = Field(default=0.0, description="Gravity load in Gs")
+    
+    # Structural - Tip Load (Vector X, Y, Z)
+    # Only applies to nodes in 'tip_load_selection'? Or auto-detect?
+    # For MVP, auto-detect Z-max or similar?
+    # Let's simple: tip_load: Optional[List[float]] = None
+    tip_load: Optional[List[float]] = Field(default=None, description="Tip Load Vector [Fx, Fy, Fz] in Newtons")
+    
+    # Material
+    youngs_modulus: Optional[float] = Field(default=None, description="Young's Modulus in MPa")
+    poissons_ratio: Optional[float] = Field(default=None, description="Poisson's Ratio. Overrides material default.")
+
 
 class MeshingConfig(BaseModel):
     """Advanced meshing controls"""

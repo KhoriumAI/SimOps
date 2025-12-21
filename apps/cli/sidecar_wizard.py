@@ -130,47 +130,96 @@ def run_wizard(target_cad: Optional[str] = None):
     
     # 2. Physics
     print(f"\n{C_YELLOW}--- Physics Settings ---{C_RESET}")
-    is_composite = prompt("Enable Anisotropic Readiness (Composite Template)?", default=False, type_cast=bool)
     
+    sim_type = "thermal"
+    print("Simulation Type:")
+    print("  1. Thermal (Heat Transfer)")
+    print("  2. Structural (Stress/Displacement)")
+    print("  3. CFD (Fluid Flow)")
+    
+    type_choice = prompt("Select Type", default=1, type_cast=int)
+    if type_choice == 2: sim_type = "structural"
+    elif type_choice == 3: sim_type = "cfd"
+    
+    # Common vars
     material = "Aluminum"
     material_defs = {}
-    
-    if is_composite:
-        material = "casing_material"
-        material_defs = {
-            "casing_material": {
-                "type": "Orthotropic",
-                "name": "Toray_T700_CFRP",
-                "properties": {
-                    "conductivity_matrix": [4.5, 0, 0, 0, 4.5, 0, 0, 0, 0.8],
-                    "density": 1600,
-                    "specific_heat": 1200
-                }
-            }
-        }
-        print(f"  {C_GREEN}[Ready]{C_RESET} Placeholder T700 CFRP matrix loaded into 'material_definitions'.")
-    else:
-        material = get_material_choice()
-    
-    is_transient = prompt("Enable Transient Analysis (Heating over time)?", default=True, type_cast=bool)
-    
+    is_transient = False
     duration = 60.0
     time_step = 2.0
-    if is_transient:
-        duration = prompt("Duration (seconds)", default=60.0, type_cast=float)
-        time_step = prompt("Time Step (seconds)", default=duration/30.0, type_cast=float)
+    h_coeff = 0.0
+    heat_watts = 0.0
+    inlet_vel = 5.0
+    viscosity = 1e-5
+    fix_cold = False
+    gravity_g = 0.0
+    tip_load = None
     
-    h_coeff = prompt("Convection Coefficient (h) [0=None, 5-25=Air, 100+=Water]", default=25.0, type_cast=float)
-    
-    # Boundaries
-    print(f"\n{C_YELLOW}--- Boundary Conditions ---{C_RESET}")
-    if h_coeff > 0:
-        print("  (Tip: If modeling a fin, you usually want the Tip to float (Convection Only))")
-        fix_cold = prompt("Clamp Cold Boundary (Fixed T)?", default=False, type_cast=bool)
-    else:
-        fix_cold = True # Conduction needs sink usually
+    if sim_type == "thermal":
+        # ... Thermal Logic ...
+        is_composite = prompt("Enable Anisotropic Readiness (Composite Template)?", default=False, type_cast=bool)
         
-    heat_watts = prompt("Heat Source Power (Watts) [or Temp if Adapter maps it]", default=50.0, type_cast=float)
+        if is_composite:
+            material = "casing_material"
+            material_defs = {
+                "casing_material": {
+                    "type": "Orthotropic",
+                    "name": "Toray_T700_CFRP",
+                    "properties": {
+                        "conductivity_matrix": [4.5, 0, 0, 0, 4.5, 0, 0, 0, 0.8],
+                        "density": 1600,
+                        "specific_heat": 1200
+                    }
+                }
+            }
+            print(f"  {C_GREEN}[Ready]{C_RESET} Placeholder T700 CFRP matrix loaded into 'material_definitions'.")
+        else:
+            material = get_material_choice()
+        
+        is_transient = prompt("Enable Transient Analysis (Heating over time)?", default=True, type_cast=bool)
+        
+        if is_transient:
+            duration = prompt("Duration (seconds)", default=60.0, type_cast=float)
+            time_step = prompt("Time Step (seconds)", default=duration/30.0, type_cast=float)
+        
+        h_coeff = prompt("Convection Coefficient (h) [0=None, 5-25=Air, 100+=Water]", default=25.0, type_cast=float)
+        
+        # Boundaries
+        print(f"\n{C_YELLOW}--- Boundary Conditions ---{C_RESET}")
+        if h_coeff > 0:
+            print("  (Tip: If modeling a fin, you usually want the Tip to float (Convection Only))")
+            fix_cold = prompt("Clamp Cold Boundary (Fixed T)?", default=False, type_cast=bool)
+        else:
+            fix_cold = True # Conduction needs sink usually
+            
+        heat_watts = prompt("Heat Source Power (Watts) [or Temp if Adapter maps it]", default=50.0, type_cast=float)
+
+    elif sim_type == "cfd":
+        # ... CFD Logic ...
+        print(f"\n{C_YELLOW}--- CFD Parameters ---{C_RESET}")
+        inlet_vel = prompt("Inlet Velocity (X-Dir) [m/s]", default=5.0, type_cast=float)
+        viscosity = prompt("Kinematic Viscosity [m2/s] (1e-5 ~ Air)", default=1.5e-5, type_cast=float)
+        
+        # CFD is currently steady-state only in cfd_solver
+        is_transient = False
+        
+    elif sim_type == "structural":
+        material = get_material_choice()
+        
+        print(f"\n{C_YELLOW}--- Structural Load Settings ---{C_RESET}")
+        
+        # Gravity
+        gravity_g = prompt("Gravity Load (g-force in Z-)", default=0.0, type_cast=float)
+        
+        # Tip Load
+        has_tip_load = prompt("Apply Concentrated Tip Load?", default=False, type_cast=bool)
+        tip_load = None
+        if has_tip_load:
+            print("  Enter Force Vector [Fx, Fy, Fz]:")
+            fx = prompt("  Fx (N)", default=0.0, type_cast=float)
+            fy = prompt("  Fy (N)", default=0.0, type_cast=float)
+            fz = prompt("  Fz (N)", default=0.0, type_cast=float)
+            tip_load = [fx, fy, fz]
     
     # 3. Meshing
     print(f"\n{C_YELLOW}--- Quality / Meshing ---{C_RESET}")
@@ -188,16 +237,22 @@ def run_wizard(target_cad: Optional[str] = None):
         validate = prompt("Run Grid Convergence (3x runs)?", default=False, type_cast=bool)
         
     # 4. Construct Config
+    # 4. Construct Config
     config = SimulationConfig(
         job_name=job_name,
         physics=PhysicsConfig(
+            simulation_type=sim_type,
             material=material,
             heat_load_watts=heat_watts,
             convection_coeff=h_coeff,
             transient=is_transient,
             duration=duration,
             time_step=time_step,
-            fix_cold_boundary=fix_cold
+            fix_cold_boundary=fix_cold,
+            inlet_velocity=inlet_vel,
+            kinematic_viscosity=viscosity,
+            gravity_load_g=gravity_g,
+            tip_load=tip_load
         ),
         meshing=MeshingConfig(
             mesh_size_multiplier=mesh_mult,

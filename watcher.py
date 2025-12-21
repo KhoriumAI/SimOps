@@ -126,6 +126,10 @@ class SimOpsEventHandler(FileSystemEventHandler):
         # Skip temp files
         if file_path.name.startswith('.') or file_path.name.startswith('~'):
             return
+
+        # Skip already used files
+        if file_path.name.startswith('USED_'):
+            return
             
         str_path = str(file_path)
         
@@ -157,22 +161,95 @@ class SimOpsEventHandler(FileSystemEventHandler):
         
         logger.info(f"📥 New CAD file detected: {file_path.name}")
         
-        # Check for sidecar presence (just for logging)
-        sidecar = file_path.with_suffix('.json')
-        if sidecar.exists():
-             logger.info(f"   + Sidecar config found: {sidecar.name}")
+        # -------------------------------------------------------------
+        # 3. Flexible Sidecar Detection
+        # -------------------------------------------------------------
+        # Look for a config file.
+        # Priority 1: Exact Match (file.step -> file.json)
+        # Priority 2: Temporal Match (Any *.json modified within 15s)
+        
+        config_path = None
+        
+        # 1. Exact Match
+        exact_sidecar = file_path.with_suffix('.json')
+        if exact_sidecar.exists():
+            logger.info(f"   + Config found (Exact): {exact_sidecar.name}")
+            config_path = exact_sidecar
+        else:
+            # 2. Temporal Match
+            # Scan directory for OTHER json files
+            try:
+                cad_mtime = file_path.stat().st_mtime
+                candidates = []
+                for f in file_path.parent.glob('*.json'):
+                    if f.name.startswith('USED_'): continue # Skip used
+                    if f == exact_sidecar: continue 
+                    
+                    try:
+                        f_mtime = f.stat().st_mtime
+                        delta = abs(f_mtime - cad_mtime)
+                        if delta < 15.0: # 15 second window
+                            candidates.append((delta, f))
+                    except: pass
+                
+                if candidates:
+                    # Sort by closest time
+                    candidates.sort(key=lambda x: x[0])
+                    best_match = candidates[0][1]
+                    logger.info(f"   + Config found (Temporal +/- {candidates[0][0]:.1f}s): {best_match.name}")
+                    config_path = best_match
+            except Exception as e:
+                logger.warning(f"Error during temporal scan: {e}")
+
+        # -------------------------------------------------------------
+        # 4. Renaming Strategy ("USED_")
+        # -------------------------------------------------------------
+        # We rename the files BEFORE queuing so the worker works on the stable "USED_" path
+        # and checking the folder prevents re-loops.
+        
+        final_cad_path = file_path
+        final_config_path = config_path
+
+        try:
+            # Rename CAD
+            used_cad_name = f"USED_{file_path.name}"
+            used_cad_path = file_path.with_name(used_cad_name)
+            
+            # Simple rename
+            os.rename(file_path, used_cad_path)
+            final_cad_path = used_cad_path
+            logger.info(f"   -> Renamed to {used_cad_path.name}")
+            
+            # Rename Config (if found)
+            if config_path:
+                used_config_name = f"USED_{config_path.name}"
+                used_config_path = config_path.with_name(used_config_name)
+                os.rename(config_path, used_config_path)
+                final_config_path = used_config_path
+                logger.info(f"   -> Renamed config to {used_config_path.name}")
+                
+        except OSError as e:
+            logger.error(f"Failed to rename input files: {e}")
+            logger.warning("   -> Proceeding with ORIGINAL filenames (Read-only input detected)")
+            # Fallback to original paths so simulation still runs
+            final_cad_path = file_path
+            final_config_path = config_path
+
+        # Queue the job with (potentially new, potentially original) paths
+
         
         # Queue the job
         try:
             job = self.queue.enqueue(
                 'simops_worker.run_simulation',
-                str(file_path),
+                str(final_cad_path),
                 str(self.output_dir),
+                config_path=str(final_config_path) if final_config_path else None,
                 job_timeout=1800,  # 30 min timeout
                 result_ttl=86400,  # Keep result for 24h
                 failure_ttl=86400,
                 meta={
-                    'filename': file_path.name,
+                    'filename': file_path.name, # Keep original name for display
                     'queued_at': datetime.now().isoformat(),
                 }
             )

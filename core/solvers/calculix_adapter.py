@@ -68,7 +68,7 @@ class CalculiXAdapter(ISolver):
             result = subprocess.run(
                 cmd, 
                 cwd=cwd, 
-                capture_output=True, 
+                capture_output=False, # Stream to stdout (captured by worker wrapper)
                 text=True,
                 env=env
             )
@@ -356,12 +356,10 @@ class CalculiXAdapter(ISolver):
                     for tag in cold_tags:
                         f.write(f"{tag}, 11, 11, {t_cold}\n")
                     
-                # Convection (*FILM)
-                # DISABLED: Shell-based convection doesn't work - shells not thermally connected!
-                # TODO: Implement *SURFACE-based convection on volume element faces
-                
-                # Convection (*FILM)
-                # Apply to E_Skin faces
+                # Convection (*SFILM on *SURFACE)
+                # The old *FILM on E_Skin shell elements fails in CCX 2.17.
+                # Instead, we use *SURFACE to define boundary faces on the volume elements,
+                # then apply *SFILM (surface film) to that surface.
                 # Scale h: W/m^2K -> W/mm^2K (factor 1e-6)
                 h_si = config.get("convection_coeff", 25.0) 
                 h = h_si * 1e-6
@@ -369,20 +367,106 @@ class CalculiXAdapter(ISolver):
                 T_inf = config.get("ambient_temperature", 293.0) 
                 
                 if h_si > 0 and (len(tri3_elems) > 0 or len(tri6_elems) > 0):
+                    # Define a surface from the skin element faces
+                    # For surface loads on volume elements, we need to identify the faces.
+                    # Since we extracted boundary triangles, they correspond to volume faces.
+                    # We use TYPE=ELEMENT to define a surface from element sets.
+                    f.write("*SURFACE, NAME=S_Convection, TYPE=ELEMENT\n")
+                    f.write("E_Skin, S1\n")  # S1 is the primary face for shell/surface elements
+                    
+                    # Apply surface film (convection) to the defined surface
+                    f.write(f"*SFILM\n")
+                    f.write(f"S_Convection, F, {T_inf}, {h}\n")
 
-                     f.write("*FILM\n")
-                     # For shell elements (Tri3/Tri6), face specification is F1 or F2.
-                     # Using F is for solids only and will cause CCX to error on shells.
-                     f.write(f"E_Skin, F1, {T_inf}, {h}\n")
+                # =========================================================
+                # NEW: Surface Flux (*DFLUX)
+                # =========================================================
+                q_flux_si = config.get("surface_flux_wm2")
+                if q_flux_si is not None:
+                     # Identify where to apply flux. Default: Hot Boundary Nodes -> Elements?
+                     # *DFLUX applies to element faces.
+                     # We can use the E_Skin set if we want to apply to ALL skin, 
+                     # but typically we want it on the "Hot" boundary only.
+                     # For now, let's apply to the SAME boundary as the "Fixed Hot" would be (z-max usually).
+                     # But *DFLUX needs element faces, not nodes. 
+                     # Simplest approach: Apply to ALL E_Skin if "Flux Slab" mode?
+                     # OR: Reuse the "Heat Source" detection logic but find faces instead of nodes?
+                     #
+                     # BETTER APPROACH: Apply to "S_HeatSource" surface.
+                     # We need to define S_HeatSource first.
+                     # Since we don't have facial-semantic-tagging fully plumbed to sets yet,
+                     # we will apply to E_Skin faces that are within the "Hot" zone.
+                     # This is tricky without "Sidecar" telling us exactly which faces.
+                     
+                     # FOR THIS VALIDATION CASE (Slab): The "Hot" boundary is Z=min (bottom).
+                     # Let's support applying to "S_Convection" (All Skin) or a specific subset?
+                     #
+                     # Let's assume for the validation case we apply it to the "Hot" region.
+                     # We used 'hot_tags' (nodes) earlier. We need elements.
+                     #
+                     # Hack for Validation robustness: Apply to ALL skin for now, 
+                     # as the test case is 1D insulated side walls?
+                     # No, 1D slab has insulated sides. Flux only on bottom.
+                     #
+                     # Let's implementing a "Flux Surface" selector later.
+                     # For now: If 'surface_flux_wm2' is set, we assume the user WANTS it on the HeatSource.
+                     # We will create a surface S_HeatSource.
+                     # We need to find elements in E_Skin whose nodes are in 'hot_tags'.
+                     
+                     # 1. Find Skin Elements composed ONLY of hot_tags nodes
+                     hot_set = set(hot_tags)
+                     flux_elems = []
+                     
+                     # Check Tri3
+                     for row in np.vstack(tri3_elems) if len(tri3_elems)>0 else []:
+                         eid = row[0]
+                         nodes = row[1:]
+                         if all(nid in hot_set for nid in nodes):
+                             flux_elems.append(eid)
+                             
+                     # Check Tri6
+                     for row in np.vstack(tri6_elems) if len(tri6_elems)>0 else []:
+                         eid = row[0]
+                         nodes = row[1:]
+                         if all(nid in hot_set for nid in nodes):
+                             flux_elems.append(eid)
+                             
+                     if flux_elems:
+                         f.write(f"*ELSET, ELSET=E_FluxSelect\n")
+                         for eid in flux_elems:
+                             f.write(f"{int(eid)},\n")
+                             
+                         f.write("*SURFACE, NAME=S_Flux, TYPE=ELEMENT\n")
+                         f.write("E_FluxSelect, S1\n")
+                         
+                         # Convert W/m^2 -> W/mm^2 (1e-6)
+                         q_flux = q_flux_si * 1e-6
+                         f.write(f"*DFLUX\n")
+                         # Load type S means flux per unit area
+                         f.write(f"S_Flux, S, {q_flux}\n")
+                         logger.info(f"[CalculiX] Applied Surface Flux {q_flux_si} W/m^2 to {len(flux_elems)} elements")
+                     else:
+                         logger.warning("[CalculiX] Surface Flux requested but no elements found in Hot Zone!")
+
+                # =========================================================
+                # NEW: Volumetric Heat Source (*DFLUX with BF)
+                # =========================================================
+                # Q in W/m^3 -> W/mm^3 (1e-9)
+                vol_heat_si = config.get("volumetric_heat_wm3")
+                if vol_heat_si is not None:
+                    vol_heat = vol_heat_si * 1e-9
+                    # CalculiX uses *DFLUX with BF (Body Flux) for volumetric heat
+                    f.write(f"*DFLUX\n")
+                    f.write(f"E_Vol, BF, {vol_heat}\n")
+                    logger.info(f"[CalculiX] Applied Volumetric Flux (BF) {vol_heat_si} W/m^3 to E_Vol")
+
 
 
                 # Output
                 # *NODE PRINT generates .frd (ASCII) which is parseable
                 # *NODE FILE generates .12d (binary) which we can't parse
-                if config.get("transient", True):  # Match transient default
-                     f.write("*NODE PRINT, NSET=N_All, FREQUENCY=1\n")
-                else:
-                     f.write("*NODE PRINT, NSET=N_All\n")
+                # Always set FREQUENCY=1 to ensure output is written
+                f.write("*NODE PRINT, NSET=N_All, FREQUENCY=1\n")
                 f.write("NT\n")
                 f.write("*END STEP\n")
                 
@@ -416,8 +500,9 @@ class CalculiXAdapter(ISolver):
         for line in lines:
             # 1. Check for Step Header (Time)
             # Format: "  100CL  101 1.000000000       11008 ..."
-            if line.startswith("  100CL"):
-                parts = line.split()
+            stripped = line.strip()
+            if stripped.startswith("100CL"):
+                parts = stripped.split()
                 if len(parts) >= 3:
                     try:
                         # If we have collected data for previous step, store it
@@ -432,14 +517,15 @@ class CalculiXAdapter(ISolver):
                         
             # 2. Check for Temperature Block Start
             # " -4  NT..." or " -4  NDTEMP..."
-            if line.startswith(" -4") and ("NT" in line or "NDTEMP" in line or "P" in line):
+            if stripped.startswith("-4") and ("NT" in stripped or "NDTEMP" in stripped or "P" in stripped):
                 reading_nt = True
                 found_data = True
                 continue
                 
             # 3. Check for Block End
-            if line.startswith(" -3"):
+            if stripped.startswith("-3"):
                 if reading_nt:
+
                     reading_nt = False
                     # End of NT block for this step.
                     # We usually append to all_steps here? 
@@ -546,9 +632,9 @@ class CalculiXAdapter(ISolver):
         convergence_step = None
         dT_threshold = 0.1  # K - if mean temp changes less than this, consider converged
         
+        dT_history = []
         if len(time_series_stats) >= 3:
             # Calculate dT between consecutive steps
-            dT_history = []
             for i in range(1, len(time_series_stats)):
                 dT = abs(time_series_stats[i]['mean'] - time_series_stats[i-1]['mean'])
                 dT_history.append(dT)
@@ -560,6 +646,11 @@ class CalculiXAdapter(ISolver):
                     converged = True
                     convergence_step = time_series_stats[-3]['time']
                     logger.info(f"  [Convergence] Detected at t={convergence_step:.1f}s (dT < {dT_threshold}K for 3 steps)")
+        elif len(time_series_stats) >= 2:
+            # Still calc history even if not enough for 3-step flatline check
+            for i in range(1, len(time_series_stats)):
+                dT = abs(time_series_stats[i]['mean'] - time_series_stats[i-1]['mean'])
+                dT_history.append(dT)
         
         if not converged and len(time_series_stats) > 0:
             logger.info(f"  [Convergence] Not reached in {len(time_series_stats)} steps. Final dT={dT_history[-1]:.3f}K" if len(time_series_stats) > 1 else "  [Convergence] Only 1 step, cannot assess")
