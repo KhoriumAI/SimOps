@@ -1,0 +1,86 @@
+# Deployment Guide
+
+## Quick Deploy (EC2)
+
+```bash
+cd /home/ubuntu/MeshPackageLean
+git pull origin main
+sudo systemctl restart gunicorn
+sudo systemctl status gunicorn
+```
+
+## Why Restart?
+
+Code lives in two places:
+
+| Location | Purpose |
+|----------|---------|
+| **Disk** | Storage (`/home/ubuntu/MeshPackageLean/`) |
+| **RAM**  | Execution (Gunicorn loads code into memory) |
+
+- `git pull` → Updates files on **disk**
+- `systemctl restart` → Reloads code from disk into **RAM**
+
+**Benefits of RAM execution:**
+- ~100,000x faster than disk access
+- Code compiled once at startup
+- Multiple workers handle parallel requests
+
+**Tradeoff:** Requires restart to pick up code changes.
+
+## CORS Configuration
+
+CORS origins are set via environment variable in `/home/ubuntu/MeshPackageLean/backend/.env`:
+
+```bash
+CORS_ORIGINS=https://your-frontend.com,https://another-domain.com
+```
+
+After changing, restart Gunicorn:
+```bash
+sudo systemctl restart gunicorn
+```
+
+**Default allowed origins** (hardcoded fallbacks in `api_server.py`):
+- `http://localhost:5173` (Vite dev)
+- `http://localhost:3000`
+- Production domains
+
+## Nginx (One-Time Setup)
+
+File upload limit is set in `/etc/nginx/nginx.conf`:
+```nginx
+client_max_body_size 1G;
+```
+
+After changing:
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+## Rollback
+
+```bash
+git log --oneline -5           # Find previous commit
+git checkout <commit-hash>     # Checkout that commit
+sudo systemctl restart gunicorn
+```
+
+## Lessons Learned: Ghost Deployment Incident
+
+**What happened:** Server was running code from RAM that didn't match disk files. Restarting Gunicorn loaded a skeleton version, breaking login/upload functionality.
+
+**Root causes:**
+- Uncommitted code running in production
+- Directory structure drift (`backend/backend/` vs `backend/`)
+- Nginx blocking large uploads (413 error)
+
+**Prevention:**
+1. Never edit files directly on server
+2. Always commit to Git before deploying
+3. Use `git pull` - never copy-paste files
+4. Verify after restart: `curl http://localhost:5000/api/health`
+
+## Golden Rule
+
+**No code goes to production unless it has a Git Commit Hash.**
