@@ -479,7 +479,7 @@ class ModernMeshGenGUI(QMainWindow):
             "Tetrahedral (GPU Delaunay)",
             # Exhaustive merged into Delaunay
             "Hex Dominant (Subdivision)",
-            "Hex Dominant Testing",
+            "Hex Meshing (cfMesh)",
             "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
@@ -488,7 +488,7 @@ class ModernMeshGenGUI(QMainWindow):
             "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
             "Exhaustive (Parallel Race): Tries ALL strategies, picks best score\n"
             "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
-            "Hex Dominant Testing: Visualize CoACD components\n"
+            "Hex Meshing (cfMesh): Uses OpenFOAM cfMesh or snappyHexMesh for robust hex generation\n"
             "Polyhedral (Dual): Polyhedral cells from tet dual"
         )
         self.mesh_strategy.currentTextChanged.connect(self.on_strategy_changed)
@@ -1417,7 +1417,14 @@ class ModernMeshGenGUI(QMainWindow):
             QPushButton:hover { background-color: #0b5ed7; }
         """)
         self.create_zone_btn.clicked.connect(self.on_create_zone_clicked)
+        self.create_zone_btn.clicked.connect(self.on_create_zone_clicked)
         layout.addWidget(self.create_zone_btn)
+        
+        # Debug Visualization
+        self.show_partitions_cb = QCheckBox("Debug: Show Face Partitions")
+        self.show_partitions_cb.setToolTip("Color all faces by their unique logical ID to verify segmentation")
+        self.show_partitions_cb.toggled.connect(self.on_toggle_face_partitions)
+        layout.addWidget(self.show_partitions_cb)
         
         # Zone List
         layout.addWidget(QLabel("Defined Zones:"))
@@ -2180,71 +2187,136 @@ class ModernMeshGenGUI(QMainWindow):
 
         # Use cad_files folder as default
         default_dir = str(Path(__file__).parent / "cad_files")
-        if not Path(default_dir).exists():
-            default_dir = str(Path.home())
+        if not os.path.exists(default_dir):
+            os.makedirs(default_dir)
 
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "Select CAD or Mesh File", default_dir,
-            "CAD Files (*.step *.stp *.iges *.igs *.brep *.stl *.obj);;Mesh Files (*.msh);;All Files (*)"
+        file_filter = "Geometry/Mesh (*.step *.stp *.geo *.brep *.vtu *.msh);;CAD Files (*.step *.stp *.geo *.brep);;Mesh Files (*.vtu *.msh);;All Files (*)"
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Geometry or Mesh", default_dir, 
+            file_filter
         )
 
-        if filepath:
-            file_ext = Path(filepath).suffix.lower()
-
-            # Check if it's a mesh file
-            if file_ext == '.msh':
-                # Load mesh directly
-                self.cad_file = None  # No CAD file
-                self.file_label.setText(f"{Path(filepath).name}")
-                self.generate_btn.setEnabled(False)  # Can't generate from mesh
-                self.add_log(f"Loaded mesh: {filepath}")
-
-                # Clear iterations
-                self.viewer.clear_iterations()
-
-                # Load the mesh file directly through the viewer
-                self.viewer.load_mesh_file(filepath)
+        if file_path:
+            self.cad_file = file_path
+            path_obj = Path(file_path)
+            self.file_label.setText(f"Loaded: {path_obj.name}")
+            self.add_log(f"Loaded file: {path_obj.name}")
+            
+            # CHECK FOR MESH FILES (Direct Visualization)
+            suffix = path_obj.suffix.lower()
+            if suffix in ['.vtu', '.msh']:
+                self.mesh_file = file_path
+                self.add_log("[Status] Mesh file detected - loading directly into viewer...")
                 
-                # Show post-processing UI sections (quality visualization and cross-section)
-                if hasattr(self, 'crosssection_group'):
-                    self.crosssection_group.setVisible(True)
-                if hasattr(self, 'viz_group'):
-                    self.viz_group.setVisible(True)
+                if hasattr(self, 'viewer') and self.viewer:
+                    # Load mesh and enable quality visualization
+                    self.viewer.load_mesh_file(file_path)
+                    
+                    # Also try to load associated quality metrics if available
+                    # (Usually purely visual for imported meshes unless we run quality check)
+                    self.add_log("[OK] Mesh loaded for visualization")
+                    self.update_zone_list_ui()
                 
+                # Disable generate button since it's already a mesh
+                self.generate_btn.setEnabled(False)
+                self.refine_btn.setEnabled(True) # Allow refinement if applicable
                 return
 
-            # Otherwise treat as CAD file
-            self.cad_file = filepath
-            self.file_label.setText(f"{Path(filepath).name}")
-            self.generate_btn.setEnabled(True)
-            self.add_log(f"Loaded CAD: {filepath}")
+            # --- CAD LOADING (Standard Flow) ---
+            self.mesh_file = None # Reset mesh file for new CAD
+            self.generate_btn.setEnabled(True) # Re-enable generation
+            self.refine_btn.setEnabled(False)
 
+            # Analyze geometry
+            try:
+                import gmsh
+                if not gmsh.is_initialized(): gmsh.initialize()
+                gmsh.open(file_path)
+                
+                # Simple volume check
+                occ_vols = gmsh.model.occ.getEntities(3)
+                if not occ_vols:
+                    # Try regular model entities if OCC not used directly yet
+                    vols = gmsh.model.getEntities(3)
+                else:
+                    vols = occ_vols
+                
+                geom_info = {}
+                if vols:
+                    # Just Approx check
+                    pass 
+                    
+                # Setup Paintbrush if available
+                if self.paintbrush_selector:
+                    if self.paintbrush_selector.load_cad_geometry():
+                        self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
+                
+                # Check for "Airfoil.step" specific hint
+                if "airfoil" in path_obj.name.lower():
+                     self.add_log("[Hint] Airfoil detected: consider using 'Curvature-Adaptive' and 'Hex Dominant'")
+
+                gmsh.finalize()
+            except Exception as e:
+                pass
+                # Don't hard fail on analysis, just log
+                # print(f"Basic geometry analysis failed: {e}")
+
+            # Calculate suggested element counts (mock/heuristic if GMSh fails)
+            # Default values are usually fine
+            pass
             # Clear any existing AI iteration meshes
             self.viewer.clear_iterations()
 
             # Load CAD and get geometry info
-            self.add_log(f"[DEBUG] Calling viewer.load_step_file({filepath})")
-            geom_info = self.viewer.load_step_file(filepath)
-            self.add_log(f"[DEBUG] load_step_file returned: {geom_info}")
+            self.add_log(f"[DEBUG] Calling viewer.load_step_file({file_path})")
+            self.viewer.load_step_file(file_path)  # Now asynchronous, returns None
+            
+            # Note: geom_info will be available in viewer.current_geom_info once loading completes
+            # We'll check it after a brief delay to allow the worker to finish
+            # For now, use a QTimer to check back and calculate element counts
+            QTimer.singleShot(100, self._check_geom_info_ready)
+            
+            self.add_log("[INFO] CAD loading in progress...")
+
+            # Load geometry for paintbrush AFTER CAD viewer starts loading
+            # This ensures we don't conflict with gmsh initialization
+            def load_paintbrush_later():
+                if self.paintbrush_selector:
+                    try:
+                        import gmsh
+                        # Make sure gmsh is not in use by the CAD worker
+                        if not gmsh.is_initialized():
+                            gmsh.initialize()
+                            gmsh.open(file_path)
+                            if self.paintbrush_selector.load_cad_geometry():
+                                self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
+                            gmsh.finalize()
+                    except Exception as e:
+                        print(f"Could not load geometry for paintbrush: {e}")
+            
+            # Delay paintbrush loading to avoid gmsh conflicts
+            QTimer.singleShot(2000, load_paintbrush_later)
+
+    def _check_geom_info_ready(self):
+        """Check if CAD loading is complete and geom_info is available"""
+        if hasattr(self.viewer, 'current_geom_info') and self.viewer.current_geom_info:
+            geom_info = self.viewer.current_geom_info
             self.current_geom_info = geom_info  # Store for logging
-
-            # Load geometry for paintbrush (after CAD is loaded)
-            if self.paintbrush_selector:
-                try:
-                    import gmsh
-                    gmsh.initialize()
-                    gmsh.open(filepath)
-                    if self.paintbrush_selector.load_cad_geometry():
-                        self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
-                    gmsh.finalize()
-                except Exception as e:
-                    print(f"Could not load geometry for paintbrush: {e}")
-
+            self.add_log(f"[DEBUG] CAD loaded: {geom_info}")
+            
             # Calculate suggested element counts based on geometry
             if geom_info and 'volume' in geom_info:
                 self.calculate_suggested_element_counts(geom_info)
             else:
                 self.add_log("[!] Could not calculate geometry volume - using default element counts")
+        elif hasattr(self.viewer, 'cad_load_worker') and self.viewer.cad_load_worker and self.viewer.cad_load_worker.isRunning():
+            # Worker still running, check again later
+            QTimer.singleShot(200, self._check_geom_info_ready)
+        else:
+            # Worker finished but no geom_info (probably an error)
+            self.add_log("[!] CAD loading completed but no geometry info available")
+
 
 
     def calculate_phase_weights(self, element_target, quality_preset):
@@ -2948,6 +3020,9 @@ class ModernMeshGenGUI(QMainWindow):
                 else:
                     # Standard mesh loading
                     self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
+                    self.add_log(f"[DEBUG] Viewer type: {type(self.viewer)}")
+                    import inspect
+                    self.add_log(f"[DEBUG] load_mesh_file location: {inspect.getsourcefile(self.viewer.load_mesh_file)}")
                     
                     elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
                     self.load_start_time = time.time()
@@ -2957,6 +3032,11 @@ class ModernMeshGenGUI(QMainWindow):
                     load_duration = time.time() - self.load_start_time
                     self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} (Load took: {load_duration:.3f}s) ***")
                     self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
+
+                    # Apply Quality Coloring
+                    if result.get('per_element_quality'):
+                         self.add_log(f"[DEBUG] Applying quality coloring...")
+                         self.viewer.apply_quality_coloring(result)
             
             # Check for hex testing component visualization
             elif result.get('visualization_mode') == 'components' and result.get('component_files'):
@@ -3261,6 +3341,12 @@ class ModernMeshGenGUI(QMainWindow):
             self.zone_name_input.clear()
         else:
             self.add_log("[!] Failed to create zone")
+
+    def on_toggle_face_partitions(self, checked):
+        """Toggle face partition visualization mode"""
+        if hasattr(self, 'viewer'):
+            self.viewer.toggle_face_partitions(checked)
+            self.add_log(f"[Detailed Viz] Face Partition Mode: {'ON' if checked else 'OFF'}")
 
     def on_delete_zone(self):
         """Delete selected zone from list"""

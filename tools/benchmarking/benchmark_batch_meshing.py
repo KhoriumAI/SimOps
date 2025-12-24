@@ -151,6 +151,17 @@ class BatchMeshBenchmark:
 
             # Get mesh stats
             print(f"\n[3/4] Collecting mesh statistics...")
+            
+            # Ensure Gmsh is initialized and has the mesh loaded
+            # generator.run_meshing_strategy may have finalized Gmsh
+            if not gmsh.isInitialized():
+                gmsh.initialize()
+                gmsh.option.setNumber("General.Terminal", 1)
+            
+            # Clear and merge the result to ensure we are looking at the final saved mesh
+            gmsh.model.add("statistics")
+            gmsh.merge(output_file)
+            
             elements = gmsh.model.mesh.getElements()
             nodes = gmsh.model.mesh.getNodes()
 
@@ -170,7 +181,7 @@ class BatchMeshBenchmark:
             t_quality_start = time.time()
 
             analyzer = MeshQualityAnalyzer()
-            quality = analyzer.analyze_mesh(output_file)
+            quality = analyzer.analyze_mesh()
 
             result.time_quality = time.time() - t_quality_start
 

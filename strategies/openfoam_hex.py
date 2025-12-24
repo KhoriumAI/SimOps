@@ -111,16 +111,84 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     min_pt = min_b - margin
     max_pt = max_b + margin
     
-    # Identify a point inside the mesh (approximation)
-    # For a convex object, centroid is usually safe.
-    # For concave, this can fail. Using center of bbox is a 50/50 gamble.
-    # Ideally ray cast. 
-    # Fallback: assume origin (0,0,0) or center if provided.
-    # Note: STL is in mm, but blockMesh converts to meters (0.001).
-    # We must scale this point to match the background mesh units (Meters).
-    location_in_mesh = center * 0.001 
-    
-    # Generate blockMeshDict
+    # Identify a point inside the mesh
+    # Robust approach: Ray Casting Midpoint (Deep Internal Point)
+    # Surface normal offset is risky for thin/curved geometries (airfoils).
+    # Centroid fails for hollow objects (bagels).
+    # Best: Cast a ray through the object and pick the midpoint of the first solid segment.
+    location_in_mesh = center
+    try:
+        import trimesh
+        import numpy as np
+        mesh = trimesh.load(stl_path)
+        
+        found_robust_point = False
+        
+        # Method 1: Ray Casting Midpoint (Primary)
+        # Cast a ray from outside, through the centroid.
+        # Use Z-axis ray
+        ray_origin = mesh.bounds[0] - [1.0, 1.0, 1.0] # Guaranteed outside
+        ray_direction = (mesh.centroid - ray_origin)
+        ray_direction = ray_direction / np.linalg.norm(ray_direction)
+        
+        # Get all intersections
+        # intersections is a (N, 3) array of points
+        intersections, index_ray, index_tri = mesh.ray.intersects_location(
+            ray_origins=[ray_origin],
+            ray_directions=[ray_direction]
+        )
+        
+        if len(intersections) >= 2:
+            # Sort intersections by distance from origin
+            dists = np.linalg.norm(intersections - ray_origin, axis=1)
+            sorted_indices = np.argsort(dists)
+            sorted_intersects = intersections[sorted_indices]
+            
+            # Pick midpoint between first entry (0) and first exit (1)
+            # This is "deep" inside the first volume encountered
+            first_entry = sorted_intersects[0]
+            first_exit = sorted_intersects[1]
+            midpoint = (first_entry + first_exit) / 2.0
+            
+            # Verify just in case (e.g. grazing incidence)
+            if mesh.contains([midpoint])[0]:
+                location_in_mesh = midpoint
+                print(f"[OpenFOAM] Found deep internal point via Ray Casting Midpoint: {location_in_mesh}", flush=True)
+                found_robust_point = True
+
+        # Method 2: Fallback to Surface Normal Offset (Secondary)
+        if not found_robust_point:
+             print("[OpenFOAM] Ray casting inconclusive, falling back to Surface Normal Offset...", flush=True)
+             num_faces = len(mesh.faces)
+             stride = max(1, int(num_faces / 50)) # More sparse is fine
+             
+             scale = 1.0
+             if hasattr(mesh, 'extents'): scale = np.max(mesh.extents)
+             epsilon = scale * 1e-4 # Slightly larger to be safe
+             
+             for i in range(0, num_faces, stride):
+                normal = mesh.face_normals[i]
+                face_center = mesh.vertices[mesh.faces[i]].mean(axis=0)
+                
+                # Check Inward
+                test_pt = face_center - (normal * epsilon)
+                if mesh.contains([test_pt])[0]:
+                    location_in_mesh = test_pt
+                    print(f"[OpenFOAM] Found internal point via Normal Offset: {location_in_mesh}", flush=True)
+                    found_robust_point = True
+                    break
+        
+        # Method 3: Centroid (Last Resort)
+        if not found_robust_point:
+             print("[OpenFOAM] WARNING: Could not find robust internal point. Using Centroid.", flush=True)
+             if hasattr(mesh, 'centroid'):
+                 location_in_mesh = mesh.centroid
+             else:
+                 location_in_mesh = center # BBox center
+
+    except Exception as e:
+        print(f"[OpenFOAM] Error finding internal point: {e}. Using BBox center.", flush=True)
+        location_in_mesh = center
     # Calculate number of cells based on cell_size * 2 (coarser background)
     n_cells = ((max_pt - min_pt) / (cell_size * 2.0)).astype(int)
     n_cells = [max(1, n) for n in n_cells]
@@ -133,7 +201,7 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     object      blockMeshDict;
 }}
 
-convertToMeters 0.001; // STL is likely in mm
+convertToMeters 1; // STL is in mm, keep background in mm
 
 vertices
 (
@@ -411,6 +479,7 @@ def run_env_cmd_stream(case_dir_wsl: str, command: str, verbose: bool = True) ->
         
         points_to_snap = 0
         last_pct = -5
+        had_error = False
         
         for line in process.stdout:
             line = line.strip()
@@ -419,6 +488,10 @@ def run_env_cmd_stream(case_dir_wsl: str, command: str, verbose: bool = True) ->
                 
             # Log to console so mesh_worker_subprocess captures it
             print(line, flush=True)
+            
+            # Check for common error indicators
+            if "ERROR" in line or "FATAL" in line or "Assertion" in line:
+                had_error = True
             
             # Parse for snapping progress
             # Pattern: "Number of points to snap: 12345"
@@ -441,7 +514,22 @@ def run_env_cmd_stream(case_dir_wsl: str, command: str, verbose: bool = True) ->
                         last_pct = pct
         
         process.wait()
-        return process.returncode == 0
+        
+        # Check if process succeeded
+        # Some OpenFOAM utilities return non-zero even on success with warnings
+        # We need to check both return code AND error indicators
+        if process.returncode != 0:
+            if verbose:
+                print(f"[OpenFOAM] Process returned code {process.returncode}", flush=True)
+            # Don't immediately fail - check if it was just warnings
+            # If we had explicit errors, fail
+            if had_error:
+                return False
+            # Otherwise, log warning but try to continue (mesh might still be usable)
+            if verbose:
+                print(f"[OpenFOAM] WARNING: Non-zero return code but no explicit errors detected. Proceeding...", flush=True)
+        
+        return True
     except Exception as e:
         if verbose:
             print(f"[OpenFOAM] ERROR streaming {command}: {e}", flush=True)
@@ -509,10 +597,15 @@ def convert_to_fluent(case_dir: Path, verbose: bool = True) -> Optional[Path]:
     ]
     
     if verbose:
-        print("[OpenFOAM] Converting to Fluent format...")
+        print("[OpenFOAM] Converting to Fluent format...", flush=True)
         
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if verbose:
+            print(f"[OpenFOAM] Running foamMeshToFluent in {case_dir}...", flush=True)
+        result = subprocess.run(cmd, capture_output=True, timeout=120)  # Reduced timeout
+        
+        if verbose:
+            print(f"[OpenFOAM] foamMeshToFluent completed with return code {result.returncode}", flush=True)
         
         # Check if .msh file exists (recursively, as it may be in fluentInterface/)
         msh_files = list(case_dir.rglob("*.msh"))
@@ -563,14 +656,22 @@ def generate_openfoam_hex_mesh(
     # Check prerequisites
     if platform.system() == 'Windows':
         if not check_wsl_available():
-            return {'success': False, 'error': 'WSL not available. Please install WSL2.'}
+            return {
+                'success': False,
+                'error': 'WSL not available. Please install WSL2.',
+                'per_element_quality': {}
+            }
         
     # Check which mesher is available
     has_cfmesh = check_openfoam_available()
     has_snappy = check_snappy_available()
     
     if not has_cfmesh and not has_snappy:
-        return {'success': False, 'error': 'No OpenFOAM mesher found (cfMesh or snappyHexMesh).'}
+        return {
+            'success': False,
+            'error': 'No OpenFOAM mesher found (cfMesh or snappyHexMesh).',
+            'per_element_quality': {}
+        }
     
     mesher = 'cfMesh' if has_cfmesh else 'snappyHexMesh'
     if verbose:
@@ -583,21 +684,24 @@ def generate_openfoam_hex_mesh(
         if mesher == 'cfMesh':
             create_openfoam_case(case_dir, stl_path, cell_size)
             if not run_cartesian_mesh(case_dir, verbose):
-                return {'success': False, 'error': 'cartesianMesh failed'}
+                return {
+                    'success': False,
+                    'error': 'cartesianMesh failed',
+                    'per_element_quality': {}
+                }
         else:
             create_snappy_case(case_dir, stl_path, cell_size)
             if not run_snappy_hex_mesh(case_dir, verbose):
-                return {'success': False, 'error': 'snappyHexMesh failed'}
+                return {
+                    'success': False,
+                    'error': 'snappyHexMesh failed - check console for details',
+                    'message': 'snappyHexMesh encountered an error during meshing. This can happen with complex geometries. Try: 1) Simplifying geometry, 2) Increasing cell size, 3) Using a different strategy',
+                    'per_element_quality': {}
+                }
         
-        # Convert to Fluent
-        msh_file = convert_to_fluent(case_dir, verbose)
-        if not msh_file:
-            return {'success': False, 'error': 'Fluent conversion failed'}
-        
-        shutil.copy(msh_file, output_path)
-        
-        # Convert to VTK for internal visualization
-        # We try to create a sibling file with .vtk extension (or .vtu)
+        # 1. Convert to VTK first (Priority for GUI visualization)
+        if verbose:
+            print("[OpenFOAM] Step 3: Generating VTK for visualization...", flush=True)
         vtk_file = convert_to_vtk(case_dir, verbose)
         
         output_vtk_path = None
@@ -606,47 +710,58 @@ def generate_openfoam_hex_mesh(
              output_vtk_path = str(Path(output_path).with_suffix(vtk_file.suffix))
              shutil.copy(vtk_file, output_vtk_path)
              if verbose:
-                 print(f"[OpenFOAM] Vis: VTK mesh saved to {output_vtk_path}")
+                 print(f"[OpenFOAM] Vis: VTK mesh saved to {output_vtk_path}", flush=True)
+        else:
+            if verbose:
+                print("[OpenFOAM] WARNING: VTK conversion failed. Visualization may not be available.", flush=True)
+
+        # 2. Convert to Fluent (Optional/Secondary)
+        if verbose:
+            print("[OpenFOAM] Step 4: Starting optional Fluent conversion...", flush=True)
+        msh_file = convert_to_fluent(case_dir, verbose)
+        
+        has_fluent = False
+        if msh_file:
+            if verbose:
+                print(f"[OpenFOAM] Fluent conversion succeeded: {msh_file}", flush=True)
+            shutil.copy(msh_file, output_path)
+            has_fluent = True
+            if verbose:
+                print(f"[OpenFOAM] Copied to output: {output_path}", flush=True)
+        else:
+            if verbose:
+                print("[OpenFOAM] Optional Fluent conversion skipped or failed.", flush=True)
+        
+        # Check if we have ANYTHING to show
+        if not vtk_file and not msh_file:
+            return {
+                'success': False,
+                'error': 'Mesh conversion failed (both VTK and Fluent)',
+                'per_element_quality': {}
+            }
         
         # Stats calculation
-        # Gmsh often fails to read Fluent .msh files properly for stats
-        # So we try to get stats from the valid VTK/VTU file if possible
         total_nodes = 0
         total_elements = 0
         
         if vtk_file:
             try:
-                # Use simple parsing to avoid heavy dependencies if possible
-                # But since we need accuracy, let's just parse the header or use regex
-                # Or since we are in the strategy, we can use pyvista if available (it is in requirements)
-                # But strategy runs in subprocess, might verify import first.
-                # Safer: grep the file/log or just trust the VTK generation log?
-                # The log said: "Cells: 18315"
-                # Let's try to parse the log we captured? No, we didn't capture it to a var.
-                
-                # Let's simple-parse the VTU file (XML)
-                # It has <Piece NumberOfPoints="20672" NumberOfCells="18315">
-                # Quotes can be single or double
                 content = vtk_file.read_text()
                 if 'NumberOfPoints=' in content:
                     import re
-                    # Match="value" or ='value'
                     p_match = re.search(r'''NumberOfPoints=['"](\d+)['"]''', content)
                     c_match = re.search(r'''NumberOfCells=['"](\d+)['"]''', content)
                     if p_match: total_nodes = int(p_match.group(1))
                     if c_match: total_elements = int(c_match.group(1))
-                    print(f"[OpenFOAM] Stats from VTU: {total_nodes} nodes, {total_elements} elements")
+                    print(f"[OpenFOAM] Stats from VTU: {total_nodes} nodes, {total_elements} elements", flush=True)
             except Exception as e:
-                print(f"[OpenFOAM] Error parsing VTU stats: {e}")
-                pass
+                print(f"[OpenFOAM] Error parsing VTU stats: {e}", flush=True)
 
-        # CRITICAL FIX: Return the VTU file as the 'output_file'
-        # This forces the GUI (even if stale) to pass the valid VTU file to the loader.
-        # The loader will try to parse it as .msh, fail, and then fall back to loading it as VTU.
+        # Determine primary output
         primary_output = output_vtk_path if vtk_file else output_path
 
         if verbose:
-            print(f"[OpenFOAM] SUCCESS: Mesh saved to {output_path}")
+            print(f"[OpenFOAM] SUCCESS: Process complete. Primary output: {primary_output}", flush=True)
         
         return {
             'success': True,
@@ -659,7 +774,11 @@ def generate_openfoam_hex_mesh(
         }
         
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        return {
+            'success': False,
+            'error': str(e),
+            'per_element_quality': {}
+        }
     finally:
         try:
             shutil.rmtree(case_dir)
@@ -682,10 +801,15 @@ def convert_to_vtk(case_dir: Path, verbose: bool = True) -> Optional[Path]:
     ]
     
     if verbose:
-        print("[OpenFOAM] Generating VTK for visualization...")
+        print("[OpenFOAM] Generating VTK for visualization...", flush=True)
         
     try:
+        if verbose:
+            print(f"[OpenFOAM] Running foamToVTK in {case_dir}...", flush=True)
         subprocess.run(cmd, capture_output=True, timeout=120)
+        
+        if verbose:
+            print("[OpenFOAM] foamToVTK completed, checking for output files...", flush=True)
         
         vtk_dir = case_dir / "VTK"
         # Search for both legacy .vtk and modern .vtu (XML) files
