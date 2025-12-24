@@ -19,8 +19,9 @@ REPO_ROOT = CURRENT_DIR.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from core.mat_lib import MaterialLibrary
-    from core.schemas.config_schema import SimulationConfig, PhysicsConfig, MeshingConfig
+    from core.materials import MATERIAL_DB
+
+    from core.schemas.config_schema import SimulationConfig, PhysicsConfig, MeshingConfig, TaggingRule, GeometrySelector
 except ImportError as e:
     print(f"Error importing core modules: {e}")
     sys.exit(1)
@@ -83,12 +84,11 @@ def prompt(question: str, default: Any = None, type_cast: type = str) -> Any:
 
 def get_material_choice() -> str:
     """Prompt for material, showing list"""
-    lib = MaterialLibrary.get_instance()
-    mats = sorted(lib.materials.keys())
+    mats = sorted(MATERIAL_DB.keys())
     
     print(f"\n{C_BOLD}Available Materials:{C_RESET}")
     for i, m in enumerate(mats, 1):
-        print(f"  {i}. {m}")
+        print(f"  {i}. {m} (k={MATERIAL_DB[m].conductivity})")
     
     while True:
         val = prompt("Select Material (Name or Number)", default="Aluminum")
@@ -142,9 +142,11 @@ def run_wizard(target_cad: Optional[str] = None):
     elif type_choice == 3: sim_type = "cfd"
     
     # Common vars
-    material = "Aluminum"
+    material = "Aluminum_6061_T6"
     material_defs = {}
+    extra_rules = []
     is_transient = False
+
     duration = 60.0
     time_step = 2.0
     h_coeff = 0.0
@@ -159,6 +161,20 @@ def run_wizard(target_cad: Optional[str] = None):
         # ... Thermal Logic ...
         is_composite = prompt("Enable Anisotropic Readiness (Composite Template)?", default=False, type_cast=bool)
         
+        if is_composite:
+            material = "casing_material"
+            material_defs = {
+                "casing_material": {
+                    "type": "Orthotropic",
+                    "name": "Toray_T700_CFRP",
+                    "properties": {
+                        "conductivity_matrix": [4.5, 0, 0, 0, 4.5, 0, 0, 0, 0.8],
+                        "density": 1600,
+                        "specific_heat": 1200
+                    }
+                }
+            }
+            print(f"  {C_GREEN}[Ready]{C_RESET} Placeholder T700 CFRP matrix loaded into 'material_definitions'.")
         if is_composite:
             material = "casing_material"
             material_defs = {
@@ -202,6 +218,16 @@ def run_wizard(target_cad: Optional[str] = None):
         
         # CFD is currently steady-state only in cfd_solver
         is_transient = False
+        
+        # NOTE: Do NOT add manual tagging rules for external flow CFD!
+        # The VirtualWindTunnel feature automatically creates:
+        #   - BC_Inlet, BC_Outlet (flow boundaries)
+        #   - BC_FarField (side walls)
+        #   - BC_Wall_Object (object surfaces)
+        #   - Fluid_Domain (full volume)
+        # Manual tagging rules disable this automatic behavior.
+        print(f"  {C_GREEN}[Auto]{C_RESET} VirtualWindTunnel will generate flow domain automatically.")
+
         
     elif sim_type == "structural":
         material = get_material_choice()
@@ -259,12 +285,23 @@ def run_wizard(target_cad: Optional[str] = None):
             second_order=second_order
         ),
         material_definitions=material_defs,
+        tagging_rules=extra_rules,
         validate_mesh=validate
     )
     
     # 5. Write
     print(f"\n{C_YELLOW}--- Review ---{C_RESET}")
     print(json.dumps(config.dict(), indent=2))
+    
+    print(f"\n{C_BOLD}Configuration Summary:{C_RESET}")
+    print(f"  Job Name:    {config.job_name}")
+    print(f"  Type:        {config.physics.simulation_type.upper()}")
+    print(f"  Material:    {config.physics.material}")
+    if config.physics.simulation_type == "thermal":
+        print(f"  Heat Load:   {config.physics.heat_load_watts} W")
+    elif config.physics.simulation_type == "cfd":
+        print(f"  Inlet Vel:   {config.physics.inlet_velocity} m/s")
+    
     
     if prompt("Save this configuration?", default=True, type_cast=bool):
         with open(json_path, 'w') as f:

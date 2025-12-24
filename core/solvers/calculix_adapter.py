@@ -7,6 +7,7 @@ import gmsh
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import ISolver
+from ..materials import get_material, MaterialProperties
 
 logger = logging.getLogger(__name__)
 
@@ -47,38 +48,64 @@ class CalculiXAdapter(ISolver):
         
         # 2. Run CalculiX
         logger.info(f"[CalculiX] executing {self.ccx_binary} {job_name}...")
+        log_file = output_dir / f"{job_name}.log"
+        stop_file = output_dir / "STOP_SIM"
+        
         start_time = time.time()
         
         try:
             # ccx expects jobname without extension
             cwd = str(output_dir)
             
-            # Check if ccx exists
-            try:
-                subprocess.run([self.ccx_binary, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            except FileNotFoundError:
-                raise RuntimeError(f"CalculiX binary '{self.ccx_binary}' not found in PATH")
-                
             # Run
             cmd = [self.ccx_binary, job_name]
-            # CCX uses OpenMP, set threads
             env = os.environ.copy()
             env["OMP_NUM_THREADS"] = "4"
             
-            result = subprocess.run(
-                cmd, 
-                cwd=cwd, 
-                capture_output=False, # Stream to stdout (captured by worker wrapper)
-                text=True,
-                env=env
-            )
-            
-            if result.returncode != 0:
-                logger.error(f"CalculiX Failed:\n{result.stdout}\n{result.stderr}")
-                raise RuntimeError("CalculiX execution failed")
+            interrupted = False
+            with open(log_file, 'w') as f_log:
+                process = subprocess.Popen(
+                    cmd, 
+                    cwd=cwd, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    encoding='utf-8',
+                    errors='replace'
+                )
                 
-            logger.info("CalculiX execution complete.")
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
+                    
+                    if line:
+                        print(f"[CCX] {line}", end='')
+                        f_log.write(line)
+                        f_log.flush()
+                        
+                    # Graceful Stop Check
+                    if stop_file.exists():
+                        logger.warning(f"[CalculiX] Stop signal detected! Terminating {job_name}...")
+                        process.terminate()
+                        interrupted = True
+                        # Wait a bit for it to flush
+                        try:
+                            process.wait(timeout=5)
+                        except:
+                            process.kill()
+                        stop_file.unlink() # Cleanup signal file
+                        break
             
+            if process.returncode != 0 and not interrupted:
+                raise RuntimeError(f"CalculiX execution failed with code {process.returncode}")
+                
+            if interrupted:
+                logger.info("[CalculiX] Proceeding to report generation from partial results...")
+            else:
+                logger.info("CalculiX execution complete.")
+                
         except Exception as e:
             logger.error(f"CalculiX run error: {e}")
             raise
@@ -122,13 +149,12 @@ class CalculiXAdapter(ISolver):
                     chunk = np.column_stack((tags, nodes))
                     c3d4_elems.append(chunk)
                 elif etype == 11: # Tet10
-                    # Gmsh 11: 4 corners, 6 edges (0-1, 1-2, 2-0, 0-3, 1-3, 2-3)
-                    # CalculiX C3D10: Permutation required (Swap last two nodes usually)
-                    # Permutation: [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
+                    # Gmsh 11: 4 corners, 6 edges
+                    # CalculiX C3D10: Permutation verified by tools/verify_tet10_mapping.py
+                    # [0, 1, 2, 3, 8, 5, 4, 7, 9, 6] yields Uniform Stress (Std=0.0)
                     raw_nodes = elem_nodes[i].reshape(-1, 10).astype(int)
-                    permuted_nodes = raw_nodes[:, [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]]
-                    
                     tags = elem_tags[i].astype(int)
+                    permuted_nodes = raw_nodes[:, [0, 1, 2, 3, 8, 5, 4, 7, 9, 6]]
                     chunk = np.column_stack((tags, permuted_nodes))
                     c3d10_elems.append(chunk)
 
@@ -151,20 +177,18 @@ class CalculiXAdapter(ISolver):
                      tri6_list.append(np.column_stack((tags, nodes)))
             
             # Ensure Unique Connectivity (Crucial for CalculiX shell normal estimation)
-            def unique_elems_by_nodes(chunks):
-                if not chunks: return []
-                combined = np.vstack(chunks)
-                # Sort node IDs per element to create a canonical representation
-                node_keys = [tuple(sorted(row[1:])) for row in combined]
-                # Keep only the first occurrence of each unique node set
-                unique_map = {}
-                for i, key in enumerate(node_keys):
-                    if key not in unique_map:
-                        unique_map[key] = combined[i]
-                return np.array(list(unique_map.values()))
-
-            tri3_elems = unique_elems_by_nodes(tri3_list)
-            tri6_elems = unique_elems_by_nodes(tri6_list)
+            # Ensure Unique Connectivity (Crucial for CalculiX shell normal estimation)
+            # ANTIGRAVITY FIX: Bypassed sorting logic to preserve winding order.
+            # Gmsh getElements returns correct topology; sorting destroys it.
+            if tri3_list:
+                tri3_elems = np.vstack(tri3_list)
+            else:
+                tri3_elems = []
+                
+            if tri6_list:
+                tri6_elems = np.vstack(tri6_list)
+            else:
+                tri6_elems = []
 
 
             
@@ -264,10 +288,37 @@ class CalculiXAdapter(ISolver):
                 # Density: kg/mm^3 = kg/m^3 * 1e-9
                 # Specific Heat: J/(kg K) [unchanged]
                 
-                k_si = config.get("thermal_conductivity", 150.0)
-                rho_si = config.get("density", 2700.0)
-                cp_si = config.get("specific_heat", 900.0)
+                f.write("*MATERIAL, NAME=Mat1\n")
                 
+                # Fetch material properties
+                mat_name = config.get("material_name")
+                material: Optional[MaterialProperties] = None
+                
+                if mat_name:
+                    try:
+                        material = get_material(mat_name)
+                        logger.info(f"[CalculiX] Using material '{mat_name}' from DB")
+                    except KeyError:
+                        logger.warning(f"[CalculiX] Material '{mat_name}' not found in DB. Falling back to manual properties.")
+                
+                # Default to Aluminum 6061-T6 if no material specified and no manual override provided
+                # This replaces the hardcoded k=150 (Steel-ish?) with k=167 (Aluminum)
+                if not material:
+                    # Check if user provided manual overrides
+                    if "thermal_conductivity" not in config and "density" not in config:
+                         logger.info("[CalculiX] No material specified. Defaulting to Aluminum 6061-T6.")
+                         material = get_material("Aluminum_6061_T6")
+
+                # Extraction helpers
+                def get_k(m): return m.conductivity if m else 150.0 
+                def get_rho(m): return m.density if m else 2700.0
+                def get_cp(m): return m.specific_heat if m else 900.0
+
+                # Priority: Config Override > Material DB > Hardcoded Fallback (shouldn't happen with default above)
+                k_si = config.get("thermal_conductivity", get_k(material))
+                rho_si = config.get("density", get_rho(material))
+                cp_si = config.get("specific_heat", get_cp(material))
+
                 # Scale Thermal Conductivity (W/mK -> W/mmK = * 0.001)
                 if isinstance(k_si, list):
                     k = [[val * 0.001, t] for val, t in k_si]
@@ -285,8 +336,6 @@ class CalculiXAdapter(ISolver):
                     cp = [[val, t] for val, t in cp_si]
                 else:
                     cp = cp_si
-                
-                f.write("*MATERIAL, NAME=Mat1\n")
                 
                 def write_param(card_name, value):
                     f.write(f"{card_name}\n")

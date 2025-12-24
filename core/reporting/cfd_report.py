@@ -120,13 +120,31 @@ class CFDPDFReportGenerator:
             ['Metric', 'Value'],
             ['Strategy Used', data.get('strategy_name', 'OpenFOAM/SimpleFoam')],
             ['Reynolds Number', reynolds],
-            ['Drag Coefficient (Cd)', cd],
-            ['Lift Coefficient (Cl)', cl],
+        ]
+        
+        # Only include Cd/Cl if they have numeric values (not 'N/A' or None)
+        if cd not in ['N/A', None]:
+            metrics_data.append(['Drag Coefficient (Cd)', cd])
+        if cl not in ['N/A', None]:
+            metrics_data.append(['Lift Coefficient (Cl)', cl])
+        
+        # Format solve time as HH:MM:SS
+        solve_time_sec = data.get('solve_time', 0)
+        if isinstance(solve_time_sec, (int, float)) and solve_time_sec > 0:
+            hours = int(solve_time_sec // 3600)
+            minutes = int((solve_time_sec % 3600) // 60)
+            seconds = int(solve_time_sec % 60)
+            solve_time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            solve_time_str = "00:00:00"
+        
+        # Continue with other metrics
+        metrics_data.extend([
             ['Inlet Velocity', f"{data.get('u_inlet', 0):.2f} m/s"],
             ['Mesh Cells', f"{data.get('mesh_cells', 0):,}"],
-            ['Solve Time', f"{data.get('solve_time', 0):.2f} s"],
-            ['Viscosity model', 'Laminar'] # Or turbulent if updated
-        ]
+            ['Solve Time', solve_time_str],
+            ['Viscosity model', data.get('viscosity_model', 'Laminar')] 
+        ])
         
         t = Table(metrics_data, colWidths=[2.5*inch, 2.5*inch])
         t.setStyle(TableStyle([

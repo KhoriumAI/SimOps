@@ -110,9 +110,12 @@ class CalculiXStructuralAdapter(ISolver):
                     chunk = np.column_stack((tags, nodes))
                     c3d4_elems.append(chunk)
                 elif etype == 11: # Tet10
-                    # Permutation for C3D10
+                    # Gmsh 11: 4 corners, 6 edges
+                    # CalculiX C3D10: Validated Permutation [2,0,1,3, 6,4,5, 9,7,8]
+                    # This maps Gmsh node logical order to CalculiX to ensure positive volume 
+                    # and uniform stress (verified via tests/physics/verify_tet10_order.py).
                     raw_nodes = elem_nodes[i].reshape(-1, 10).astype(int)
-                    permuted_nodes = raw_nodes[:, [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]]
+                    permuted_nodes = raw_nodes[:, [2, 0, 1, 3, 6, 4, 5, 9, 7, 8]]
                     tags = elem_tags[i].astype(int)
                     chunk = np.column_stack((tags, permuted_nodes))
                     c3d10_elems.append(chunk)

@@ -63,10 +63,22 @@ from core.solvers.calculix_adapter import CalculiXAdapter
 from core.solvers.calculix_structural import CalculiXStructuralAdapter
 from core.solvers.cfd_solver import CFDSolver
 from core.reporting.cfd_report import CFDPDFReportGenerator
+
+# Supported Mesh Extensions
+MESH_EXTENSIONS = {'.msh', '.vtk', '.vtu', '.unv', '.inp'}
+
+def is_mesh_file(path: str) -> bool:
+    return Path(path).suffix.lower() in MESH_EXTENSIONS
+
 try:
     from core.reporting.structural_report import StructuralPDFReportGenerator
 except ImportError:
     StructuralPDFReportGenerator = None
+
+try:
+    from core.validation.pre_sim_checks import run_pre_simulation_checks
+except ImportError:
+    run_pre_simulation_checks = None
 
 
 # Configure logging
@@ -125,7 +137,7 @@ STRATEGIES = [
     {
         "name": "HighFi_Layered",
         "description": "High fidelity mesh with boundary layers (CFD/Thermal)",
-        "mesh_size": 0.5,
+        "mesh_size_factor": 1.0, # Relative to auto-diagonal
         "num_layers": 5,
         "growth_rate": 1.2,
         "algorithm_2d": 6,   # Frontal-Delaunay
@@ -135,7 +147,7 @@ STRATEGIES = [
     {
         "name": "MedFi_Robust", 
         "description": "Medium fidelity with fewer layers",
-        "mesh_size": 1.0,
+        "mesh_size_factor": 2.0, # 2x coarser than HighFi
         "num_layers": 3,
         "growth_rate": 1.3,
         "algorithm_2d": 6,   # Frontal-Delaunay
@@ -145,7 +157,7 @@ STRATEGIES = [
     {
         "name": "LowFi_Emergency",
         "description": "Emergency fallback - pure conduction mesh",
-        "mesh_size": 2.0,
+        "mesh_size_factor": 4.0, # 4x coarser than HighFi
         "num_layers": 0,     # No boundary layers
         "growth_rate": 1.0,
         "algorithm_2d": 1,   # MeshAdapt
@@ -189,7 +201,8 @@ def generate_mesh_with_strategy(
     logger.info(f"Meshing with strategy: {strategy['name']}")
     
     # Map strategy params to config
-    base_factor = strategy.get('mesh_size', 0.5) / 0.5
+    # Use mesh_size_factor directly or fallback to mesh_size/0.5 for back-compat
+    base_factor = strategy.get('mesh_size_factor', strategy.get('mesh_size', 0.5) / 0.5)
     
     # Overrides from Sidecar
     second_order = False
@@ -201,6 +214,17 @@ def generate_mesh_with_strategy(
             base_factor *= sim_config.meshing.mesh_size_multiplier
             logger.info(f"  [Override] Scaling mesh size by {sim_config.meshing.mesh_size_multiplier}")
 
+    # Intelligent Wind Tunnel Detection
+    # Enable wind tunnel for external flow CFD (when inlet_velocity > 0)
+    enable_wind_tunnel = False
+    if sim_config and hasattr(sim_config.physics, 'simulation_type'):
+        if sim_config.physics.simulation_type == 'cfd':
+            if hasattr(sim_config.physics, 'inlet_velocity') and sim_config.physics.inlet_velocity > 0:
+                enable_wind_tunnel = True
+                logger.info(f"  [Wind Tunnel] Enabled for external flow (v={sim_config.physics.inlet_velocity} m/s)")
+            else:
+                logger.info("  [Wind Tunnel] Disabled (inlet_velocity = 0 or not set)")
+    
     config = CFDMeshConfig(
         num_layers=strategy.get('num_layers', 5),
         growth_rate=strategy.get('growth_rate', 1.2),
@@ -208,8 +232,11 @@ def generate_mesh_with_strategy(
         create_prisms=True,
         optimize_netgen=strategy.get('optimize', True),
         smoothing_steps=10,
-        second_order=second_order
+        second_order=second_order,
+        virtual_wind_tunnel=enable_wind_tunnel
     )
+    
+    logger.info(f"  [DEBUG] CFDMeshConfig: virtual_wind_tunnel={config.virtual_wind_tunnel}")
     
     # Pass tagging rules from sidecar if available
     tagging_rules = sim_config.tagging_rules if sim_config else []
@@ -224,6 +251,21 @@ def generate_mesh_with_strategy(
     
     if not success:
         raise RuntimeError(f"Mesh generation failed: {stats.get('error')}")
+        
+    # Export Metadata Sidecar (e.g. for Characteristic Length)
+    if runner.wind_tunnel_data:
+        try:
+            meta_file = output_dir / "mesh_metadata.json"
+            meta_data = {
+                'wind_tunnel': runner.wind_tunnel_data.get('dimensions', {}),
+                'generated_at': time.time(),
+                'strategy': strategy['name']
+            }
+            with open(meta_file, 'w') as f:
+                json.dump(meta_data, f, indent=2)
+            logger.info(f"  [Metadata] Written to {meta_file.name}")
+        except Exception as e:
+            logger.warning(f"  [Metadata] Failed to write sidecar: {e}")
         
     return str(output_file)
 
@@ -245,19 +287,20 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
              phy = sim_config.physics
              
              # --- Material Hydration ---
-             from core.mat_lib import MaterialLibrary
-             mat_lib = MaterialLibrary.get_instance()
+             from core.materials import get_material
              
              # Helper to prioritise: Explicit > Library > Default
-             def get_prop(field_name, lib_key, default_val):
+             def get_prop(field_name, attr_name, default_val):
                  val = getattr(phy, field_name, None)
                  if val is not None:
                      return val
                  # Check library
                  if phy.material:
-                     mat = mat_lib.get_material(phy.material)
-                     if mat and lib_key in mat:
-                         return mat[lib_key]
+                     try:
+                        mat = get_material(phy.material)
+                        return getattr(mat, attr_name, default_val)
+                     except KeyError:
+                        pass
                  return default_val
 
              adapter_config['thermal_conductivity'] = get_prop('thermal_conductivity', 'conductivity', 150.0)
@@ -321,10 +364,12 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
              if fallback_config.thermal_conductivity is None:
                  mat_name = get_val("physics.material", None)
                  if mat_name:
-                     from core.mat_lib import MaterialLibrary
-                     mat = MaterialLibrary.get_instance().get_material(mat_name)
-                     if mat and 'conductivity' in mat:
-                         fallback_config.thermal_conductivity = mat['conductivity']
+                     from core.materials import get_material
+                     try:
+                        mat = get_material(mat_name)
+                        fallback_config.thermal_conductivity = mat.conductivity
+                     except KeyError:
+                        pass
         
         solver = ThermalSolver(fallback_config, verbose=True)
         result = solver.solve(str(mesh_file))
@@ -821,7 +866,8 @@ def generate_report(
                  'num_elements': result.get('num_elements', 0),
                  'solve_time': result.get('solve_time', 0),
                  'heat_flux': result.get('heat_flux_watts'),
-                 'convergence': result.get('convergence_steps')
+                 'convergence': result.get('convergence_steps'),
+                 'courant_max': result.get('courant_max', 0.0)
              }
              pdf_path = generator.generate(
                  job_name=job_name, # Used for title in PDF?
@@ -1042,21 +1088,25 @@ def run_cfd_simulation(
     Dedicated pipeline for CFD simulations suitable for OpenFOAM.
     """
     # 1. Mesh
-    if update_status_callback: update_status_callback("Meshing (CFD)...")
-    
-    # We use HighFi_Layered strategy by default for CFD
-    strategy = next((s for s in STRATEGIES if s['name'] == 'HighFi_Layered'), STRATEGIES[0])
-    
-    try:
-        mesh_file = generate_mesh_with_strategy(
-            file_path, 
-            output_dir, 
-            strategy, 
-            sim_config=sim_config
-        )
-    except Exception as e:
-        logger.error(f"CFD Meshing failed: {e}")
-        return SimulationResult(success=False, strategy_name="CFD_HighFi", error=str(e))
+    if is_mesh_file(file_path):
+        logger.info(f"  [Direct] Skipping CFD meshing, using {file_path}")
+        mesh_file = file_path
+    else:
+        if update_status_callback: update_status_callback("Meshing (CFD)...")
+        
+        # We use HighFi_Layered strategy by default for CFD
+        strategy = next((s for s in STRATEGIES if s['name'] == 'HighFi_Layered'), STRATEGIES[0])
+        
+        try:
+            mesh_file = generate_mesh_with_strategy(
+                file_path, 
+                output_dir, 
+                strategy, 
+                sim_config=sim_config
+            )
+        except Exception as e:
+            logger.error(f"CFD Meshing failed: {e}")
+            return SimulationResult(success=False, strategy_name="CFD_HighFi", error=str(e))
 
     # 2. Solve
     if update_status_callback: update_status_callback("Solving (OpenFOAM)...")
@@ -1080,13 +1130,59 @@ def run_cfd_simulation(
             
         if hasattr(phy, 'kinematic_viscosity'):
             solver_config['kinematic_viscosity'] = phy.kinematic_viscosity
+    
+    # =========================================================================
+    # PRE-SIMULATION ROBUSTNESS CHECKS
+    # =========================================================================
+    if run_pre_simulation_checks:
+        if update_status_callback: update_status_callback("Running pre-simulation checks...")
+        
+        # Determine expected patches from tagging rules
+        expected_patches = ['inlet', 'outlet']  # Default expectations
+        if sim_config and hasattr(sim_config, 'tagging_rules'):
+            for rule in sim_config.tagging_rules:
+                tag_name = rule.get('tag_name', '') if isinstance(rule, dict) else getattr(rule, 'tag_name', '')
+                if 'inlet' in tag_name.lower():
+                    expected_patches.append(tag_name)
+                elif 'outlet' in tag_name.lower():
+                    expected_patches.append(tag_name)
+        
+        # Get config dict for validation
+        config_dict = {}
+        if sim_config:
+            if hasattr(sim_config, 'model_dump'):
+                config_dict = sim_config.model_dump()
+            elif hasattr(sim_config, 'dict'):
+                config_dict = sim_config.dict()
+            elif hasattr(sim_config, '__dict__'):
+                config_dict = vars(sim_config)
+        
+        passed, validation_msg = run_pre_simulation_checks(
+            job_name=job_name,
+            output_dir=output_dir,
+            mesh_file=Path(mesh_file),
+            config=config_dict,
+            case_dir=None,  # Case dir created by solver, check after setup
+            expected_patches=expected_patches
+        )
+        
+        if not passed:
+            logger.error(f"Pre-simulation validation FAILED: {validation_msg}")
+            return SimulationResult(
+                success=False,
+                strategy_name=strategy['name'],
+                error=f"Pre-simulation validation failed. Check crash log."
+            )
+        else:
+            logger.info(f"[VALIDATION] {validation_msg}")
             
     try:
         # Run Solver
         try:
             result_data = solver.run(Path(mesh_file), output_dir, solver_config)
         except Exception as e:
-            logger.warning(f"CFD Solver failed (likely missing OpenFOAM): {e}")
+            error_message = str(e)
+            logger.warning(f"CFD Solver failed: {error_message}")
             logger.warning("Proceeding with Mesh-Only visualization/report.")
             
             # Fallback Result Data
@@ -1100,44 +1196,68 @@ def run_cfd_simulation(
                  'converged': False,
                  'reynolds': 'N/A',
                  'cd': 'N/A',
-                 'cl': 'N/A'
+                 'cl': 'N/A',
+                 'turbulence_model': 'N/A (Solver Failed)',
+                 'error_message': error_message,
+                 'failure_reason': error_message
             }
         
         # 3. Visualization
+        # 3. Visualization
         if update_status_callback: update_status_callback("Visualizing...")
-        
-        from core.reporting.velocity_viz import generate_velocity_streamlines, generate_mesh_viz
         
         viz_path = output_dir / f"{job_name}_velocity.png"
         vtk_path = Path(result_data['vtk_file'])
-        
-        viz_success = generate_velocity_streamlines(str(vtk_path), str(viz_path), title=f"Flow: {job_name}")
-        
+        viz_success = False
+
+        # Try ParaView First (High Quality)
+        try:
+            from core.visualization.paraview_driver import ParaViewDriver
+            pv_driver = ParaViewDriver()
+            if pv_driver.is_available():
+                logger.info("Generating High-Quality 3D Streamlines via ParaView...")
+                
+                # Estimate center/radius if possible
+                center = [0.0, 0.0, 0.0]
+                radius = 1.0
+                if 'geo_analysis' in locals() and geo_analysis:
+                     center = list(geo_analysis.center)
+                     radius = geo_analysis.diagonal / 2.0
+                
+                viz_success = pv_driver.generate_streamlines(str(vtk_path), str(viz_path), center, radius)
+        except Exception as e:
+            logger.warning(f"ParaView viz failed: {e}")
+
+        # Fallback to PyVista/Matplotlib
         if not viz_success:
-             logger.warning("Velocity visualization failed (or no data). Falling back to Mesh Viz.")
-             generate_mesh_viz(str(vtk_path), str(viz_path), title=f"Mesh: {job_name} (Solver Skipped/Failed)")
+            logger.info("Falling back to internal velocity visualization...")
+            from core.reporting.velocity_viz import generate_velocity_streamlines, generate_mesh_viz
+            
+            viz_success = generate_velocity_streamlines(str(vtk_path), str(viz_path), title=f"Flow: {job_name}")
+            
+            if not viz_success:
+                 logger.warning("Velocity visualization failed (or no data). Falling back to Mesh Viz.")
+                 generate_mesh_viz(str(vtk_path), str(viz_path), title=f"Mesh: {job_name} (Solver Skipped/Failed)")
 
         # 4. Report
 
         if update_status_callback: update_status_callback("Generating Report...")
         
         # Prepare report data
-        converged = result_data.get('converged', True)
+        converged = result_data.get('converged', False)  # Default to False (assume failure unless proven)
         # Update status string for clearer reporting if failed
         report_status = "CONVERGED" if converged else ("SKIPPED" if result_data['solve_time']==0 else "DIVERGED")
 
         report_data = {
             'converged': converged,
-            'status_override': report_status, # Pass this to PDF generator if it supports it, or hacked in via 'converged' flag logic? 
-            # Actually, standard PDF generator uses 'converged' bool to print red/green.
-            # We might want to pass a string or handle it there.
-            # For now, let's stick to boolean but maybe update the logic if possible.
+            'status_override': report_status,
             'solve_time': result_data.get('solve_time', 0),
             'reynolds_number': result_data.get('reynolds', 'N/A'),
             'drag_coefficient': result_data.get('cd', 'N/A'),
             'lift_coefficient': result_data.get('cl', 'N/A'),
+            'viscosity_model': result_data.get('turbulence_model', 'Laminar'),
             'u_inlet': solver_config['u_inlet'][0],
-            'mesh_cells': 0, # TODO: Parse from logs
+            'mesh_cells': result_data.get('num_cells', 0),  # Now extracted from log.checkMesh
             'strategy_name': strategy['name']
         }
         
@@ -1159,7 +1279,7 @@ def run_cfd_simulation(
             solve_time=result_data.get('solve_time', 0)
         )
     except Exception as e:
-        logger.error(f"CFD Solver/Report failed: {e}")
+        logger.exception(f"CFD Solver/Report failed: {e}")
         return SimulationResult(success=False, strategy_name="CFD_OpenFOAM", error=str(e))
     finally:
         # LOG CFD METRICS
@@ -1240,13 +1360,22 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
         job_name = sim_config.job_name
 
     logger.info(f"Starting job: {job_name}")
+    if config_path.exists():
+        logger.info(f"   [Config] Loaded from: {config_path.absolute()}")
+    else:
+        logger.info(f"   [Config] No sidecar found. Using internal defaults.")
+
 
     # DISPATCH: Check for CFD type
-    # Check physics.simulation_type (defaulting to thermal)
     sim_type = "thermal"
     if sim_config and hasattr(sim_config, 'physics'):
         sim_type = getattr(sim_config.physics, 'simulation_type', 'thermal')
     
+    print(f"[DEBUG] Dispatch: Job={job_name}, Config={config_path}, Type={sim_type}")
+    logger.info(f"   [Dispatch] Simulation Type: {sim_type.upper()}")
+    if not config_path.exists():
+        logger.warning(f"   [Dispatch] No sidecar for {job_name}, defaulting to {sim_type}")
+
     if sim_type == 'cfd':
         logger.info(">>> DISPATCHING TO CFD PIPELINE <<<")
         result = run_cfd_simulation(
@@ -1261,7 +1390,8 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
             'success': result.success,
             'vtk_file': result.vtk_file,
             'report_file': result.report_file,
-            'completed_at': datetime.now().isoformat()
+            'completed_at': datetime.now().isoformat(),
+            'error': result.error,
         }
         meta_file = output_path / f"{job_name}_result.json"
         with open(meta_file, 'w') as f:
@@ -1278,18 +1408,30 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
     logger.info(f"Physics: Material={sim_config.physics.material}, "
                 f"Heat={sim_config.physics.heat_load_watts}W")
         
-    strategies_to_try = STRATEGIES
+    is_mesh = is_mesh_file(file_path)
+    if is_mesh:
+        logger.info(f"Direct mesh detected: {input_path.name}. Skipping strategy cascade.")
+        strategies_to_try = [{
+            "name": "Direct_Mesh", 
+            "description": "User-provided mesh",
+            "skip_meshing": True
+        }]
+    else:
+        strategies_to_try = STRATEGIES
     
     try:
-        # Pre-analyze geometry
-        geo_analysis = analyze_cad_geometry(file_path)
-        logger.info("[Geometry Analysis]")
-        logger.info(f"  Diagonal: {geo_analysis.diagonal:.2f} mm")
-        logger.info(f"  Est. Wall: {geo_analysis.estimated_wall_thickness:.2f} mm")
-        
-        if geo_analysis.is_too_small_for_highfi:
-            logger.warning("  [!] Geometry too small/thin for HighFi. Skipping to robust strategies.")
-            strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_Layered"]
+        # Pre-analyze geometry (Only for CAD)
+        if not is_mesh:
+            geo_analysis = analyze_cad_geometry(file_path)
+            logger.info("[Geometry Analysis]")
+            logger.info(f"  Diagonal: {geo_analysis.diagonal:.2f} mm")
+            logger.info(f"  Est. Wall: {geo_analysis.estimated_wall_thickness:.2f} mm")
+            
+            if geo_analysis.is_too_small_for_highfi:
+                logger.warning("  [!] Geometry too small/thin for HighFi. Skipping to robust strategies.")
+                strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_Layered"]
+        else:
+            geo_analysis = None
             
     except Exception as e:
         logger.warning(f"Geometry analysis failed: {e}. Proceeding with full cascade.")
@@ -1304,13 +1446,17 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
         logger.info("-" * 40)
         try:
             # Step 1: Generate mesh
-            update_job_status(f"Meshing ({strategy['name']})...")
-            mesh_file = generate_mesh_with_strategy(
-                file_path, 
-                output_path, 
-                strategy,
-                sim_config=sim_config
-            )
+            if strategy.get('skip_meshing'):
+                logger.info(f"  [Direct] Using input file as mesh: {file_path}")
+                mesh_file = file_path
+            else:
+                update_job_status(f"Meshing ({strategy['name']})...")
+                mesh_file = generate_mesh_with_strategy(
+                    file_path, 
+                    output_path, 
+                    strategy,
+                    sim_config=sim_config
+                )
             
             # Step 2: Run Solver (Dispatch)
             sim_type = "thermal"
@@ -1520,7 +1666,21 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
         f.write("\n".join(report_content))
 
     logger.error(f"   Failure report written to: {failure_file}")
-        
+
+    # WRITE METADATA FOR FAILURE (Ensures result.json exists for UI/Watchers)
+    metadata = {
+        'job_name': job_name,
+        'input_file': file_path,
+        'strategy': "ALL_FAILED",
+        'success': False,
+        'error': error_msg,
+        'failed_strategies': failed_strategies,
+        'completed_at': datetime.now().isoformat(),
+    }
+    meta_file = output_path / f"{job_name}_result.json"
+    with open(meta_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
     return SimulationResult(
         success=False,
         strategy_name="ALL_FAILED",

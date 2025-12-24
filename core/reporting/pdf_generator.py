@@ -103,6 +103,15 @@ class PDFReportGenerator:
         elif delta_t < 0.1:
             grade = "NO CONDUCTION"
             grade_color = self.colors['warning']
+        
+        # Stability Check (Courant Number)
+        courant = data.get('courant_max', 0.0)
+        if courant > 2.0:
+            grade = "STABILITY WARNING (Co > 2)"
+            grade_color = self.colors['warning']
+        elif courant > 10.0:
+            grade = "DIVERGED / UNSTABLE (Co > 10)"
+            grade_color = self.colors['danger']
             
         grade_style = ParagraphStyle(
             'GradeParams',
@@ -122,6 +131,7 @@ class PDFReportGenerator:
             ['Max Temperature', f"{max_temp:.1f} °C"],
             ['Min Temperature', f"{min_temp:.1f} °C"],
             ['Range (Delta T)', f"{delta_t:.1f} °C"],
+            ['Max Courant No', f"{data.get('courant_max', 0.0):.3f} (Stability)"],
             ['Mesh Elements', f"{data.get('num_elements', 0):,}"],
             ['Solve Time', f"{data.get('solve_time', 0):.2f} s"],
             ['Total Heat Flux', f"{data.get('heat_flux', 0):.1f} W" if data.get('heat_flux') else "N/A"],

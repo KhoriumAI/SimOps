@@ -44,8 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Supported CAD file extensions
-SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs', '.brep'}
+# Supported CAD and Mesh file extensions
+SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs', '.brep', '.msh', '.vtk', '.vtu', '.unv', '.inp'}
 
 
 class PathHandler:
@@ -431,6 +431,8 @@ def run_watcher():
     
     try:
         while True:
+            # Check for Emergency Stop
+            check_emergency_stop(input_dir, queue)
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down watcher...")
@@ -438,6 +440,63 @@ def run_watcher():
         
     observer.join()
     logger.info("Watcher stopped")
+
+
+def check_emergency_stop(input_dir: Path, queue: Queue):
+    """
+    Checks for presence of 'STOP' or 'STOP_ALL' file.
+    If found:
+      1. Purge Redis Queue
+      2. Kill Worker Containers
+      3. Delete Stop File
+    """
+    stop_file = input_dir / "STOP"
+    stop_all = input_dir / "STOP_ALL"
+    
+    target_file = None
+    if stop_file.exists(): target_file = stop_file
+    elif stop_all.exists(): target_file = stop_all
+    
+    if target_file:
+        logger.warning(f"🛑 EMERGENCY STOP DETECTED: {target_file.name}")
+        
+        # 1. Purge Queue
+        try:
+            count = queue.empty()
+            logger.info(f"   -> Purged {count} pending jobs from queue")
+        except Exception as e:
+            logger.error(f"   -> Failed to purge queue: {e}")
+            
+        # 2. Kill Docker Workers
+        # We assume workers are named 'simops-worker-N'
+        import subprocess
+        try:
+            # Find containers
+            cmd = "docker ps -q --filter name=simops-worker"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            container_ids = result.stdout.strip().split()
+            
+            if container_ids:
+                logger.info(f"   -> Found {len(container_ids)} active workers. Stopping...")
+                kill_cmd = f"docker kill {' '.join(container_ids)}"
+                subprocess.run(kill_cmd, shell=True, check=True)
+                logger.info("   -> ✅ Workers stopped.")
+            else:
+                logger.info("   -> No active workers found.")
+                
+        except Exception as e:
+            logger.error(f"   -> Failed to stop duplicate workers: {e}")
+            
+        # 3. Clean up
+        try:
+            target_file.unlink()
+            logger.info(f"   -> Removed stop signal file.")
+        except Exception as e:
+            logger.error(f"   -> Failed to remove stop file: {e}")
+            
+        logger.info("========================================")
+        logger.info("   SYSTEM HALTED BY USER")
+        logger.info("========================================")
 
 
 if __name__ == '__main__':

@@ -62,7 +62,7 @@ temp_*
 # *.igs
 
 # Test files
-test_*.py
+# test_*.py
 reproduce_*.py
 fix_*.py
 *_working.py

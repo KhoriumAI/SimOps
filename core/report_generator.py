@@ -24,6 +24,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+from .visualization.paraview_driver import ParaViewDriver
 
 class SimOpsReportGenerator:
     """Generates professional PDF reports from simulation results"""
@@ -65,6 +66,9 @@ class SimOpsReportGenerator:
             'dark': '#212529',       # Dark / Text
             'light': '#f8f9fa'       # Light / Background
         }
+        
+        # Initialize ParaView Driver
+        self.paraview = ParaViewDriver()
 
     def generate_enhanced_plots(self) -> Dict[str, str]:
         """
@@ -159,6 +163,10 @@ class SimOpsReportGenerator:
             self._add_header(fig_summary, "Thermal Analysis Report")
             
             # 2. Key Metrics Table (Left)
+            courant = self.results.get('courant_max', 0.0)
+            stability_str = "PASSED" if courant < 2.0 else "WARNING"
+            if courant == 0.0: stability_str = "N/A" # For non-CFD or parsing failure
+            
             stats_text = (
                 f"Job Name:     {self.job_name}\n"
                 f"Date:         {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
@@ -170,11 +178,12 @@ class SimOpsReportGenerator:
                 f"\n"
                 f"Min Temp:     {self.results.get('min_temp', 0):.1f} K\n"
                 f"Max Temp:     {self.results.get('max_temp', 0):.1f} K\n"
-                f"Delta T:      {self.results.get('max_temp', 0) - self.results.get('min_temp', 0):.1f} K"
+                f"\n"
+                f"Stability (Courant): {courant:.3f} ({stability_str})"
             )
             
             fig_summary.text(0.05, 0.65, "Simulation Statistics", fontsize=14, fontweight='bold', color=self.colors['primary'])
-            fig_summary.text(0.05, 0.40, stats_text, fontsize=11, fontfamily='monospace', va='top')
+            fig_summary.text(0.05, 0.38, stats_text, fontsize=11, fontfamily='monospace', va='top')
             
             # 3. Temperature Distribution Histogram (Bottom Left)
             ax_hist = fig_summary.add_axes([0.05, 0.1, 0.35, 0.25])
@@ -222,6 +231,36 @@ class SimOpsReportGenerator:
             pdf.savefig(fig_summary)
             plt.close(fig_summary)
             
+            # --- PAGE 1.5: 3D Visualization (If available) ---
+            if self.paraview.is_available() and self.results.get('vtk_file'):
+                vtk_file = self.results['vtk_file']
+                # Determine seed point (center of domain or inlet)
+                # For now, use domain center
+                center = np.mean(self.coords, axis=0).tolist()
+                bbox_diag = np.linalg.norm(np.max(self.coords, axis=0) - np.min(self.coords, axis=0))
+                radius = bbox_diag * 0.1
+                
+                streamline_png = self.output_dir / f"{self.job_name}_streamlines.png"
+                
+                success = self.paraview.generate_streamlines(
+                    vtk_file, str(streamline_png), center, radius
+                )
+                
+                if success:
+                    # Create a new page for the 3D render
+                    fig_3d = plt.figure(figsize=(11.69, 8.27))
+                    self._add_header(fig_3d, "3D Flow Visualization")
+                    
+                    # Display the PNG
+                    ax_3d = fig_3d.add_axes([0.05, 0.1, 0.9, 0.75])
+                    img = plt.imread(streamline_png)
+                    ax_3d.imshow(img)
+                    ax_3d.axis('off')
+                    ax_3d.set_title("Streamlines (Velocity magnitude colored)", fontsize=14)
+                    
+                    pdf.savefig(fig_3d)
+                    plt.close(fig_3d)
+
             # --- PAGE 2: Detailed Views ---
             fig_detail = plt.figure(figsize=(11.69, 8.27))
             self._add_header(fig_detail, "Detailed Temperature Maps")

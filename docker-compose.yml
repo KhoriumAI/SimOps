@@ -33,6 +33,7 @@ x-common-env: &common-env
   INPUT_DIR: /input
   OUTPUT_DIR: /output
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PYTHONUNBUFFERED: 1
   TZ: ${TZ:-UTC}
 
 services:

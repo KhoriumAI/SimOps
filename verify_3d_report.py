@@ -10,8 +10,8 @@ sys.path.append(os.getcwd())
 from simops_worker import run_simulation
 
 # Paths
-cad_file = r"c:\Users\Owner\Downloads\Simops\input\Cylinder_TrackA.step"
-sidecar_file = r"c:\Users\Owner\Downloads\Simops\input\Cylinder_TrackA.json"
+cad_file = r"c:\Users\Owner\Downloads\Simops\temp_test\Verify_CFD.step"
+sidecar_file = r"c:\Users\Owner\Downloads\Simops\temp_test\Verify_CFD.json"
 output_dir = r"c:\Users\Owner\Downloads\Simops\output"
 
 # Ensure output dir exists
@@ -21,11 +21,10 @@ Path(output_dir).mkdir(parents=True, exist_ok=True)
 sidecar_data = {
     "version": "1.0",
     "physics": {
-        "material": "Aluminum 6061",
-        "heat_source_temperature": 400.0,
-        "ambient_temperature": 300.0,
-        "convection_coeff": 150.0,
-        "unit_scaling": 1.0
+        "simulation_type": "cfd",
+        "inlet_velocity": 45.0,
+        "kinematic_viscosity": 1.5e-5,
+        "material": "Air"
     }
 }
 with open(sidecar_file, 'w') as f:

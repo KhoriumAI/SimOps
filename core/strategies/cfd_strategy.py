@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
+try:
+    from core.geometry.wind_tunnel import VirtualWindTunnel
+except ImportError:
+    VirtualWindTunnel = None
+
 @dataclass
 class CFDMeshConfig:
     """Configuration for CFD mesh generation"""
@@ -36,6 +41,9 @@ class CFDMeshConfig:
     mesh_size_factor: float = 1.0       # Multiplier for auto mesh sizing
     min_mesh_size: float = None         # Minimum element size (auto if None)
     max_mesh_size: float = None         # Maximum element size (auto if None)
+    
+    # External Aerodynamics
+    virtual_wind_tunnel: bool = True    # Auto-generate fluid domain around object
     
     # Optimization
     smoothing_steps: int = 10           # Mesh smoothing iterations
@@ -61,6 +69,7 @@ class CFDMeshStrategy:
         self.geometry_info: Dict = {}
         self.is_stl = False
         self.tagging_rules = []
+        self.wind_tunnel_data = None  # Store WT data if generated
         
     def _log(self, message: str):
         if self.verbose:
@@ -78,6 +87,7 @@ class CFDMeshStrategy:
         self._log(f"Input:  {cad_file}")
         self._log(f"Output: {output_file}")
         self._log(f"Layers: {config.num_layers}, Growth: {config.growth_rate}")
+        self._log(f"Wind Tunnel: {config.virtual_wind_tunnel}")
         self._log("")
         
         try:
@@ -91,18 +101,57 @@ class CFDMeshStrategy:
             self._log("[1/5] Loading CAD geometry...")
             self._load_cad(cad_file)
             
+            
+            # Step 1.5: Virtual Wind Tunnel (External Aero)
+            self._log(f"[Debug] Wind Tunnel Check: enabled={config.virtual_wind_tunnel}, have_class={VirtualWindTunnel is not None}, is_stl={self.is_stl}")
+            
+            if config.virtual_wind_tunnel and VirtualWindTunnel and not self.is_stl:
+                self._log("[1.5/5] Generating Virtual Wind Tunnel Domain...")
+                try:
+                    # Get object volumes to wrap
+                    volumes = gmsh.model.getEntities(3)
+                    if not volumes:
+                         # Attempt to heal/find volumes if empty (common with some STEPs)
+                         gmsh.model.occ.healShapes()
+                         gmsh.model.occ.synchronize()
+                         volumes = gmsh.model.getEntities(3)
+                    
+                    if volumes:
+                        wt = VirtualWindTunnel(log_func=self._log)
+                        self.wind_tunnel_data = wt.generate_domain(volumes)
+                        
+                        # Set tagging rules from wind tunnel data
+                        # This overrides the heuristic auto-tagger
+                        self._apply_wind_tunnel_tags()
+                    else:
+                        self._log("[!] No volumes found for Wind Tunnel generation. Skipping.")
+                except Exception as e:
+                    self._log(f"[!] Wind Tunnel generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                self._log("[1.5/5] Virtual Wind Tunnel SKIPPED (disabled or conditions not met)")
+            
             # Step 2: Analyze geometry
             self._log("[2/5] Analyzing geometry...")
             self._analyze_geometry(config)
 
             # Step 2.5: Auto-Tag for Golden Template (Day 1)
-            self._log("[2.5/5] Applying Golden Template Tags...")
-            self._auto_tag_geometry()
+            if not self.wind_tunnel_data:
+                self._log("[2.5/5] Applying Golden Template Tags (Heuristic)...")
+                self._auto_tag_geometry()
+            else:
+                self._log("[2.5/5] Using Wind Tunnel Tags (Deterministic)...")
+                # Tags already applied in _apply_wind_tunnel_tags()
             
             # Step 3: Set up boundary layers
             self._log("[3/5] Configuring boundary layers...")
-            bl_success = self._setup_boundary_layers(config)
-            if not bl_success:
+            bl_field_tag = self._setup_boundary_layers(config)
+            
+            # Step 3.5: Setup BOI (Body of Influence) - Combine with BL if needed
+            self._setup_boi_field(config, bl_field_tag)
+            
+            if bl_field_tag is None and not self.wind_tunnel_data:
                 self._log("[!] BoundaryLayer field failed or N/A. Falling back to Distance+Threshold.")
                 self._setup_fallback_fields(config)
             
@@ -231,7 +280,7 @@ class CFDMeshStrategy:
         if config.min_mesh_size is None:
             config.min_mesh_size = diagonal / 100.0
         if config.max_mesh_size is None:
-            config.max_mesh_size = diagonal / 20.0
+            config.max_mesh_size = diagonal / 50.0 # Coarser default (2% of diagonal)
             
         # ADAPTIVE FIRST LAYER HEIGHT
         if config.first_layer_height is None:
@@ -317,6 +366,7 @@ class CFDMeshStrategy:
         volumes = gmsh.model.getEntities(dim=3)
         
         tagged_surfaces = set()
+        tagged_volumes = set()
         
         # ---------------------------------------------------------
         # 1. Dynamic Rules (Sidecar) - Highest Priority
@@ -330,6 +380,11 @@ class CFDMeshStrategy:
                 selector = rule.selector
                 matches = []
                 
+                # Determine Candidates
+                candidates = surfaces if rule.entity_type == 'surface' else volumes
+                tag_dim = 2 if rule.entity_type == 'surface' else 3
+                current_tagged = tagged_surfaces if rule.entity_type == 'surface' else tagged_volumes
+                
                 # Selection Logic
                 if selector.type == "z_min" or selector.type == "z_max":
                     # Get global bbox
@@ -340,19 +395,20 @@ class CFDMeshStrategy:
                     if selector.tolerance:
                          tol = selector.tolerance
                          
-                    for dim, tag in surfaces:
+                    for dim, tag in candidates:
                         s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
                         if abs(s_zmin - target_z) < tol and abs(s_zmax - target_z) < tol:
                             matches.append(tag)
                             
                 elif selector.type == "all_remaining":
-                     for dim, tag in surfaces:
-                         if tag not in tagged_surfaces:
+                     for dim, tag in candidates:
+                         if tag not in current_tagged:
                              matches.append(tag)
+
                 elif selector.type == "box":
                      if selector.bounds and len(selector.bounds) == 6:
                          b = selector.bounds
-                         for dim, tag in surfaces:
+                         for dim, tag in candidates:
                             s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
                             if (s_xmin >= b[0] and s_xmax <= b[3] and
                                 s_ymin >= b[1] and s_ymax <= b[4] and
@@ -360,11 +416,15 @@ class CFDMeshStrategy:
                                 matches.append(tag)
                                 
                 if matches:
+                    p = gmsh.model.addPhysicalGroup(tag_dim, matches)
+                    gmsh.model.setPhysicalName(tag_dim, p, rule.tag_name)
+                    
                     if rule.entity_type == 'surface':
-                        p = gmsh.model.addPhysicalGroup(2, matches)
-                        gmsh.model.setPhysicalName(2, p, rule.tag_name)
                         tagged_surfaces.update(matches)
                         self._log(f"    -> Tagged {len(matches)} surfaces as '{rule.tag_name}'")
+                    else:
+                        tagged_volumes.update(matches)
+                        self._log(f"    -> Tagged {len(matches)} volumes as '{rule.tag_name}'")
                         
             # If sidecar rules were applied, we generally stop here or merge.
             # Allowing fallthrough to "Semantic" might adhere to "Fill in the blanks" philosophy.
@@ -551,13 +611,99 @@ class CFDMeshStrategy:
                 except:
                     pass
                     
+            # We don't set as BoundaryLayer here immediately if we want to combine with BOI.
+            # But setAsBoundaryLayer is unique (it's not just background mesh). 
+            # It needs to be registered as *the* BL field.
             gmsh.model.mesh.field.setAsBoundaryLayer(field_tag)
             self._log(f"  [OK] Gmsh BoundaryLayer field configured (Target thickness: {total_thickness:.3f})")
-            return True
+            return field_tag # Return tag for potential combination
             
         except Exception as e:
             self._log(f"  Warning: BoundaryLayer setup failed: {e}")
-            return False
+            return None
+
+    def _apply_wind_tunnel_tags(self):
+        """Apply Physical Groups from Wind Tunnel Data"""
+        data = self.wind_tunnel_data
+        if not data: return
+        
+        boundaries = data['boundaries']
+        
+        # 1. Inlet
+        if boundaries['inlet']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['inlet'])
+            gmsh.model.setPhysicalName(2, p, "BC_Inlet")
+            self._log(f"  [Tag] Assigned 'BC_Inlet' to {len(boundaries['inlet'])} surfaces")
+            
+        # 2. Outlet
+        if boundaries['outlet']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['outlet'])
+            gmsh.model.setPhysicalName(2, p, "BC_Outlet")
+            self._log(f"  [Tag] Assigned 'BC_Outlet' to {len(boundaries['outlet'])} surfaces")
+            
+        # 3. Walls (Far Field)
+        # For Virtual Wind Tunnel, these are usually "Slip" walls or Openings.
+        # But "BC_Wall_Adiabatic" implies no-slip usually?
+        # Typically "Opening" or "Symmetry" or "Slip".
+        # Let's use specific name "BC_FarField" -> Solver maps to slip/symmetry
+        if boundaries['walls']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['walls'])
+            gmsh.model.setPhysicalName(2, p, "BC_FarField") # Solver must handle this!
+            self._log(f"  [Tag] Assigned 'BC_FarField' to {len(boundaries['walls'])} surfaces")
+            
+        # 4. Object (No-Slip Wall)
+        if boundaries['object']:
+            # This is the actual car/plane/object
+            p = gmsh.model.addPhysicalGroup(2, boundaries['object'])
+            gmsh.model.setPhysicalName(2, p, "BC_Wall_Object")
+            self._log(f"  [Tag] Assigned 'BC_Wall_Object' to {len(boundaries['object'])} surfaces")
+            
+        # 5. Fluid Volume
+        fluid_tag = data['fluid_volume']
+        p_vol = gmsh.model.addPhysicalGroup(3, [fluid_tag])
+        gmsh.model.setPhysicalName(3, p_vol, "Material_Fluid") # Named Fluid not Aluminum!
+        self._log(f"  [Tag] Assigned 'Material_Fluid' to volume {fluid_tag}")
+
+    def _setup_boi_field(self, config: CFDMeshConfig, bl_field_tag: Optional[int] = None):
+        """Setup Body of Influence (BOI) sizing field"""
+        if not self.wind_tunnel_data or 'boi_coords' not in self.wind_tunnel_data:
+            return
+            
+        self._log("[Mesh] Configuring Body of Influence (BOI)...")
+        boi = self.wind_tunnel_data['boi_coords']
+        
+        # Create Box Field
+        box_field = gmsh.model.mesh.field.add("Box")
+        gmsh.model.mesh.field.setNumber(box_field, "VIn", config.min_mesh_size) # Fine inside
+        gmsh.model.mesh.field.setNumber(box_field, "VOut", config.max_mesh_size) # Coarse outside
+        
+        gmsh.model.mesh.field.setNumber(box_field, "XMin", boi['x_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "XMax", boi['x_max'])
+        gmsh.model.mesh.field.setNumber(box_field, "YMin", boi['y_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "YMax", boi['y_max'])
+        gmsh.model.mesh.field.setNumber(box_field, "ZMin", boi['z_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "ZMax", boi['z_max'])
+        
+        # Thickness "T" for transition - let's make it 10% of BOI size
+        gmsh.model.mesh.field.setNumber(box_field, "Thickness", (boi['x_max'] - boi['x_min']) * 0.1)
+        
+        self._log(f"  [BOI] Box defined: {boi['x_min']:.2f} to {boi['x_max']:.2f} (Size: {config.min_mesh_size:.4f})")
+        
+        # Combine with BL field if exists?
+        # Actually, for 3D meshing, we usually want the background mesh to satisfy ALL constraints.
+        # BoundaryLayer field creates the anisotropy.
+        # The Background Mesh Size field controls the isotropic size.
+        # We can set the Box field as Background Mesh.
+        # The BoundaryLayer field is separate (setAsBoundaryLayer).
+        # Gmsh 4.x usually allows both.
+        
+        final_bg_field = box_field
+        
+        # If we have other fields (like Distance fallback), we might need Min.
+        # For now, just setting Box as BackgroundMesh works for the volume.
+        
+        gmsh.model.mesh.field.setAsBackgroundMesh(final_bg_field)
+        self._log("  [OK] BOI set as Background Mesh")
 
     def _setup_fallback_fields(self, config: CFDMeshConfig):
         """Fallback to Distance + Threshold fields for refinement without guaranteed prisms"""

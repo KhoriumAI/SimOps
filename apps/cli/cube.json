@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "job_name": "cube",
+  "physics": {
+    "material": "Aluminum_6061_T6",
+    "heat_load_watts": 0.0,
+    "inlet_velocity": 42.7,
+    "ambient_temp_c": 25.0,
+    "heat_source_temperature": 373.0,
+    "ambient_temperature": 293.0,
+    "thermal_conductivity": null,
+    "density": null,
+    "specific_heat": null,
+    "convection_coeff": 0.0,
+    "transient": false,
+    "time_step": 2.0,
+    "duration": 60.0,
+    "initial_temperature": null,
+    "fix_hot_boundary": true,
+    "fix_cold_boundary": false,
+    "heat_source_at_z_min": true,
+    "unit_scaling": 1.0,
+    "surface_flux_wm2": null,
+    "volumetric_heat_wm3": null,
+    "simulation_type": "cfd",
+    "kinematic_viscosity": 1.5e-05,
+    "gravity_load_g": 0.0,
+    "tip_load": null,
+    "youngs_modulus": null,
+    "poissons_ratio": null
+  },
+  "meshing": {
+    "second_order": false,
+    "mesh_size_multiplier": 2.0
+  },
+  "material_definitions": {},
+  "tagging_rules": [],
+  "validate_mesh": false
+}
