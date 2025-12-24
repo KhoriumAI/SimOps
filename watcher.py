@@ -44,8 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Supported CAD file extensions
-SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs', '.brep'}
+# Supported CAD and Mesh file extensions
+SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs', '.brep', '.msh', '.vtk', '.vtu', '.unv', '.inp'}
 
 
 class PathHandler:
@@ -99,10 +99,24 @@ class SimOpsEventHandler(FileSystemEventHandler):
             
         file_path = PathHandler.normalize(event.src_path)
         
-        # Only process if not already queued
         if str(file_path) not in self.processing and str(file_path) not in self.processed:
             self._process_file(file_path)
+
+    def on_deleted(self, event):
+        """Handle file deletion - allow re-processing if added again"""
+        if event.is_directory:
+            return
             
+        file_path = PathHandler.normalize(event.src_path)
+        str_path = str(file_path)
+        
+        if str_path in self.processed:
+            # logger.info(f"♻️  File removed, clearing cache: {file_path.name}")
+            self.processed.discard(str_path)
+            
+        if str_path in self.processing:
+            self.processing.discard(str_path)
+    
     def _process_file(self, file_path: Path):
         """Process a new CAD file"""
         # Check extension
@@ -111,6 +125,10 @@ class SimOpsEventHandler(FileSystemEventHandler):
             
         # Skip temp files
         if file_path.name.startswith('.') or file_path.name.startswith('~'):
+            return
+
+        # Skip already used files
+        if file_path.name.startswith('USED_'):
             return
             
         str_path = str(file_path)
@@ -143,22 +161,95 @@ class SimOpsEventHandler(FileSystemEventHandler):
         
         logger.info(f"📥 New CAD file detected: {file_path.name}")
         
-        # Check for sidecar presence (just for logging)
-        sidecar = file_path.with_suffix('.json')
-        if sidecar.exists():
-             logger.info(f"   + Sidecar config found: {sidecar.name}")
+        # -------------------------------------------------------------
+        # 3. Flexible Sidecar Detection
+        # -------------------------------------------------------------
+        # Look for a config file.
+        # Priority 1: Exact Match (file.step -> file.json)
+        # Priority 2: Temporal Match (Any *.json modified within 15s)
+        
+        config_path = None
+        
+        # 1. Exact Match
+        exact_sidecar = file_path.with_suffix('.json')
+        if exact_sidecar.exists():
+            logger.info(f"   + Config found (Exact): {exact_sidecar.name}")
+            config_path = exact_sidecar
+        else:
+            # 2. Temporal Match
+            # Scan directory for OTHER json files
+            try:
+                cad_mtime = file_path.stat().st_mtime
+                candidates = []
+                for f in file_path.parent.glob('*.json'):
+                    if f.name.startswith('USED_'): continue # Skip used
+                    if f == exact_sidecar: continue 
+                    
+                    try:
+                        f_mtime = f.stat().st_mtime
+                        delta = abs(f_mtime - cad_mtime)
+                        if delta < 15.0: # 15 second window
+                            candidates.append((delta, f))
+                    except: pass
+                
+                if candidates:
+                    # Sort by closest time
+                    candidates.sort(key=lambda x: x[0])
+                    best_match = candidates[0][1]
+                    logger.info(f"   + Config found (Temporal +/- {candidates[0][0]:.1f}s): {best_match.name}")
+                    config_path = best_match
+            except Exception as e:
+                logger.warning(f"Error during temporal scan: {e}")
+
+        # -------------------------------------------------------------
+        # 4. Renaming Strategy ("USED_")
+        # -------------------------------------------------------------
+        # We rename the files BEFORE queuing so the worker works on the stable "USED_" path
+        # and checking the folder prevents re-loops.
+        
+        final_cad_path = file_path
+        final_config_path = config_path
+
+        try:
+            # Rename CAD
+            used_cad_name = f"USED_{file_path.name}"
+            used_cad_path = file_path.with_name(used_cad_name)
+            
+            # Simple rename
+            os.rename(file_path, used_cad_path)
+            final_cad_path = used_cad_path
+            logger.info(f"   -> Renamed to {used_cad_path.name}")
+            
+            # Rename Config (if found)
+            if config_path:
+                used_config_name = f"USED_{config_path.name}"
+                used_config_path = config_path.with_name(used_config_name)
+                os.rename(config_path, used_config_path)
+                final_config_path = used_config_path
+                logger.info(f"   -> Renamed config to {used_config_path.name}")
+                
+        except OSError as e:
+            logger.error(f"Failed to rename input files: {e}")
+            logger.warning("   -> Proceeding with ORIGINAL filenames (Read-only input detected)")
+            # Fallback to original paths so simulation still runs
+            final_cad_path = file_path
+            final_config_path = config_path
+
+        # Queue the job with (potentially new, potentially original) paths
+
         
         # Queue the job
         try:
             job = self.queue.enqueue(
                 'simops_worker.run_simulation',
-                str(file_path),
+                str(final_cad_path),
                 str(self.output_dir),
+                config_path=str(final_config_path) if final_config_path else None,
                 job_timeout=1800,  # 30 min timeout
                 result_ttl=86400,  # Keep result for 24h
                 failure_ttl=86400,
                 meta={
-                    'filename': file_path.name,
+                    'filename': file_path.name, # Keep original name for display
                     'queued_at': datetime.now().isoformat(),
                 }
             )
@@ -340,6 +431,8 @@ def run_watcher():
     
     try:
         while True:
+            # Check for Emergency Stop
+            check_emergency_stop(input_dir, queue)
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down watcher...")
@@ -347,6 +440,63 @@ def run_watcher():
         
     observer.join()
     logger.info("Watcher stopped")
+
+
+def check_emergency_stop(input_dir: Path, queue: Queue):
+    """
+    Checks for presence of 'STOP' or 'STOP_ALL' file.
+    If found:
+      1. Purge Redis Queue
+      2. Kill Worker Containers
+      3. Delete Stop File
+    """
+    stop_file = input_dir / "STOP"
+    stop_all = input_dir / "STOP_ALL"
+    
+    target_file = None
+    if stop_file.exists(): target_file = stop_file
+    elif stop_all.exists(): target_file = stop_all
+    
+    if target_file:
+        logger.warning(f"🛑 EMERGENCY STOP DETECTED: {target_file.name}")
+        
+        # 1. Purge Queue
+        try:
+            count = queue.empty()
+            logger.info(f"   -> Purged {count} pending jobs from queue")
+        except Exception as e:
+            logger.error(f"   -> Failed to purge queue: {e}")
+            
+        # 2. Kill Docker Workers
+        # We assume workers are named 'simops-worker-N'
+        import subprocess
+        try:
+            # Find containers
+            cmd = "docker ps -q --filter name=simops-worker"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            container_ids = result.stdout.strip().split()
+            
+            if container_ids:
+                logger.info(f"   -> Found {len(container_ids)} active workers. Stopping...")
+                kill_cmd = f"docker kill {' '.join(container_ids)}"
+                subprocess.run(kill_cmd, shell=True, check=True)
+                logger.info("   -> ✅ Workers stopped.")
+            else:
+                logger.info("   -> No active workers found.")
+                
+        except Exception as e:
+            logger.error(f"   -> Failed to stop duplicate workers: {e}")
+            
+        # 3. Clean up
+        try:
+            target_file.unlink()
+            logger.info(f"   -> Removed stop signal file.")
+        except Exception as e:
+            logger.error(f"   -> Failed to remove stop file: {e}")
+            
+        logger.info("========================================")
+        logger.info("   SYSTEM HALTED BY USER")
+        logger.info("========================================")
 
 
 if __name__ == '__main__':

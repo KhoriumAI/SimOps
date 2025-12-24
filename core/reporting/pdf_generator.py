@@ -103,6 +103,15 @@ class PDFReportGenerator:
         elif delta_t < 0.1:
             grade = "NO CONDUCTION"
             grade_color = self.colors['warning']
+        
+        # Stability Check (Courant Number)
+        courant = data.get('courant_max', 0.0)
+        if courant > 2.0:
+            grade = "STABILITY WARNING (Co > 2)"
+            grade_color = self.colors['warning']
+        elif courant > 10.0:
+            grade = "DIVERGED / UNSTABLE (Co > 10)"
+            grade_color = self.colors['danger']
             
         grade_style = ParagraphStyle(
             'GradeParams',
@@ -119,11 +128,14 @@ class PDFReportGenerator:
         metrics_data = [
             ['Metric', 'Value'],
             ['Strategy Used', data.get('strategy_name', 'Unknown')],
-            ['Max Temperature', f"{max_temp:.1f} K"],
-            ['Min Temperature', f"{min_temp:.1f} K"],
-            ['Range (Delta T)', f"{delta_t:.1f} K"],
+            ['Max Temperature', f"{max_temp:.1f} °C"],
+            ['Min Temperature', f"{min_temp:.1f} °C"],
+            ['Range (Delta T)', f"{delta_t:.1f} °C"],
+            ['Max Courant No', f"{data.get('courant_max', 0.0):.3f} (Stability)"],
             ['Mesh Elements', f"{data.get('num_elements', 0):,}"],
-            ['Solve Time', f"{data.get('solve_time', 0):.2f} s"]
+            ['Solve Time', f"{data.get('solve_time', 0):.2f} s"],
+            ['Total Heat Flux', f"{data.get('heat_flux', 0):.1f} W" if data.get('heat_flux') else "N/A"],
+            ['Convergence', f"{data.get('convergence', 'N/A')} Steps"]
         ]
         
         t = Table(metrics_data, colWidths=[2.5*inch, 2.5*inch])
@@ -137,7 +149,7 @@ class PDFReportGenerator:
             ('BACKGROUND', (0, 1), (-1, -1), self.colors['light']),
             ('GRID', (0, 0), (-1, -1), 1, self.colors['secondary']),
             ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 11),  # Increased from 10
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, self.colors['light']])
         ]))
         story.append(t)
@@ -154,13 +166,19 @@ class PDFReportGenerator:
                 display_width = 6.5 * inch
                 display_height = display_width * aspect
                 
-                # If too tall, scale down
-                if display_height > 9 * inch:
-                    display_height = 9 * inch
+                # If too tall, scale down to ensured fit on page
+                if display_height > 4.5 * inch:
+                    display_height = 4.5 * inch
                     display_width = display_height / aspect
                     
                 img.drawWidth = display_width
                 img.drawHeight = display_height
+                
+                # If this is NOT the first image, add a page break and heading
+                if img_path != image_paths[0]:
+                    story.append(PageBreak())
+                    story.append(Paragraph("Transient Analysis Results", heading_style))
+                
                 story.append(img)
                 story.append(Spacer(1, 20))
             else:

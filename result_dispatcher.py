@@ -49,7 +49,7 @@ class ResultDispatcher:
             files_to_copy = []
             
             # Add files from result dict if they exist
-            for key in ['mesh_file', 'vtk_file', 'png_file', 'report_file']:
+            for key in ['mesh_file', 'vtk_file', 'png_file', 'pdf_file', 'transient_png']:
                 if path_str := job_result.get(key):
                     files_to_copy.append(Path(path_str))
                     

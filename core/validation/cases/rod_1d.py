@@ -39,7 +39,11 @@ class Rod1DCase(BenchmarkCase):
         return {
             "heat_source_temperature": self.T_hot,
             "ambient_temperature": self.T_cold,
-            "thermal_conductivity": 150.0
+            "thermal_conductivity": 150.0,
+            "transient": False, # Steady State
+            "heat_source_at_z_min": False, # Analytical expects Hot at Top (Z=L)
+            "fix_cold_boundary": True, # Fix Bottom (Z=0) to T_cold (300K)
+            "convection_coeff": 0.0 # Adiabatic sides
         }
         
     def get_analytical_solution(self, x: float, y: float, z: float) -> float:

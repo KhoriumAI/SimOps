@@ -67,7 +67,7 @@ class ModernMeshGenGUI(QMainWindow):
         # Helpers
         self.ui_builder = UIBuilder(self)
         self.workflow = WorkflowManager(self)
-        self.events = EventHandler(self)
+        self.events = EventHandler(self, self.ui_builder)
 
         # Signals
         self.worker.signals.log.connect(self.add_log)
@@ -183,7 +183,7 @@ class ModernMeshGenGUI(QMainWindow):
         if q: self.quality_data_ranges['SICN'] = (min(q.values()), max(q.values()))
         if g: self.quality_data_ranges['Gamma'] = (min(g.values()), max(g.values()))
         if s: self.quality_data_ranges['Skewness'] = (min(s.values()), max(s.values()))
-        if a: self.quality_data_ranges['Aspect Ratio'] = (min(a.values()), min(max(a.values()), 20.0))
+        if a: self.quality_data_ranges['Aspect Ratio'] = (min(a.values()), min(max(a.values()), 10.0))
         
         metric = self.viz_metric_combo.currentText()
         d_min, d_max = self.quality_data_ranges.get(metric, (0.0, 1.0))

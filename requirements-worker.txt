@@ -15,9 +15,12 @@ scipy>=1.11.0
 
 # Visualization
 matplotlib>=3.7.0
+meshio>=5.3.0
+pyvista>=0.43.0
+vtk>=9.3.0
 
 # Reporting
 reportlab>=4.0.0
 
-# Configuration & Validation
+# Data Validation
 pydantic>=2.0.0

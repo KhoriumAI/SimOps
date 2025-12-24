@@ -128,6 +128,10 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
                 
             self.OnMouseMove()
 
+            # Check dynamic edge visibility based on zoom level
+            if self.parent and hasattr(self.parent, 'check_edge_visibility'):
+                self.parent.check_edge_visibility()
+
     def paint_at_cursor(self):
         """Paint surfaces at cursor location"""
         if not self.parent or not hasattr(self.parent, 'on_paint_at_cursor'):
@@ -138,3 +142,13 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
 
         # Pass to parent for handling
         self.parent.on_paint_at_cursor(x, y)
+
+    def OnMouseWheelForward(self):
+        super().OnMouseWheelForward()
+        if self.parent and hasattr(self.parent, 'check_edge_visibility'):
+            self.parent.check_edge_visibility()
+
+    def OnMouseWheelBackward(self):
+        super().OnMouseWheelBackward()
+        if self.parent and hasattr(self.parent, 'check_edge_visibility'):
+            self.parent.check_edge_visibility()

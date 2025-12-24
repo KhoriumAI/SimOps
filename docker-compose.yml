@@ -33,6 +33,7 @@ x-common-env: &common-env
   INPUT_DIR: /input
   OUTPUT_DIR: /output
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PYTHONUNBUFFERED: 1
   TZ: ${TZ:-UTC}
 
 services:
@@ -85,7 +86,7 @@ services:
       POLL_INTERVAL: ${POLL_INTERVAL:-2}
     user: root
     volumes:
-      - ${INPUT_PATH:-./input}:/input:ro
+      - ${INPUT_PATH:-./input}:/input
       - ${OUTPUT_PATH:-./output}:/output
       - ./logs:/logs
     logging: *default-logging
@@ -118,7 +119,7 @@ services:
       RQ_WORKER_CLASS: rq.SimpleWorker
     user: root
     volumes:
-      - ${INPUT_PATH:-./input}:/input:ro
+      - ${INPUT_PATH:-./input}:/input
       - ${OUTPUT_PATH:-./output}:/output
       - ./logs:/logs
     logging: *default-logging
@@ -144,7 +145,7 @@ services:
   # DASHBOARD: Job Monitor (RQ Dashboard)
   # =================================================================
   dashboard:
-    image: eoranged/rq-dashboard:latest
+    image: cjlapao/rq-dashboard:latest
     container_name: simops_dashboard
     depends_on:
       redis:
@@ -154,11 +155,6 @@ services:
     environment:
       RQ_DASHBOARD_REDIS_URL: redis://redis:6379
     logging: *default-logging
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9181/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     restart: unless-stopped
     deploy:
       resources:

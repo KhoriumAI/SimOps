@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
+try:
+    from core.geometry.wind_tunnel import VirtualWindTunnel
+except ImportError:
+    VirtualWindTunnel = None
+
 @dataclass
 class CFDMeshConfig:
     """Configuration for CFD mesh generation"""
@@ -36,6 +41,9 @@ class CFDMeshConfig:
     mesh_size_factor: float = 1.0       # Multiplier for auto mesh sizing
     min_mesh_size: float = None         # Minimum element size (auto if None)
     max_mesh_size: float = None         # Maximum element size (auto if None)
+    
+    # External Aerodynamics
+    virtual_wind_tunnel: bool = True    # Auto-generate fluid domain around object
     
     # Optimization
     smoothing_steps: int = 10           # Mesh smoothing iterations
@@ -60,6 +68,8 @@ class CFDMeshStrategy:
         self.verbose = verbose
         self.geometry_info: Dict = {}
         self.is_stl = False
+        self.tagging_rules = []
+        self.wind_tunnel_data = None  # Store WT data if generated
         
     def _log(self, message: str):
         if self.verbose:
@@ -77,6 +87,7 @@ class CFDMeshStrategy:
         self._log(f"Input:  {cad_file}")
         self._log(f"Output: {output_file}")
         self._log(f"Layers: {config.num_layers}, Growth: {config.growth_rate}")
+        self._log(f"Wind Tunnel: {config.virtual_wind_tunnel}")
         self._log("")
         
         try:
@@ -90,18 +101,57 @@ class CFDMeshStrategy:
             self._log("[1/5] Loading CAD geometry...")
             self._load_cad(cad_file)
             
+            
+            # Step 1.5: Virtual Wind Tunnel (External Aero)
+            self._log(f"[Debug] Wind Tunnel Check: enabled={config.virtual_wind_tunnel}, have_class={VirtualWindTunnel is not None}, is_stl={self.is_stl}")
+            
+            if config.virtual_wind_tunnel and VirtualWindTunnel and not self.is_stl:
+                self._log("[1.5/5] Generating Virtual Wind Tunnel Domain...")
+                try:
+                    # Get object volumes to wrap
+                    volumes = gmsh.model.getEntities(3)
+                    if not volumes:
+                         # Attempt to heal/find volumes if empty (common with some STEPs)
+                         gmsh.model.occ.healShapes()
+                         gmsh.model.occ.synchronize()
+                         volumes = gmsh.model.getEntities(3)
+                    
+                    if volumes:
+                        wt = VirtualWindTunnel(log_func=self._log)
+                        self.wind_tunnel_data = wt.generate_domain(volumes)
+                        
+                        # Set tagging rules from wind tunnel data
+                        # This overrides the heuristic auto-tagger
+                        self._apply_wind_tunnel_tags()
+                    else:
+                        self._log("[!] No volumes found for Wind Tunnel generation. Skipping.")
+                except Exception as e:
+                    self._log(f"[!] Wind Tunnel generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                self._log("[1.5/5] Virtual Wind Tunnel SKIPPED (disabled or conditions not met)")
+            
             # Step 2: Analyze geometry
             self._log("[2/5] Analyzing geometry...")
             self._analyze_geometry(config)
 
             # Step 2.5: Auto-Tag for Golden Template (Day 1)
-            self._log("[2.5/5] Applying Golden Template Tags...")
-            self._auto_tag_geometry()
+            if not self.wind_tunnel_data:
+                self._log("[2.5/5] Applying Golden Template Tags (Heuristic)...")
+                self._auto_tag_geometry()
+            else:
+                self._log("[2.5/5] Using Wind Tunnel Tags (Deterministic)...")
+                # Tags already applied in _apply_wind_tunnel_tags()
             
             # Step 3: Set up boundary layers
             self._log("[3/5] Configuring boundary layers...")
-            bl_success = self._setup_boundary_layers(config)
-            if not bl_success:
+            bl_field_tag = self._setup_boundary_layers(config)
+            
+            # Step 3.5: Setup BOI (Body of Influence) - Combine with BL if needed
+            self._setup_boi_field(config, bl_field_tag)
+            
+            if bl_field_tag is None and not self.wind_tunnel_data:
                 self._log("[!] BoundaryLayer field failed or N/A. Falling back to Distance+Threshold.")
                 self._setup_fallback_fields(config)
             
@@ -195,6 +245,8 @@ class CFDMeshStrategy:
             # if we request 3D generation.
             
         elif ext in ['.step', '.stp', '.iges', '.igs', '.brep']:
+            # Enable importing of names/labels from STEP/BREP
+            gmsh.option.setNumber("Geometry.OCCImportLabels", 1)
             gmsh.model.occ.importShapes(str(path))
             gmsh.model.occ.synchronize()
         else:
@@ -228,7 +280,7 @@ class CFDMeshStrategy:
         if config.min_mesh_size is None:
             config.min_mesh_size = diagonal / 100.0
         if config.max_mesh_size is None:
-            config.max_mesh_size = diagonal / 20.0
+            config.max_mesh_size = diagonal / 50.0 # Coarser default (2% of diagonal)
             
         # ADAPTIVE FIRST LAYER HEIGHT
         if config.first_layer_height is None:
@@ -244,9 +296,11 @@ class CFDMeshStrategy:
             # total_t = h * (r^n - 1) / (r - 1)
             # simplified: total_t approx n * h * r^(n/2)
             
-            max_safe_h = (min_dim / 3.0) / config.num_layers
-            
-            config.first_layer_height = min(base_h, max_safe_h)
+            if config.num_layers > 0:
+                max_safe_h = (min_dim / 3.0) / config.num_layers
+                config.first_layer_height = min(base_h, max_safe_h)
+            else:
+                config.first_layer_height = base_h
 
         # Feature Recognition: Hydraulic Diameter (Thin Wall Detection)
         try:
@@ -287,29 +341,53 @@ class CFDMeshStrategy:
 
     def _auto_tag_geometry(self):
         """
-        Implements Auto-Tagging.
-        Priority 1: Dynamic rules from Sidecar (self.tagging_rules)
-        Priority 2: Golden Template Defaults (Z-min = HeatSource)
-        """
-        # Clear existing physical groups to avoid duplicates
-        gmsh.model.removePhysicalGroups()
+        Implements Auto-Tagging with "Smart Template" logic.
         
+        Strategy:
+        1. Sidecar Rules (Priority 1): Explicit rules from config file.
+        2. Semantic CAD (Priority 2): Convention-based naming (e.g. "Inlet", "Source") from STEP file.
+        3. Golden Template (Priority 3): Geometric fallback (Z-Min = HeatSource).
+        """
+        # Save existing groups (imported from STEP) before potentially clearing
+        # Note: Gmsh importShapes should have loaded names if available.
+        incoming_physical_groups = gmsh.model.getPhysicalGroups()
+        
+        # We only clear if we are going to fully overwrite.
+        # But for hybrid approach, we might want to keep them.
+        # Let's see what we have.
+        existing_names = {}
+        for dim, tag in incoming_physical_groups:
+            name = gmsh.model.getPhysicalName(dim, tag)
+            existing_names[name] = (dim, tag)
+            
+        self._log(f"  [Tag] Found {len(incoming_physical_groups)} existing groups from CAD: {list(existing_names.keys())}")
+
         surfaces = gmsh.model.getEntities(dim=2)
         volumes = gmsh.model.getEntities(dim=3)
         
         tagged_surfaces = set()
+        tagged_volumes = set()
         
-        # 1. Dynamic Rules (Sidecar)
+        # ---------------------------------------------------------
+        # 1. Dynamic Rules (Sidecar) - Highest Priority
+        # ---------------------------------------------------------
         if hasattr(self, 'tagging_rules') and self.tagging_rules:
-            self._log(f"  [Tag] Applying {len(self.tagging_rules)} custom tagging rules...")
+            self._log(f"  [Tag] Applying {len(self.tagging_rules)} custom tagging rules (Sidecar)...")
             
+            # If sidecar rules exist, they often imply a full override intent,
+            # but we can treat them as additives.
             for rule in self.tagging_rules:
                 selector = rule.selector
                 matches = []
                 
+                # Determine Candidates
+                candidates = surfaces if rule.entity_type == 'surface' else volumes
+                tag_dim = 2 if rule.entity_type == 'surface' else 3
+                current_tagged = tagged_surfaces if rule.entity_type == 'surface' else tagged_volumes
+                
                 # Selection Logic
                 if selector.type == "z_min" or selector.type == "z_max":
-                     # Get global bbox
+                    # Get global bbox
                     g_xmin, g_ymin, g_zmin, g_xmax, g_ymax, g_zmax = gmsh.model.getBoundingBox(-1, -1)
                     target_z = g_zmin if selector.type == "z_min" else g_zmax
                     tol = (g_zmax - g_zmin) * 0.01 # 1% tolerance default
@@ -317,92 +395,171 @@ class CFDMeshStrategy:
                     if selector.tolerance:
                          tol = selector.tolerance
                          
-                    for dim, tag in surfaces:
+                    for dim, tag in candidates:
                         s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
-                        
-                        # Check if surface is on the target Z plane
                         if abs(s_zmin - target_z) < tol and abs(s_zmax - target_z) < tol:
                             matches.append(tag)
                             
                 elif selector.type == "all_remaining":
-                     # Tag everything not yet tagged
-                     for dim, tag in surfaces:
-                         if tag not in tagged_surfaces:
+                     for dim, tag in candidates:
+                         if tag not in current_tagged:
                              matches.append(tag)
+
                 elif selector.type == "box":
-                     # Bounding box selection
                      if selector.bounds and len(selector.bounds) == 6:
                          b = selector.bounds
-                         # Logic: Select surface if its center is inside box?
-                         # Or if it is fully contained? Let's use containment.
-                         for dim, tag in surfaces:
+                         for dim, tag in candidates:
                             s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
                             if (s_xmin >= b[0] and s_xmax <= b[3] and
                                 s_ymin >= b[1] and s_ymax <= b[4] and
                                 s_zmin >= b[2] and s_zmax <= b[5]):
                                 matches.append(tag)
                                 
-                # Apply Tag
                 if matches:
+                    p = gmsh.model.addPhysicalGroup(tag_dim, matches)
+                    gmsh.model.setPhysicalName(tag_dim, p, rule.tag_name)
+                    
                     if rule.entity_type == 'surface':
-                        p = gmsh.model.addPhysicalGroup(2, matches)
-                        gmsh.model.setPhysicalName(2, p, rule.tag_name)
                         tagged_surfaces.update(matches)
                         self._log(f"    -> Tagged {len(matches)} surfaces as '{rule.tag_name}'")
+                    else:
+                        tagged_volumes.update(matches)
+                        self._log(f"    -> Tagged {len(matches)} volumes as '{rule.tag_name}'")
                         
-            # If we processed dynamic rules, we skip Golden Template defaults for surfaces
-            # unless specific fallback logic is desired. For now, Sidecar overrides completely.
+            # If sidecar rules were applied, we generally stop here or merge.
+            # Allowing fallthrough to "Semantic" might adhere to "Fill in the blanks" philosophy.
+            # Let's allow fallthrough but respect `tagged_surfaces`.
             
-            # Auto-tag volume if not done
-            if volumes:
-                v_tags = [t for d, t in volumes]
-                pv = gmsh.model.addPhysicalGroup(3, v_tags)
-                gmsh.model.setPhysicalName(3, pv, "Material_Volume")
+        # ---------------------------------------------------------
+        # 2. Semantic CAD (Smart Template) - Convention Matching
+        # ---------------------------------------------------------
+        # scan existing names for keywords
+        found_semantic_tags = False
+        
+        # We need to act on the entities inside existing groups
+        # If CAD has group "Inlet_Pipe", we want to ensure it maps to "BC_Inlet"
+        # or just preserve it and let the solver handle the mapping?
+        # Better: Standardize to "BC_..." locally used by Solver Adapter.
+        
+        # Map of Keywords -> SimOps Standard Tag
+        semantic_map = {
+            "inlet": "BC_Inlet",
+            "flow_in": "BC_Inlet",
+            "outlet": "BC_Outlet",
+            "flow_out": "BC_Outlet",
+            "source": "BC_HeatSource",
+            "heat": "BC_HeatSource",
+            "power": "BC_HeatSource",
+            "hot": "BC_HeatSource",
+            "sym": "BC_Symmetry",
+            "wall": "BC_Wall_Adiabatic"
+        }
+        
+        for name, (dim, tag) in existing_names.items():
+            name_lower = name.lower()
+            
+            # Check keywords
+            matched_std_name = None
+            for kw, std_name in semantic_map.items():
+                if kw in name_lower:
+                    matched_std_name = std_name
+                    break
+            
+            if matched_std_name:
+                # We found a semantic match!
+                # Get entities in this group
+                entities = gmsh.model.getEntitiesForPhysicalGroup(dim, tag)
                 
-            return
+                # Check if these are surfaces (dim=2)
+                if dim == 2:
+                    # Filter out already tagged ones? Or allow overwrite?
+                    # Let's assume unique assignment for simplicity
+                    new_entities = [e for e in entities if e not in tagged_surfaces]
+                    
+                    if new_entities:
+                        # Create NEW standardized group (or add to it)
+                        # We can't append to existing group easily in Gmsh Python API without re-creating.
+                        # Easier: Just set the name of the EXISTING group to the standard name if it's a 1:1 match
+                        # But multiple source groups might map to one BC.
+                        # Best: Create new aggregate group.
+                        
+                        # For now MVP: Rename the existing group to the Standard Name
+                        # This works if there's only one "Inlet".
+                        # If there is "Inlet1" and "Inlet2", they both become "BC_Inlet" (Duplicate names allowed? No.)
+                        # Actually Gmsh physical names must be unique? 
+                        # If duplicate names, Gmsh merges them usually.
+                        
+                        gmsh.model.setPhysicalName(dim, tag, matched_std_name)
+                        tagged_surfaces.update(new_entities)
+                        found_semantic_tags = True
+                        self._log(f"  [Tag] Semantic Match: '{name}' -> '{matched_std_name}'")
 
-        # 2. Golden Template Defaults (Fallback)
-        self._log("  [Tag] Applying Golden Template defaults...")
+        # ---------------------------------------------------------
+        # 3. Golden Template Defaults (Fallback)
+        # ---------------------------------------------------------
+        # If we haven't found a Heat Source via Sidecar OR Semantic Tags, run geometric fallback
         
-        # Get BBox Z-min
-        z_min = self.geometry_info['bbox'][2]
-        z_tolerance = 1e-3 * self.geometry_info['diagonal'] # 0.1% tolerance
-        
-        heat_source_surfaces = []
-        wall_surfaces = []
-        
-        for dim, tag in surfaces:
-            # Check bounding box of the surface
-            s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
+        # Check if we have a heat source defined yet
+        has_heat_source = False
+        all_phys_names = [gmsh.model.getPhysicalName(2, t) for d, t in gmsh.model.getPhysicalGroups(2)]
+        if any("BC_HeatSource" in n for n in all_phys_names):
+             has_heat_source = True
+             
+        if not has_heat_source and not self.tagging_rules:
+            self._log("  [Tag] No Heat Source found by semantic matching. Applying Geometric Fallback (Z-Min)...")
             
-            # A strict check: absolute z-min of surface must be close to global z-min
-            if abs(s_zmin - z_min) < z_tolerance:
-                 if abs(s_zmax - z_min) < z_tolerance:
+            # Get BBox Z-min
+            z_min = self.geometry_info['bbox'][2]
+            z_tolerance = 0.05 * self.geometry_info['diagonal'] # 5% tolerance (Relaxed for robustness)
+            
+            heat_source_surfaces = []
+            wall_surfaces = []
+            
+            for dim, tag in surfaces:
+                if tag in tagged_surfaces:
+                    continue # Skip already handled
+                    
+                # Check bounding box
+                s_xmin, s_ymin, s_zmin, s_xmax, s_ymax, s_zmax = gmsh.model.getBoundingBox(dim, tag)
+                
+                # Z-Min Logic
+                if abs(s_zmin - z_min) < z_tolerance and abs(s_zmax - z_min) < z_tolerance:
                      heat_source_surfaces.append(tag)
-                 else:
+                else:
                      wall_surfaces.append(tag)
-            else:
-                 wall_surfaces.append(tag)
-                 
-        # Create Physical Groups
-        if heat_source_surfaces:
-            p1 = gmsh.model.addPhysicalGroup(2, heat_source_surfaces)
-            gmsh.model.setPhysicalName(2, p1, "BC_HeatSource")
-            self._log(f"  [Tag] Assigned 'BC_HeatSource' to {len(heat_source_surfaces)} surfaces (Z={z_min:.2f})")
-        else:
-            self._log("  [Warning] No HeatSource surfaces found at Z-min!")
+                     
+            if heat_source_surfaces:
+                p1 = gmsh.model.addPhysicalGroup(2, heat_source_surfaces)
+                gmsh.model.setPhysicalName(2, p1, "BC_HeatSource")
+                tagged_surfaces.update(heat_source_surfaces)
+                self._log(f"  [Tag] Assigned 'BC_HeatSource' to {len(heat_source_surfaces)} surfaces (Z-Min)")
+                has_heat_source = True
+        
+        # ---------------------------------------------------------
+        # 4. Final Cleanup (Catch-all Walls)
+        # ---------------------------------------------------------
+        # Any surface not yet tagged becomes Wall
+        remaining_surfaces = [tag for dim, tag in surfaces if tag not in tagged_surfaces]
+        
+        # EXCEPTION: If the user provided ANY tagging rules, we might assume they tagged everything they wanted?
+        # No, safest is to make everything else a wall.
+        
+        if remaining_surfaces:
+            # Check if we already have a BC_Wall_Adiabatic group to append to?
+            # Simpler: Create a new one "BC_Wall_Default"
+            p_rem = gmsh.model.addPhysicalGroup(2, remaining_surfaces)
+            gmsh.model.setPhysicalName(2, p_rem, "BC_Wall_Adiabatic")
+            self._log(f"  [Tag] Assigned 'BC_Wall_Adiabatic' to {len(remaining_surfaces)} remaining surfaces")
             
-        if wall_surfaces:
-            p2 = gmsh.model.addPhysicalGroup(2, wall_surfaces)
-            gmsh.model.setPhysicalName(2, p2, "BC_Wall_Adiabatic")
-            self._log(f"  [Tag] Assigned 'BC_Wall_Adiabatic' to {len(wall_surfaces)} surfaces")
-            
-        # Tag Volume
+        # Tag Volume (Always)
         if volumes:
-            vol_tags = [tag for dim, tag in volumes]
-            pv = gmsh.model.addPhysicalGroup(3, vol_tags)
-            gmsh.model.setPhysicalName(3, pv, "Material_Aluminum")
-            self._log(f"  [Tag] Assigned 'Material_Aluminum' to {len(vol_tags)} volumes")
+            # Check if volume already tagged?
+            tagged_vols = [tag for dim, tag in gmsh.model.getPhysicalGroups(3)]
+            if not tagged_vols:
+                vol_tags = [tag for dim, tag in volumes]
+                pv = gmsh.model.addPhysicalGroup(3, vol_tags)
+                gmsh.model.setPhysicalName(3, pv, "Material_Aluminum")
+                self._log(f"  [Tag] Assigned 'Material_Aluminum' to {len(vol_tags)} volumes")
         
     def _setup_boundary_layers(self, config: CFDMeshConfig) -> bool:
         if self.is_stl:
@@ -454,13 +611,99 @@ class CFDMeshStrategy:
                 except:
                     pass
                     
+            # We don't set as BoundaryLayer here immediately if we want to combine with BOI.
+            # But setAsBoundaryLayer is unique (it's not just background mesh). 
+            # It needs to be registered as *the* BL field.
             gmsh.model.mesh.field.setAsBoundaryLayer(field_tag)
             self._log(f"  [OK] Gmsh BoundaryLayer field configured (Target thickness: {total_thickness:.3f})")
-            return True
+            return field_tag # Return tag for potential combination
             
         except Exception as e:
             self._log(f"  Warning: BoundaryLayer setup failed: {e}")
-            return False
+            return None
+
+    def _apply_wind_tunnel_tags(self):
+        """Apply Physical Groups from Wind Tunnel Data"""
+        data = self.wind_tunnel_data
+        if not data: return
+        
+        boundaries = data['boundaries']
+        
+        # 1. Inlet
+        if boundaries['inlet']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['inlet'])
+            gmsh.model.setPhysicalName(2, p, "BC_Inlet")
+            self._log(f"  [Tag] Assigned 'BC_Inlet' to {len(boundaries['inlet'])} surfaces")
+            
+        # 2. Outlet
+        if boundaries['outlet']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['outlet'])
+            gmsh.model.setPhysicalName(2, p, "BC_Outlet")
+            self._log(f"  [Tag] Assigned 'BC_Outlet' to {len(boundaries['outlet'])} surfaces")
+            
+        # 3. Walls (Far Field)
+        # For Virtual Wind Tunnel, these are usually "Slip" walls or Openings.
+        # But "BC_Wall_Adiabatic" implies no-slip usually?
+        # Typically "Opening" or "Symmetry" or "Slip".
+        # Let's use specific name "BC_FarField" -> Solver maps to slip/symmetry
+        if boundaries['walls']:
+            p = gmsh.model.addPhysicalGroup(2, boundaries['walls'])
+            gmsh.model.setPhysicalName(2, p, "BC_FarField") # Solver must handle this!
+            self._log(f"  [Tag] Assigned 'BC_FarField' to {len(boundaries['walls'])} surfaces")
+            
+        # 4. Object (No-Slip Wall)
+        if boundaries['object']:
+            # This is the actual car/plane/object
+            p = gmsh.model.addPhysicalGroup(2, boundaries['object'])
+            gmsh.model.setPhysicalName(2, p, "BC_Wall_Object")
+            self._log(f"  [Tag] Assigned 'BC_Wall_Object' to {len(boundaries['object'])} surfaces")
+            
+        # 5. Fluid Volume
+        fluid_tag = data['fluid_volume']
+        p_vol = gmsh.model.addPhysicalGroup(3, [fluid_tag])
+        gmsh.model.setPhysicalName(3, p_vol, "Material_Fluid") # Named Fluid not Aluminum!
+        self._log(f"  [Tag] Assigned 'Material_Fluid' to volume {fluid_tag}")
+
+    def _setup_boi_field(self, config: CFDMeshConfig, bl_field_tag: Optional[int] = None):
+        """Setup Body of Influence (BOI) sizing field"""
+        if not self.wind_tunnel_data or 'boi_coords' not in self.wind_tunnel_data:
+            return
+            
+        self._log("[Mesh] Configuring Body of Influence (BOI)...")
+        boi = self.wind_tunnel_data['boi_coords']
+        
+        # Create Box Field
+        box_field = gmsh.model.mesh.field.add("Box")
+        gmsh.model.mesh.field.setNumber(box_field, "VIn", config.min_mesh_size) # Fine inside
+        gmsh.model.mesh.field.setNumber(box_field, "VOut", config.max_mesh_size) # Coarse outside
+        
+        gmsh.model.mesh.field.setNumber(box_field, "XMin", boi['x_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "XMax", boi['x_max'])
+        gmsh.model.mesh.field.setNumber(box_field, "YMin", boi['y_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "YMax", boi['y_max'])
+        gmsh.model.mesh.field.setNumber(box_field, "ZMin", boi['z_min'])
+        gmsh.model.mesh.field.setNumber(box_field, "ZMax", boi['z_max'])
+        
+        # Thickness "T" for transition - let's make it 10% of BOI size
+        gmsh.model.mesh.field.setNumber(box_field, "Thickness", (boi['x_max'] - boi['x_min']) * 0.1)
+        
+        self._log(f"  [BOI] Box defined: {boi['x_min']:.2f} to {boi['x_max']:.2f} (Size: {config.min_mesh_size:.4f})")
+        
+        # Combine with BL field if exists?
+        # Actually, for 3D meshing, we usually want the background mesh to satisfy ALL constraints.
+        # BoundaryLayer field creates the anisotropy.
+        # The Background Mesh Size field controls the isotropic size.
+        # We can set the Box field as Background Mesh.
+        # The BoundaryLayer field is separate (setAsBoundaryLayer).
+        # Gmsh 4.x usually allows both.
+        
+        final_bg_field = box_field
+        
+        # If we have other fields (like Distance fallback), we might need Min.
+        # For now, just setting Box as BackgroundMesh works for the volume.
+        
+        gmsh.model.mesh.field.setAsBackgroundMesh(final_bg_field)
+        self._log("  [OK] BOI set as Background Mesh")
 
     def _setup_fallback_fields(self, config: CFDMeshConfig):
         """Fallback to Distance + Threshold fields for refinement without guaranteed prisms"""

@@ -11,6 +11,31 @@ import json
 from pathlib import Path
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, asdict
+import shutil
+
+@dataclass
+class Paths:
+    """System paths configuration"""
+    paraview_bin: str = r"C:\Program Files\ParaView 6.0.1\bin\pvbatch.exe"
+
+    def get_pvbatch(self) -> Optional[str]:
+        """Resolve pvbatch executable path."""
+        # 1. Check environment variable
+        env_path = os.environ.get("SIMOPS_PVBATCH_PATH")
+        if env_path and Path(env_path).exists():
+            return env_path
+            
+        # 2. Check configured path
+        if Path(self.paraview_bin).exists():
+            return self.paraview_bin
+            
+        # 3. Check shell path
+        which_path = shutil.which("pvbatch")
+        if which_path:
+            return which_path
+            
+        return None
+
 
 
 @dataclass
@@ -67,6 +92,7 @@ class Config:
         self.quality_targets = QualityTargets()
         self.mesh_params = MeshParameters()
         self.ai_config = AIConfig()
+        self.paths = Paths()
         self._api_key: Optional[str] = None
 
         # Load configuration
@@ -181,6 +207,12 @@ class Config:
                 for key, value in data['ai_config'].items():
                     if hasattr(self.ai_config, key):
                         setattr(self.ai_config, key, value)
+
+            # Load Paths
+            if 'paths' in data:
+                for key, value in data['paths'].items():
+                    if hasattr(self.paths, key):
+                        setattr(self.paths, key, value)
 
             # API key from config file (not recommended, but supported)
             if 'api_key' in data:

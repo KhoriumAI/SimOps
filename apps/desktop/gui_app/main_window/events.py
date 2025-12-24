@@ -10,8 +10,9 @@ from PyQt5.QtCore import Qt
 from pathlib import Path
 
 class EventHandler:
-    def __init__(self, window):
+    def __init__(self, window, ui_builder):
         self.window = window
+        self.ui_builder = ui_builder
 
     def load_cad_file(self):
         if self.window.worker and self.window.worker.is_running:
@@ -135,6 +136,19 @@ class EventHandler:
         self.window.viz_range_min_label.setText(f"Min: {min_val:.2f}")
         self.window.viz_range_max_label.setText(f"Max: {max_val:.2f}")
         
+        # Auto-enable cross-section to show volumetric tets when filtering
+        # Use extreme offset (+50) so it doesn't actually cut, just enables volumetric rendering
+        is_filtering = (min_slider > 0 or max_slider < 100)
+        if is_filtering and not self.window.crosssection_enabled.isChecked():
+            print("[DEBUG] Auto-enabling cross-section for volumetric tet visualization")
+            self.window.clip_offset_slider.setValue(50)  # Extreme boundary - shows all
+            self.window.crosssection_enabled.setChecked(True)
+        elif not is_filtering and self.window.crosssection_enabled.isChecked():
+            # Auto-disable when returning to full range (optional)
+            # print("[DEBUG] Auto-disabling cross-section when filter removed")
+            # self.window.crosssection_enabled.setChecked(False)
+            pass
+        
         self.window.viewer.update_quality_visualization(
             metric=metric,
             opacity=self.window.viz_opacity_spin.value(),
@@ -147,6 +161,9 @@ class EventHandler:
         self.window.viz_range_slider.setValue((0, 100))
         self.window.viz_range_min_label.setText(f"Min: {data_min:.2f}")
         self.window.viz_range_max_label.setText(f"Max: {data_max:.2f}")
+        
+        # Update slider gradient based on metric type
+        self.ui_builder.update_viz_slider_gradient(text)
         
         self.window.viewer.update_quality_visualization(
             metric=text,
