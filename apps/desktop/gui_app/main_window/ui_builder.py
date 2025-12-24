@@ -551,6 +551,29 @@ class UIBuilder:
 
     def _get_spin_style(self):
         return "QSpinBox, QDoubleSpinBox { padding: 4px; border: 1px solid #ced4da; border-radius: 4px; background-color: white; color: #212529; font-size: 11px; }"
+    
+    def update_viz_slider_gradient(self, metric: str):
+        """Update range slider gradient based on metric type"""
+        print(f"[DEBUG] update_viz_slider_gradient called with metric: {metric}")
+        
+        if "aspect" in metric.lower() or "skew" in metric.lower():
+            # Inverted metrics (high is bad): green (low/left) → red (high/right)
+            gradient = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #28a745, stop:0.5 #ffc107, stop:1 #dc3545)"
+            print("[DEBUG] Using INVERTED gradient (green → red)")
+        else:
+            # Normal metrics (low is bad): red (low/left) → green (high/right) for SICN/Gamma
+            gradient = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc3545, stop:0.5 #ffc107, stop:1 #28a745)"
+            print("[DEBUG] Using NORMAL gradient (red → green)")
+        
+        self.window.viz_range_slider.setStyleSheet(f"""
+            QRangeSlider {{
+                qproperty-barColor: {gradient};
+            }}
+        """)
+        
+        # Force widget update to ensure new style applies
+        self.window.viz_range_slider.update()
+        self.window.viz_range_slider.repaint()
 
     def _get_progress_style(self, height, color):
         return f"""

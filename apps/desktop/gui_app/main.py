@@ -1417,7 +1417,14 @@ class ModernMeshGenGUI(QMainWindow):
             QPushButton:hover { background-color: #0b5ed7; }
         """)
         self.create_zone_btn.clicked.connect(self.on_create_zone_clicked)
+        self.create_zone_btn.clicked.connect(self.on_create_zone_clicked)
         layout.addWidget(self.create_zone_btn)
+        
+        # Debug Visualization
+        self.show_partitions_cb = QCheckBox("Debug: Show Face Partitions")
+        self.show_partitions_cb.setToolTip("Color all faces by their unique logical ID to verify segmentation")
+        self.show_partitions_cb.toggled.connect(self.on_toggle_face_partitions)
+        layout.addWidget(self.show_partitions_cb)
         
         # Zone List
         layout.addWidget(QLabel("Defined Zones:"))
@@ -2209,11 +2216,7 @@ class ModernMeshGenGUI(QMainWindow):
                     # Also try to load associated quality metrics if available
                     # (Usually purely visual for imported meshes unless we run quality check)
                     self.add_log("[OK] Mesh loaded for visualization")
-                    
-                    # Enable zone manager if available
-                    if hasattr(self.viewer, 'zone_manager'):
-                        self.viewer.zone_manager.load_mesh(file_path)
-                        self.update_zone_list_ui()
+                    self.update_zone_list_ui()
                 
                 # Disable generate button since it's already a mesh
                 self.generate_btn.setEnabled(False)
@@ -2267,27 +2270,53 @@ class ModernMeshGenGUI(QMainWindow):
 
             # Load CAD and get geometry info
             self.add_log(f"[DEBUG] Calling viewer.load_step_file({file_path})")
-            geom_info = self.viewer.load_step_file(file_path)
-            self.add_log(f"[DEBUG] load_step_file returned: {geom_info}")
+            self.viewer.load_step_file(file_path)  # Now asynchronous, returns None
+            
+            # Note: geom_info will be available in viewer.current_geom_info once loading completes
+            # We'll check it after a brief delay to allow the worker to finish
+            # For now, use a QTimer to check back and calculate element counts
+            QTimer.singleShot(100, self._check_geom_info_ready)
+            
+            self.add_log("[INFO] CAD loading in progress...")
+
+            # Load geometry for paintbrush AFTER CAD viewer starts loading
+            # This ensures we don't conflict with gmsh initialization
+            def load_paintbrush_later():
+                if self.paintbrush_selector:
+                    try:
+                        import gmsh
+                        # Make sure gmsh is not in use by the CAD worker
+                        if not gmsh.is_initialized():
+                            gmsh.initialize()
+                            gmsh.open(file_path)
+                            if self.paintbrush_selector.load_cad_geometry():
+                                self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
+                            gmsh.finalize()
+                    except Exception as e:
+                        print(f"Could not load geometry for paintbrush: {e}")
+            
+            # Delay paintbrush loading to avoid gmsh conflicts
+            QTimer.singleShot(2000, load_paintbrush_later)
+
+    def _check_geom_info_ready(self):
+        """Check if CAD loading is complete and geom_info is available"""
+        if hasattr(self.viewer, 'current_geom_info') and self.viewer.current_geom_info:
+            geom_info = self.viewer.current_geom_info
             self.current_geom_info = geom_info  # Store for logging
-
-            # Load geometry for paintbrush (after CAD is loaded)
-            if self.paintbrush_selector:
-                try:
-                    import gmsh
-                    gmsh.initialize()
-                    gmsh.open(filepath)
-                    if self.paintbrush_selector.load_cad_geometry():
-                        self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
-                    gmsh.finalize()
-                except Exception as e:
-                    print(f"Could not load geometry for paintbrush: {e}")
-
+            self.add_log(f"[DEBUG] CAD loaded: {geom_info}")
+            
             # Calculate suggested element counts based on geometry
             if geom_info and 'volume' in geom_info:
                 self.calculate_suggested_element_counts(geom_info)
             else:
                 self.add_log("[!] Could not calculate geometry volume - using default element counts")
+        elif hasattr(self.viewer, 'cad_load_worker') and self.viewer.cad_load_worker and self.viewer.cad_load_worker.isRunning():
+            # Worker still running, check again later
+            QTimer.singleShot(200, self._check_geom_info_ready)
+        else:
+            # Worker finished but no geom_info (probably an error)
+            self.add_log("[!] CAD loading completed but no geometry info available")
+
 
 
     def calculate_phase_weights(self, element_target, quality_preset):
@@ -3003,6 +3032,11 @@ class ModernMeshGenGUI(QMainWindow):
                     load_duration = time.time() - self.load_start_time
                     self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} (Load took: {load_duration:.3f}s) ***")
                     self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
+
+                    # Apply Quality Coloring
+                    if result.get('per_element_quality'):
+                         self.add_log(f"[DEBUG] Applying quality coloring...")
+                         self.viewer.apply_quality_coloring(result)
             
             # Check for hex testing component visualization
             elif result.get('visualization_mode') == 'components' and result.get('component_files'):
@@ -3307,6 +3341,12 @@ class ModernMeshGenGUI(QMainWindow):
             self.zone_name_input.clear()
         else:
             self.add_log("[!] Failed to create zone")
+
+    def on_toggle_face_partitions(self, checked):
+        """Toggle face partition visualization mode"""
+        if hasattr(self, 'viewer'):
+            self.viewer.toggle_face_partitions(checked)
+            self.add_log(f"[Detailed Viz] Face Partition Mode: {'ON' if checked else 'OFF'}")
 
     def on_delete_zone(self):
         """Delete selected zone from list"""
