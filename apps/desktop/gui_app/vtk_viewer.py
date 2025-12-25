@@ -235,19 +235,22 @@ try:
     gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size_max)
     gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size_min)
     
-    # Enable curvature check but keep it coarse to avoid "No elements in surface"
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 5) 
+    # SAFETY: Use single thread for preview stability on all platforms
+    # (Prevents race conditions in surface meshing which can cause empty surfaces)
+    gmsh.option.setNumber("General.NumThreads", 1)
     
-    # Use Automatic algorithm (2) which is more robust
+    # Enable curvature check with coarse settings (critical for curved surfaces)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 10) 
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1) # Helps propagate sizes
+    
+    # Use Automatic algorithm (2) - most robust
     gmsh.option.setNumber("Mesh.Algorithm", 2)
     
-    # RELAXED "One-and-Done": Allow retries to recover valid geometry
-    gmsh.option.setNumber("Mesh.MaxRetries", 3)
-    
-    # Minimal quality checks to preventing empty surfaces
-    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 5)  # Hexagon minimum
-    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)   # Line minimum
-    gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 6) # Hexagon minimum
+    # RELAXED SETTINGS to prevent "No elements in surface":
+    gmsh.option.setNumber("Mesh.MaxRetries", 5)          # Give it plenty of valid attempts
+    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 5) # Ensure circles have points
+    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)  # Ensure curves have points
+    gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 6.0) # Ensure minimal resolution
     
     # Set optional optimization flags (may not exist in older gmsh versions)
     try:
