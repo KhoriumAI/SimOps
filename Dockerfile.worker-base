@@ -47,8 +47,8 @@ RUN echo "source /usr/lib/openfoam/openfoam2312/etc/bashrc" >> /etc/bash.bashrc
 
 # Pre-install Python wheels for worker requirements
 WORKDIR /build
-COPY requirements-worker.txt .
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements-worker.txt \
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt \
     && pip install --no-cache-dir /wheels/* \
     && rm -rf /wheels /build
 
