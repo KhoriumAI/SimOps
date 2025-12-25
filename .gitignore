@@ -86,3 +86,19 @@ test_*.py
 reproduce_*.py
 fix_*.py
 *_working.py
+
+# Debug and temp files in root
+debug_*
+--version
+*.frd
+*.inp
+*.cvg
+*.dat
+*.sta
+*.12d
+spooles.out
+temp_test/
+temp_test_viz/
+tmp_test/
+test_output*/
+output_*_run/

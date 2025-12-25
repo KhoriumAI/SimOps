@@ -1,0 +1,25 @@
+# SimOps Worker Dockerfile - FAST Rebuild Version
+# ================================================
+# Uses pre-built base image with OpenFOAM/deps. Only copies code.
+# Typical rebuild time: ~5 seconds instead of 3 minutes!
+#
+# REQUIRES: simops-worker-base:latest (build with Dockerfile.worker-base)
+# ================================================
+
+FROM simops-worker-base:latest
+
+LABEL maintainer="SimOps Team"
+LABEL description="SimOps Thermal Simulation Worker"
+LABEL version="1.1"
+
+# Copy application code (this is all that changes between rebuilds)
+COPY --chown=simops:simops simops_worker.py .
+COPY --chown=simops:simops result_dispatcher.py .
+COPY --chown=simops:simops simops_pipeline.py .
+COPY --chown=simops:simops core/ ./core/
+
+# Switch to non-root user
+USER simops
+
+# Start the worker with xvfb-run to provide a virtual display
+CMD ["sh", "-c", "xvfb-run -a -s '-screen 0 1024x768x24' rq worker simops --url redis://redis:6379 --with-scheduler"]

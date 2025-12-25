@@ -1,0 +1,68 @@
+# SimOps Worker Base Image - Pre-built Heavy Dependencies
+# ========================================================
+# This image contains OpenFOAM, CalculiX, and graphics stack.
+# Build this ONCE and reuse for fast worker rebuilds.
+#
+# Build: docker build -t simops-worker-base:latest -f Dockerfile.worker-base .
+# ========================================================
+
+FROM python:3.10-slim-bullseye
+
+LABEL maintainer="SimOps Team"
+LABEL description="SimOps Worker Base Image with OpenFOAM and Graphics Stack"
+LABEL version="1.0"
+
+# Install runtime dependencies (Gmsh/GL/VTK/OSMesa/Xvfb - Headless Graphics Stack)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libgl1-mesa-dri \
+    libglu1-mesa \
+    libosmesa6 \
+    libxrender1 \
+    libxcursor1 \
+    libxft2 \
+    libxinerama1 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgomp1 \
+    xvfb \
+    xauth \
+    calculix-ccx \
+    wget \
+    gnupg \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# OpenFOAM Installation (ESI Version) - This is the SLOW step (~2 minutes)
+RUN wget -q -O - https://dl.openfoam.com/add-debian-repo.sh | bash \
+    && apt-get install -y --no-install-recommends \
+    openfoam2312-default \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+    
+# Add OpenFOAM environment to bashrc
+RUN echo "source /usr/lib/openfoam/openfoam2312/etc/bashrc" >> /etc/bash.bashrc
+
+# Pre-install Python wheels for worker requirements
+WORKDIR /build
+COPY requirements-worker.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements-worker.txt \
+    && pip install --no-cache-dir /wheels/* \
+    && rm -rf /wheels /build
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash simops
+
+# Define volume mount points
+RUN mkdir -p /input /output /logs /app \
+    && chown -R simops:simops /input /output /logs /app
+
+# Environment variables for Headless VTK/PyVista
+ENV PYTHONUNBUFFERED=1
+ENV PYVISTA_OFF_SCREEN=true
+ENV PYVISTA_USE_IPYVTK=true
+ENV VTK_X11_OFFSCREEN=true
+
+WORKDIR /app
