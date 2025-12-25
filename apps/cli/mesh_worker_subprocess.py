@@ -64,20 +64,27 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
     print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
     
     try:
-        # Step 1: Convert STEP to STL
-        print("[OpenFOAM-HEX] Step 1: Converting STEP to STL...")
-        discretizer = HighFidelityDiscretization(verbose=True)
-        temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
+        # Step 1: Get STL path (either cached HQ STL or convert STEP now)
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
-        success = discretizer.convert_step_to_stl(
-            cad_file, temp_stl,
-            deviation=0.01,
-            min_size=0.5,
-            max_size=10.0
-        )
-        
-        if not success:
-            return {'success': False, 'message': 'Failed to convert STEP to STL'}
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[OpenFOAM-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            temp_stl = hq_stl_path
+        else:
+            print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...")
+            discretizer = HighFidelityDiscretization(verbose=True)
+            temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
+            
+            success = discretizer.convert_step_to_stl(
+                cad_file, temp_stl,
+                deviation=0.01,
+                min_size=0.5,
+                max_size=10.0
+            )
+            
+            if not success:
+                return {'success': False, 'message': 'Failed to convert STEP to STL'}
+
         
         # Step 2: Get cell size from quality params
         cell_size = quality_params.get('max_element_size', 2.0) if quality_params else 2.0
@@ -121,20 +128,26 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
     try:
         import trimesh
         
-        # Step 1: Convert STEP to STL
-        print("[CONFORMAL-HEX] Step 1: Converting STEP to STL...")
-        discretizer = HighFidelityDiscretization(verbose=True)
+        # Step 1: Get STL path (either cached HQ STL or convert STEP now)
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
-        temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
-        success = discretizer.convert_step_to_stl(
-            cad_file, temp_stl,
-            deviation=0.01,
-            min_size=0.5,
-            max_size=10.0
-        )
-        
-        if not success:
-            return {'success': False, 'message': 'Failed to convert STEP to STL'}
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[CONFORMAL-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            temp_stl = hq_stl_path
+        else:
+            print("[CONFORMAL-HEX] Step 1: Converting STEP to STL (on-demand)...")
+            discretizer = HighFidelityDiscretization(verbose=True)
+            temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
+            success = discretizer.convert_step_to_stl(
+                cad_file, temp_stl,
+                deviation=0.01,
+                min_size=0.5,
+                max_size=10.0
+            )
+            
+            if not success:
+                return {'success': False, 'message': 'Failed to convert STEP to STL'}
+
         
         # Step 2: CoACD decomposition
         print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...")
@@ -343,14 +356,19 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         mesh_name = Path(cad_file).stem
         output_file = str(mesh_folder / f"{mesh_name}_gpu_mesh.msh")
         
-        # Step 1: Load CAD and generate surface mesh using Gmsh
-        print("[GPU Mesher] Step 1: Loading CAD and generating surface mesh...", flush=True)
+        # Step 1: Load CAD (either cached HQ STL or convert STEP now)
+        print("[GPU Mesher] Step 1: Loading geometry...", flush=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.model.add("gpu_surface")
         
-        # Import the CAD file
-        gmsh.merge(cad_file)
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[GPU Mesher] Using cached high-quality STL: {hq_stl_path}", flush=True)
+            gmsh.merge(hq_stl_path)
+        else:
+            print(f"[GPU Mesher] Loading CAD: {cad_file}", flush=True)
+            gmsh.merge(cad_file)
         gmsh.model.occ.synchronize()
         
         # Get bounding box
@@ -611,12 +629,19 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         temp_dir = Path(tempfile.gettempdir())
         stl_file = temp_dir / f"{mesh_name}_step1.stl"
         
-        # Step 1: STEP → STL
-        print("[HEX-DOM] Step 1: Converting STEP to STL...")
-        step1 = HighFidelityDiscretization()
-        success = step1.convert_step_to_stl(cad_file, str(stl_file))
-        if not success:
-            return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
+        # Step 1: Get STL path (either cached HQ STL or convert STEP now)
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
+        
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[HEX-DOM] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            stl_file = Path(hq_stl_path)
+        else:
+            print("[HEX-DOM] Step 1: Converting STEP to STL (on-demand)...")
+            step1 = HighFidelityDiscretization()
+            stl_file = temp_dir / f"{mesh_name}_step1.stl"
+            success = step1.convert_step_to_stl(cad_file, str(stl_file))
+            if not success:
+                return {'success': False, 'message': 'Step 1 failed: STEP to STL conversion'}
         
         if save_stl:
             saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
@@ -895,9 +920,14 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.option.setNumber("General.Verbosity", 2)
         
-        # Load CAD file
-        print(f"[HXT] Loading CAD: {cad_file}", flush=True)
-        gmsh.model.occ.importShapes(cad_file)
+        # Load CAD (either cached HQ STL or convert STEP now)
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[HXT] Using cached high-quality STL: {hq_stl_path}", flush=True)
+            gmsh.merge(hq_stl_path)
+        else:
+            print(f"[HXT] Loading CAD: {cad_file}", flush=True)
+            gmsh.model.occ.importShapes(cad_file)
         gmsh.model.occ.synchronize()
         
         # Get bounding box for sizing

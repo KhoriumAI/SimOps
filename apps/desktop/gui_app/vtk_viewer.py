@@ -18,7 +18,7 @@ from typing import Dict, Optional
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QSizePolicy, QWidget, QSlider, QSpinBox,
-    QPushButton, QCheckBox, QComboBox
+    QPushButton, QCheckBox, QComboBox, QApplication
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont, QColor
@@ -142,11 +142,364 @@ except Exception as e:
             print(f"[HQ WORKER] Exception: {e}")
 
 
+class PreviewWorker(QThread):
+    """
+    Stage 1: Background thread for initial coarse CAD loading.
+    Keeps the main GUI thread (and spinner animation) responsive.
+    """
+    finished = pyqtSignal(object)  # Emits (poly_data, complexity_info)
+    error = pyqtSignal(str)
+    log = pyqtSignal(str)          # Emits status messages for the GUI console
+    progress = pyqtSignal(str, float) # Emits (operation_name, percentage_0_to_1)
+
+    def __init__(self, filepath, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+
+    def run(self):
+        try:
+            import subprocess
+            import tempfile
+            import json
+            import pyvista as pv
+            import os
+            import sys
+            
+            msg = f"[PreviewWorker] thread started for {os.path.basename(self.filepath)}"
+            print(msg)
+            self.log.emit(msg)
+            
+            # --- PREVIEW TESSELLATION SUBPROCESS ---
+            tmp_stl = tempfile.mktemp(suffix='.stl')
+            
+            script_content = f"""
+import gmsh
+import json
+import sys
+import math
+import os
+
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Verbosity", 2) # Reduce log spam
+    
+    # FAST PREVIEW: Disable geometry healing and metadata parsing
+    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
+    # Revert to standard tolerance (aggressive coarsening should handle speed, not sloppy tolerance)
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-7)
+    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-7)
+    
+    # Fast preview settings (standard OCC flags)
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+    gmsh.option.setNumber("Geometry.AutoCoherence", 0)
+
+    gmsh.model.add("ComplexityAnalysis")
+    gmsh.open(r"{self.filepath}")
+    
+    surfaces = gmsh.model.getEntities(2)
+    surface_count = len(surfaces)
+    bbox = gmsh.model.getBoundingBox(-1, -1)
+    dx, dy, dz = bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]
+    bbox_diag = math.sqrt(dx*dx + dy*dy + dz*dz)
+    volume = dx * dy * dz
+    
+    # COARSE PREVIEW - prioritize speed over quality
+    # Use a larger mesh size for fast preview generation
+    mesh_size_max = bbox_diag / 10.0  # Coarse but stable
+    mesh_size_min = bbox_diag / 50.0  # Prevent overly small elements
+    quality_level = "Preview"
+    
+    complexity = {{
+        "surface_count": surface_count,
+        "mesh_size_max": mesh_size_max,
+        "quality_level": quality_level,
+        "bbox_diagonal": bbox_diag,
+        "volume": volume
+    }}
+    
+    print("COMPLEXITY:" + json.dumps(complexity))
+    
+    # Progress callback (if available in this gmsh version)
+    if hasattr(gmsh, 'onProgress'):
+        def progress_cb(op, val):
+            print(f"PROGRESS:{{op}}|{{val}}", flush=True)
+        gmsh.onProgress(progress_cb)
+    else:
+        print("STATUS:Starting mesh generation...", flush=True)
+    
+    # Generate 2D mesh (COARSE for speed)
+    # CRITICAL: Skip all quality checks and invalid element fixing for preview
+    gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size_max)
+    gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size_min)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.Algorithm", 2)  # Automatic - usually fastest for messy models
+    
+    # CRITICAL: Disable all internal fixing and quality-based retries
+    gmsh.option.setNumber("Mesh.MaxRetries", 1)         # Don't try to fix failed polygons
+    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 0) # Don't refine circles
+    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 0)  # Don't refine curves
+    gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 0) # Disable curvature checks
+    
+    # Set optional optimization flags (may not exist in older gmsh versions)
+    try:
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0)
+        gmsh.option.setNumber("Mesh.Optimize", 0)  # Skip optimization
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip Netgen optimization
+        gmsh.option.setNumber("Mesh.Smoothing", 0)  # Disable smoothing for preview
+        gmsh.option.setNumber("Mesh.RefineSteps", 0)  # No refinement
+    except:
+        pass  # Ignore if these options don't exist in this gmsh version
+    
+    gmsh.model.mesh.generate(2)
+    
+    # Export to temp STL
+    gmsh.write(r"{tmp_stl}")
+    gmsh.finalize()
+    print("SUCCESS_MARKER", flush=True)
+except Exception as e:
+    print("ERROR:" + str(e), flush=True)
+    sys.exit(1)
+"""
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            
+            msg = f"[PreviewWorker] Launching subprocess for complexity analysis..."
+            print(msg)
+            self.log.emit(msg)
+            process = subprocess.Popen(
+                [sys.executable, "-c", script_content],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=flags,
+                bufsize=1 # Line buffered
+            )
+            
+            msg = f"[PreviewWorker] Subprocess launched, reading output stream..."
+            print(msg)
+            self.log.emit(msg)
+            
+            stdout_full = []
+            max_invalid_elements = 0
+            current_invalid_elements = 0
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    line = line.strip()
+                    stdout_full.append(line)
+                    
+                    import re
+                    # We've removed the bouncing progress tracking based on invalid elements
+                    # for the fast preview, as it incorrectly jumps between batches.
+                            
+                    if line.startswith("PROGRESS:"):
+                        try:
+                            parts = line[9:].split('|')
+                            op_name = parts[0]
+                            val = float(parts[1])
+                            
+                            # Filter out 'Fixing mesh' which resets per-surface and causes bouncing progress
+                            if op_name != "Fixing mesh":
+                                self.progress.emit(op_name, val)
+                        except: pass
+                    elif line.startswith("STATUS:"):
+                        # Fallback for older gmsh versions without onProgress
+                        status_msg = line[7:]
+                        self.log.emit(f"[CAD] {status_msg}")
+                    elif line.startswith("COMPLEXITY:"):
+                        # We'll parse this finally
+                        pass
+                    elif line.startswith("SUCCESS_MARKER") or line.startswith("ERROR:"):
+                        # These are handled separately
+                        pass
+                    elif line:
+                        # Send all other subprocess output (including gmsh Info: messages) to GUI
+                        print(f"[CAD-Subprocess] {line}")
+                        self.log.emit(f"[CAD] {line}")
+                
+                # Small delay to give UI thread breathing room
+                import time
+                time.sleep(0.001)
+            
+            process.wait()
+            stdout = "\n".join(stdout_full)
+            msg = f"[PreviewWorker] Subprocess finished with code {process.returncode}"
+            print(msg)
+            self.log.emit(msg)
+            
+            if "SUCCESS_MARKER" not in stdout:
+                print(f"[PreviewWorker] Subprocess output: {stdout}")
+                error_part = stdout.split("ERROR:")[1] if "ERROR:" in stdout else "Unknown error in CAD subprocess"
+                self.error.emit(error_part.strip())
+                return
+
+            # Parse results
+            complexity = {}
+            for line in stdout.splitlines():
+                if line.startswith("COMPLEXITY:"):
+                    complexity = json.loads(line[11:])
+                    break
+            
+            # Load with PyVista in this thread (it's safe here)
+            msg = f"[PreviewWorker] Loading preview STL with PyVista..."
+            print(msg)
+            self.log.emit(msg)
+            if os.path.exists(tmp_stl):
+                mesh = pv.read(tmp_stl)
+                print(f"[PreviewWorker] Preview mesh loaded: {mesh.n_points} points")
+                # self.log.emit(...) maybe too verbose for mesh points
+                try: os.remove(tmp_stl)
+                except: pass
+                self.finished.emit((mesh, complexity))
+            else:
+                print(f"[PreviewWorker] Preview STL file not found: {tmp_stl}")
+                self.error.emit("Subprocess failed to generate preview STL")
+                
+        except Exception as e:
+            msg = f"[PreviewWorker] Exception in run(): {e}"
+            print(msg)
+            self.log.emit(msg)
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(e))
+
+
+
+class LoadingOverlay(QWidget):
+    """
+    Semi-transparent full-screen overlay with animated spinner.
+    Renders on top of VTK viewer during CAD loading operations.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Prevent mouse events from passing through overlay
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        # Semi-transparent black background
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(0, 0, 0, 0.6);
+            }
+        """)
+        
+        # Vertical layout with center alignment
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        # === SPINNER LABEL ===
+        self.spinner_label = QLabel("|", self)
+        self.spinner_label.setFixedSize(80, 80)  # Fixed size to ensure complete redraws
+        self.spinner_label.setStyleSheet("""
+            QLabel {
+                color: #4A9EFF;           /* Bright blue for visibility */
+                font-size: 64px;          /* Large for prominence */
+                background-color: #1a1a1a; /* Opaque dark background to clear old frames */
+                font-weight: bold;
+            }
+        """)
+        self.spinner_label.setAlignment(Qt.AlignCenter)
+        
+        # === MAIN MESSAGE LABEL ===
+        self.text_label = QLabel("Loading CAD file...", self)
+        self.text_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                background-color: transparent;
+                padding: 10px;
+                font-weight: bold;
+            }
+        """)
+        self.text_label.setAlignment(Qt.AlignCenter)
+        
+        self.subtitle_label = QLabel("", self)
+        self.subtitle_label.setFixedHeight(30)  # Fixed height to prevent overlap
+        self.subtitle_label.setStyleSheet("""
+            QLabel {
+                color: #CCCCCC;           /* Lighter gray for secondary info */
+                font-size: 14px;
+                background-color: transparent;
+                padding: 5px;
+            }
+        """)
+        self.subtitle_label.setAlignment(Qt.AlignCenter)
+        self.subtitle_label.hide()  # Hidden by default
+        
+        # Create a container widget to center everything properly
+        container = QWidget(self)
+        container_layout = QVBoxLayout(container)
+        container_layout.setSpacing(10)
+        container_layout.setAlignment(Qt.AlignCenter)
+        
+        # Add widgets to container
+        container_layout.addWidget(self.spinner_label, 0, Qt.AlignHCenter)
+        container_layout.addWidget(self.text_label)
+        container_layout.addWidget(self.subtitle_label)
+        
+        # Add container to main layout
+        layout.addWidget(container)
+        
+        # === ANIMATION TIMER ===
+        self.frame = 0  # Current animation frame (0-7)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.animate)
+
+    def animate(self):
+        """
+        Rotate spinner through animation cycle.
+        """
+        chars = ['|', '/', '—', '\\']
+        self.frame = (self.frame + 1) % len(chars)
+        self.spinner_label.setText(chars[self.frame])
+        self.spinner_label.update()  # Schedule repaint
+        QApplication.processEvents()  # Process pending events
+
+    def show(self):
+        # Hide parent's info label to prevent text overlap
+        if self.parent() and hasattr(self.parent(), 'info_label'):
+            self.parent().info_label.hide()
+            
+        super().show()
+        self.frame = 0
+        self.timer.start(100)  # 10 fps
+
+    def hide(self):
+        self.timer.stop()
+        self.subtitle_label.hide()
+        super().hide()
+        
+        # Restore parent's info label
+        if self.parent() and hasattr(self.parent(), 'info_label'):
+            self.parent().info_label.show()
+
+    def set_message(self, message: str, subtitle: str = ""):
+        """
+        Update loading message and optional subtitle.
+        Called from main thread during loading phases.
+        """
+        self.text_label.setText(message)
+        if subtitle:
+            self.subtitle_label.setText(subtitle)
+            self.subtitle_label.show()
+        else:
+            self.subtitle_label.setText("")  # Clear old text
+            self.subtitle_label.hide()
+
+
 class VTK3DViewer(QFrame):
     """3D viewer with quality report overlay"""
     
     # Signal to request application exit
     exit_requested = pyqtSignal()
+    log_requested = pyqtSignal(str)   # Signal to pass logs to main GUI
+    progress_update = pyqtSignal(str, float) # Signal for loading progress
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -263,6 +616,10 @@ class VTK3DViewer(QFrame):
         self.info_label.setMaximumHeight(300)
         self.info_label.move(10, 10)
         self.info_label.show()
+
+        # Create loading overlay
+        self.loading_overlay = LoadingOverlay(self)
+        self.loading_overlay.hide()  # Hidden by default
 
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
@@ -395,6 +752,10 @@ class VTK3DViewer(QFrame):
                 self.width() - self.iteration_container.width() - 15,
                 self.height() - self.iteration_container.height() - 15
             )
+
+        # Position loading overlay
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.setGeometry(self.rect())
 
     def toggle_axes(self, visible: bool):
         self.axes_widget.SetEnabled(1 if visible else 0)
@@ -3296,3 +3657,181 @@ except Exception as e:
             import traceback
             traceback.print_exc()
             return "FAILED"
+
+    # =========================================================================
+    # ITERATION 5: ASYNC 5-STAGE CAD LOADING WITH PERSISTENT HQ CACHING
+    # =========================================================================
+
+    def _get_hq_stl_cache_path(self, cad_filepath: str) -> str:
+        """
+        Generate persistent cache path for HQ STL based on CAD file.
+        Uses filename + modification time hash to invalidate cache on file changes.
+        """
+        import hashlib
+        from pathlib import Path
+        
+        cad_path = Path(cad_filepath)
+        basename = cad_path.stem  # filename without extension
+        
+        # Generate hash from file path + modification time
+        mtime = os.path.getmtime(cad_filepath)
+        hash_input = f"{cad_filepath}_{mtime}".encode('utf-8')
+        file_hash = hashlib.md5(hash_input).hexdigest()[:6]  # Short hash
+        
+        # Store in generated_meshes directory
+        cache_dir = Path(__file__).parent.parent.parent / "cli" / "generated_meshes"
+        cache_dir.mkdir(exist_ok=True, parents=True)
+        
+        cache_filename = f"{basename}_{file_hash}_hq.stl"
+        return str(cache_dir / cache_filename)
+
+    def load_step_file(self, filepath: str):
+        """
+        Stage 1: Initiate CAD load with cache check. Returns immediately (async).
+        """
+        print(f"\n[STAGE 1] Opening CAD session: {os.path.basename(filepath)}")
+        
+        # Check for cached HQ STL
+        self.full_quality_stl_path = self._get_hq_stl_cache_path(filepath)
+        if os.path.exists(self.full_quality_stl_path):
+            print(f"[CACHE HIT] Found existing HQ STL: {os.path.basename(self.full_quality_stl_path)}")
+            self.hq_tessellation_complete = True
+        else:
+            print(f"[CACHE MISS] Will generate HQ STL: {os.path.basename(self.full_quality_stl_path)}")
+            self.hq_tessellation_complete = False
+        
+        # Immediate UI feedback
+        self.loading_overlay.set_message("Reading CAD file...", "Engaging geometry kernels...")
+        self.loading_overlay.show()
+        self.loading_overlay.raise_()
+        QApplication.processEvents()  # Force overlay to draw
+        
+        # Start background thread for Stage 1/2
+        print(f"[STAGE 1] Starting PreviewWorker thread...")
+        self.preview_worker = PreviewWorker(filepath, self)
+        self.preview_worker.finished.connect(self._on_preview_ready)
+        self.preview_worker.error.connect(self._on_preview_error)
+        self.preview_worker.log.connect(self.log_requested.emit)      # Forward to GUI
+        self.preview_worker.progress.connect(self._on_preview_progress) # Handle progress
+        self.preview_worker.start()
+
+    def _on_preview_progress(self, operation: str, value: float):
+        """Update loading overlay with granular progress"""
+        pct = int(value * 100)
+        self.loading_overlay.set_message("Reading CAD file...", f"{operation}: {pct}%")
+        self.progress_update.emit(operation, value) # Forward to main GUI
+
+    def _on_preview_error(self, error_msg: str):
+        print(f"[STAGE 1] ✗ FAILED: {error_msg}")
+        self.loading_overlay.hide()
+        self.info_label.setText(f"Load Error: {error_msg}")
+
+    def _on_preview_ready(self, results):
+        """Stage 2: Geometry results ready from background thread"""
+        mesh, complexity = results
+        print(f"[STAGE 1] ✓ Coarse preview generated")
+        print(f"[STAGE 2] Geometry analyzed: {complexity['surface_count']} surfaces, {complexity['volume']:.1f} mm³")
+        
+        # Stage 3: Display results
+        self._display_preview(mesh, complexity)
+
+    def _display_preview(self, mesh, complexity: dict):
+        """Stage 3: Render coarse preview and start HQ background task"""
+        print(f"[STAGE 3] Displaying coarse preview to user (non-blocking)")
+        self.clear_view()
+        
+        # Render coarse mesh
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(mesh)
+        self.current_actor = vtk.vtkActor()
+        self.current_actor.SetMapper(mapper)
+        self.current_actor.GetProperty().SetColor(0.7, 0.7, 0.7)
+        self.current_actor.GetProperty().SetOpacity(0.6)
+        self.renderer.AddActor(self.current_actor)
+        self.renderer.ResetCamera()
+        self.vtk_widget.GetRenderWindow().Render()
+        
+        self.loading_overlay.hide() # This also restores info_label
+        print(f"[STAGE 3] ✓ Coarse preview visible - UI is interactive")
+        
+        # Detailed stats in label with filename and dimensions
+        import os
+        filename = os.path.basename(self.preview_worker.filepath)
+        bbox_diag = complexity.get('bbox_diagonal', 0)
+        
+        self.info_label.setText(
+            f"<b>CAD Preview</b><br>"
+            f"<small>{filename}</small><br>"
+            f"Surfaces: {complexity['surface_count']}<br>"
+            f"Size: {bbox_diag:.1f} mm (diagonal)<br>"
+            f"Volume: {complexity['volume']:.1f} mm³"
+        )
+        
+        # Trigger parent GUI updates (Stage 4 prep)
+        if hasattr(self, 'preview_ready_callback'):
+            self.preview_ready_callback(complexity)
+            
+        # Start Stage 3: High-Quality background meshing
+        print(f"[STAGE 3] Starting background high-quality tessellation (non-blocking subprocess)")
+        self._start_hq_tessellation(self.preview_worker.filepath, complexity)
+
+    def _start_hq_tessellation(self, filepath: str, complexity: dict):
+        """Background subprocess for Stage 4/5 source material"""
+        import subprocess
+        import tempfile
+        import sys
+        
+        # Skip if cache already exists
+        if self.hq_tessellation_complete and os.path.exists(self.full_quality_stl_path):
+            print(f"[STAGE 3] Skipping tessellation - using cached HQ STL")
+            return
+        
+        # Path already set in load_step_file (persistent cache location)
+        self.hq_tessellation_complete = False
+        
+        script_content = f"""
+import gmsh
+import sys
+import os
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 2)
+    gmsh.open(r"{filepath}")
+    bbox_diag = {complexity['bbox_diagonal']}
+    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 40.0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 5)
+    gmsh.option.setNumber("General.NumThreads", {os.cpu_count() or 4})
+    gmsh.model.mesh.generate(2)
+    gmsh.write(r"{self.full_quality_stl_path}")
+    gmsh.finalize()
+    sys.exit(0)
+except Exception as e:
+    print(f"Error: {{e}}")
+    sys.exit(1)
+"""
+        script_path = tempfile.mktemp(suffix=".py")
+        with open(script_path, 'w') as f: f.write(script_content)
+        
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        self.hq_tessellation_process = subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags
+        )
+        QTimer.singleShot(5000, self._check_hq_tessellation_progress)
+
+    def _check_hq_tessellation_progress(self):
+        if not hasattr(self, 'hq_tessellation_process'): return
+        if self.hq_tessellation_process.poll() is not None:
+            if self.hq_tessellation_process.returncode == 0:
+                self.hq_tessellation_complete = True
+                print(f"[STAGE 3] ✓ High-quality STL cached at {os.path.basename(self.full_quality_stl_path)}")
+            else:
+                print(f"[STAGE 3] ✗ Background tessellation failed")
+        else:
+            QTimer.singleShot(3000, self._check_hq_tessellation_progress)
+
+    def get_hq_stl_for_meshing(self) -> str:
+        if hasattr(self, 'hq_tessellation_complete') and self.hq_tessellation_complete:
+            if os.path.exists(self.full_quality_stl_path):
+                return self.full_quality_stl_path
+        return None

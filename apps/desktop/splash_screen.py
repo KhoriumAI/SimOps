@@ -27,8 +27,8 @@ class SplashScreen(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         
-        # Fixed size for splash
-        self.setFixedSize(480, 320)
+        # Fixed size for splash - slightly larger to prevent cramping
+        self.setFixedSize(520, 360)
         
         # Center on screen
         self.center_on_screen()
@@ -200,6 +200,10 @@ def create_light_palette() -> QPalette:
 
 # For standalone testing
 if __name__ == "__main__":
+    # Enable High DPI scaling
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setPalette(create_light_palette())

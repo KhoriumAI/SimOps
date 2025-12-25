@@ -20,6 +20,7 @@ if project_root not in sys.path:
 
 # Import Qt basics first (lightweight)
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt
 
 # Import splash screen and palette helper
 from splash_screen import SplashScreen, create_light_palette
@@ -27,6 +28,10 @@ from splash_screen import SplashScreen, create_light_palette
 
 def main():
     """Launch the GUI application with splash screen."""
+    # Enable High DPI scaling
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
     # Create application
     app = QApplication(sys.argv)
     

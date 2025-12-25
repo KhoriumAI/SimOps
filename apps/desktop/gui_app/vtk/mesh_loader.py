@@ -41,6 +41,22 @@ try:
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 1)
     gmsh.option.setNumber("General.Verbosity", 2)
+    
+    # FAST PREVIEW MODE: Disable all geometry healing/optimization
+    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)  # Don't fix small edges
+    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)  # Don't fix small faces
+    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0) # Don't fix degenerated edges
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-3)      # Looser tolerance (faster)
+    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-3)
+    
+    # Disable mesh optimization for preview
+    gmsh.option.setNumber("Mesh.Optimize", 0)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
+    gmsh.option.setNumber("Mesh.HighOrderOptimize", 0)
+    
+    # Use coarse/fast tessellation settings
+    gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 3.0)  # 3x coarser = faster
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)  # Don't adapt to curvature
 
     gmsh.open(r"{filepath}")
 

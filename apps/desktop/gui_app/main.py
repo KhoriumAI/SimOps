@@ -1386,6 +1386,11 @@ class ModernMeshGenGUI(QMainWindow):
         self.viewer = VTK3DViewer(parent=self)
         # Connect explicit exit signal from viewer overlay
         self.viewer.exit_requested.connect(self.exit_application)
+        # Connect callback for async CAD loading
+        self.viewer.preview_ready_callback = self.on_cad_loaded
+        self.viewer.log_requested.connect(self.add_log)
+        self.viewer.progress_update.connect(self.on_cad_progress)
+
         self.right_panel_layout.addWidget(self.viewer, 2)
 
         # Console
@@ -2000,29 +2005,43 @@ class ModernMeshGenGUI(QMainWindow):
             # Clear any existing AI iteration meshes
             self.viewer.clear_iterations()
 
-            # Load CAD and get geometry info
+            # Load CAD and get geometry info (ASYNC now)
             self.add_log(f"[DEBUG] Calling viewer.load_step_file({filepath})")
-            geom_info = self.viewer.load_step_file(filepath)
-            self.add_log(f"[DEBUG] load_step_file returned: {geom_info}")
-            self.current_geom_info = geom_info  # Store for logging
+            self.viewer.load_step_file(filepath)
+            self.add_log(f"[DEBUG] Async load started - waiting for preview...")
+            # Logic continues in on_cad_loaded callback
 
-            # Load geometry for paintbrush (after CAD is loaded)
-            if self.paintbrush_selector:
-                try:
-                    import gmsh
-                    gmsh.initialize()
-                    gmsh.open(filepath)
-                    if self.paintbrush_selector.load_cad_geometry():
-                        self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
-                    gmsh.finalize()
-                except Exception as e:
-                    print(f"Could not load geometry for paintbrush: {e}")
+    def on_cad_loaded(self, geom_info: dict):
+        """Callback when VTK viewer finishes Stage 1 (preview) loading"""
+        self.add_log(f"[DEBUG] CAD preview ready. Info: {geom_info}")
+        self.current_geom_info = geom_info
+        
+        # Load geometry for paintbrush (after CAD is loaded)
+        if self.paintbrush_selector and self.cad_file:
+            try:
+                import gmsh
+                if not gmsh.is_initialized(): gmsh.initialize()
+                
+                # OPTIMIZATION: Disable expensive operations for paintbrush metadata load
+                gmsh.option.setNumber("General.Verbosity", 2)
+                gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+                gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+                gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
+                gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+                gmsh.option.setNumber("Geometry.AutoCoherence", 0)
+                
+                gmsh.open(self.cad_file)
+                if self.paintbrush_selector.load_cad_geometry():
+                    self.add_log(f"Paintbrush: Loaded {len(self.paintbrush_selector.available_surfaces)} surfaces")
+                gmsh.finalize()
+            except Exception as e:
+                print(f"Could not load geometry for paintbrush: {e}")
 
-            # Calculate suggested element counts based on geometry
-            if geom_info and 'volume' in geom_info:
-                self.calculate_suggested_element_counts(geom_info)
-            else:
-                self.add_log("[!] Could not calculate geometry volume - using default element counts")
+        # Calculate suggested element counts based on geometry
+        if geom_info and 'volume' in geom_info:
+            self.calculate_suggested_element_counts(geom_info)
+        else:
+            self.add_log("[!] Could not calculate geometry volume - using default element counts")
 
 
     def calculate_phase_weights(self, element_target, quality_preset):
@@ -2154,6 +2173,15 @@ class ModernMeshGenGUI(QMainWindow):
             "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
             "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
         }
+
+        # Check for pre-generated high-quality STL from Stage 3 background task
+        hq_stl = self.viewer.get_hq_stl_for_meshing()
+        if hq_stl:
+            quality_params["hq_stl_path"] = hq_stl
+            self.add_log(f"[STAGE 4] Using cached high-quality STL for meshing: {os.path.basename(hq_stl)}")
+        else:
+            self.add_log("[STAGE 4] No cached HQ STL ready yet - will tessellate on-demand")
+
 
         # Add painted regions if any exist
         if self.paintbrush_selector and self.paintbrush_selector.get_painted_regions():
@@ -2358,6 +2386,15 @@ class ModernMeshGenGUI(QMainWindow):
         console_text = self.console.toPlainText()
         clipboard.setText(console_text)
         self.add_log("Console output copied to clipboard!")
+
+    def on_cad_progress(self, operation: str, value: float):
+        """Handle granular progress updates from CAD loader"""
+        pct = int(value * 100)
+        # We only log every 10% or so to avoid flooding the console
+        # but the loading overlay will show every update
+        if not hasattr(self, '_last_cad_pct') or pct >= self._last_cad_pct + 10 or pct < self._last_cad_pct:
+            self.add_log(f"[CAD] {operation}: {pct}%")
+            self._last_cad_pct = pct
 
     def update_progress(self, phase: str, percentage: int):
         """Update progress bars and track master progress"""
