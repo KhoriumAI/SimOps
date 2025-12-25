@@ -234,19 +234,20 @@ try:
     # CRITICAL: Skip all quality checks and invalid element fixing for preview
     gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size_max)
     gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size_min)
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
     
-    # Use Automatic algorithm (2) which is more robust than pure MeshAdapt (1)
-    # MeshAdapt failed on many surfaces in the log
+    # Enable curvature check but keep it coarse to avoid "No elements in surface"
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 5) 
+    
+    # Use Automatic algorithm (2) which is more robust
     gmsh.option.setNumber("Mesh.Algorithm", 2)
     
-    # RELAXED "One-and-Done": Allow 2 retries instead of 1 to recover valid geometry
-    # The previous setting was strict "1" which caused "No elements in surface" errors
-    gmsh.option.setNumber("Mesh.MaxRetries", 2)
+    # RELAXED "One-and-Done": Allow retries to recover valid geometry
+    gmsh.option.setNumber("Mesh.MaxRetries", 3)
     
-    # Minimal quality checks (enabled but very loose) to prevent total failure
-    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 3) # Very coarse circle
-    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)  # Minimum needed
+    # Minimal quality checks to preventing empty surfaces
+    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 5)  # Hexagon minimum
+    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)   # Line minimum
+    gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 6) # Hexagon minimum
     
     # Set optional optimization flags (may not exist in older gmsh versions)
     try:
