@@ -73,10 +73,16 @@ def run_pre_simulation_checks(
             messages.append(f"⚠ Geometry validation skipped: {e}")
     
     # Check 2: Mesh File Exists
-    if mesh_file and mesh_file.exists():
-        checks_passed.append(True)
-        messages.append(f"✓ Mesh file exists: {mesh_file.name}")
-        logger.info(f"[Pre-Sim] Mesh file check: PASSED ({mesh_file.name})")
+    # Allow "placeholder" to pass (used during pre-checking before meshing)
+    if mesh_file and (mesh_file.exists() or mesh_file.name == "placeholder"):
+        if mesh_file.name == "placeholder":
+             checks_passed.append(True)
+             messages.append(f"✓ Mesh file check skipped (placeholder)")
+             logger.info(f"[Pre-Sim] Mesh file check: SKIPPED (placeholder)")
+        else:
+             checks_passed.append(True)
+             messages.append(f"✓ Mesh file exists: {mesh_file.name}")
+             logger.info(f"[Pre-Sim] Mesh file check: PASSED ({mesh_file.name})")
     else:
         checks_passed.append(False)
         messages.append(f"✗ Mesh file not found: {mesh_file}")

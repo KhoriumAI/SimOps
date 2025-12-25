@@ -14,6 +14,8 @@ LABEL version="1.1"
 
 # Copy application code (this is all that changes between rebuilds)
 COPY --chown=simops:simops simops_worker.py .
+COPY --chown=simops:simops result_dispatcher.py .
+COPY --chown=simops:simops simops_pipeline.py .
 COPY --chown=simops:simops core/ ./core/
 
 # Switch to non-root user

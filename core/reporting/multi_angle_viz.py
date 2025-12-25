@@ -487,3 +487,183 @@ def _generate_mesh_fallback(mesh: pv.DataSet, output_dir: Path, job_name: str, a
             logger.error(f"Failed to generate mesh fallback for {angle}: {e}")
     
     return image_paths
+
+
+def generate_velocity_contour_slices(
+    vtk_path: str,
+    output_dir: Path,
+    job_name: str,
+    planes: List[str] = None
+) -> List[str]:
+    """
+    Generate velocity contour slice visualizations - flat planar cuts showing 
+    velocity magnitude as a color gradient (heatmap).
+    
+    Args:
+        vtk_path: Path to OpenFOAM VTU/VTK file
+        output_dir: Directory to save images
+        job_name: Job name for file naming
+        planes: List of planes ['xy', 'xz', 'yz'] (default: all three)
+        
+    Returns:
+        List of paths to generated images
+    """
+    if planes is None:
+        planes = ['xy', 'xz', 'yz']
+    
+    image_paths = []
+    
+    try:
+        # Load mesh
+        mesh = pv.read(vtk_path)
+        logger.info(f"[ContourSlice] Loaded mesh with {mesh.n_points} points")
+        
+        # Find velocity field
+        velocity_field = None
+        for field_name in ['U', 'velocity', 'Velocity', 'VELOCITY']:
+            if field_name in mesh.point_data:
+                velocity_field = field_name
+                break
+            elif field_name in mesh.cell_data:
+                mesh = mesh.cell_data_to_point_data()
+                if field_name in mesh.point_data:
+                    velocity_field = field_name
+                    break
+        
+        if not velocity_field:
+            logger.warning("[ContourSlice] No velocity field found")
+            return []
+        
+        # Calculate velocity magnitude
+        U = mesh.point_data[velocity_field]
+        mesh['velocity_magnitude'] = np.linalg.norm(U, axis=1)
+        
+        # Get bounds and center
+        bounds = mesh.bounds
+        xmin, xmax, ymin, ymax, zmin, zmax = bounds
+        center = mesh.center
+        
+        # Define slice planes through center (object assumed at origin)
+        slice_origin = (0, 0, 0)  # Slice through object center
+        
+        plane_configs = {
+            'xy': {
+                'normal': (0, 0, 1),  # XY plane, normal along Z
+                'origin': (0, 0, 0),
+                'title': 'Top Slice (XY Plane)',
+                'camera_pos': (0, 0, (zmax - zmin) * 2),
+                'view_up': (0, 1, 0)
+            },
+            'xz': {
+                'normal': (0, 1, 0),  # XZ plane, normal along Y
+                'origin': (0, 0, 0),
+                'title': 'Side Slice (XZ Plane)',
+                'camera_pos': (0, (ymax - ymin) * 2, 0),
+                'view_up': (0, 0, 1)
+            },
+            'yz': {
+                'normal': (1, 0, 0),  # YZ plane, normal along X
+                'origin': (0, 0, 0),
+                'title': 'Front Slice (YZ Plane)',
+                'camera_pos': ((xmax - xmin) * 2, 0, 0),
+                'view_up': (0, 0, 1)
+            }
+        }
+        
+        # Get velocity range for consistent colormap
+        vel_mag = mesh['velocity_magnitude']
+        vmin, vmax = vel_mag.min(), vel_mag.max()
+        logger.info(f"[ContourSlice] Velocity range: {vmin:.3f} - {vmax:.3f} m/s")
+        
+        for plane_name in planes:
+            if plane_name not in plane_configs:
+                continue
+                
+            config = plane_configs[plane_name]
+            output_path = output_dir / f"{job_name}_contour_{plane_name}.png"
+            
+            try:
+                # Create slice
+                slice_mesh = mesh.slice(
+                    normal=config['normal'],
+                    origin=config['origin']
+                )
+                
+                if slice_mesh.n_points == 0:
+                    logger.warning(f"[ContourSlice] Empty slice for {plane_name}, skipping")
+                    continue
+                
+                # Create plotter
+                plotter = pv.Plotter(off_screen=True, window_size=[1920, 1080])
+                plotter.set_background('white')
+                
+                # Add the velocity contour slice
+                plotter.add_mesh(
+                    slice_mesh,
+                    scalars='velocity_magnitude',
+                    cmap='jet',
+                    clim=[vmin, vmax],
+                    show_edges=False,
+                    lighting=False,
+                    scalar_bar_args={
+                        'title': 'Velocity (m/s)',
+                        'vertical': True,
+                        'position_x': 0.85,
+                        'position_y': 0.2,
+                        'width': 0.08,
+                        'height': 0.6,
+                        'title_font_size': 14,
+                        'label_font_size': 12,
+                        'color': 'black'
+                    }
+                )
+                
+                # Also add a faint outline of the full mesh for context
+                plotter.add_mesh(
+                    mesh.extract_surface(),
+                    color='lightgray',
+                    opacity=0.1,
+                    show_edges=False
+                )
+                
+                # Set camera for orthographic 2D view
+                plotter.camera.focal_point = (0, 0, 0)
+                plotter.camera.position = config['camera_pos']
+                plotter.camera.up = config['view_up']
+                plotter.camera.parallel_projection = True
+                
+                # Calculate appropriate parallel scale
+                if plane_name == 'xy':
+                    view_extent = max(xmax - xmin, ymax - ymin)
+                elif plane_name == 'xz':
+                    view_extent = max(xmax - xmin, zmax - zmin)
+                else:  # yz
+                    view_extent = max(ymax - ymin, zmax - zmin)
+                
+                # Focus on object area (assume object is ~15% of domain)
+                plotter.camera.parallel_scale = view_extent * 0.15
+                
+                # Title
+                plotter.add_text(
+                    f"{job_name} - {config['title']}",
+                    position='upper_left',
+                    font_size=14,
+                    color='black'
+                )
+                
+                # Save
+                plotter.screenshot(str(output_path))
+                plotter.close()
+                
+                image_paths.append(str(output_path))
+                logger.info(f"[ContourSlice] Saved {plane_name} slice to {output_path}")
+                
+            except Exception as e:
+                logger.error(f"[ContourSlice] Failed to generate {plane_name} slice: {e}")
+                continue
+        
+        return image_paths
+        
+    except Exception as e:
+        logger.exception(f"[ContourSlice] Failed to generate contour slices: {e}")
+        return []

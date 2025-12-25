@@ -41,16 +41,49 @@ class CFDPDFReportGenerator:
         c.setFont("Helvetica-Bold", 14)
         c.drawString(2 * cm, y_start + 0.5 * cm, "Simulation Metrics")
         
+        # Format solve time as HH:MM:SS
+        solve_time_sec = data.get('solve_time', 0)
+        if isinstance(solve_time_sec, (int, float)) and solve_time_sec > 0:
+            hours = int(solve_time_sec // 3600)
+            minutes = int((solve_time_sec % 3600) // 60)
+            seconds = int(solve_time_sec % 60)
+            solve_time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            solve_time_str = "00:00:00"
+        
+        # Format Reynolds number with thousands separator
+        reynolds = data.get('reynolds_number', 'N/A')
+        if isinstance(reynolds, (int, float)) and reynolds != 'N/A':
+            reynolds_str = f"{reynolds:,.0f}"
+        else:
+            reynolds_str = str(reynolds) if reynolds else 'N/A'
+        
+        # Build metrics list - start with always-present items
         metrics = [
             ("Strategy", data.get('strategy_name', 'N/A')),
-            ("Solve Time", f"{data.get('solve_time', 0):.2f} s"),
+            ("Solve Time", solve_time_str),
             ("Mesh Cells", f"{data.get('mesh_cells', 0):,}"),
             ("Inlet Velocity", f"{data.get('u_inlet', 0):.2f} m/s"),
-            ("Reynolds No.", f"{data.get('reynolds_number', 'N/A')}"),
-            ("Drag Coeff (Cd)", f"{data.get('drag_coefficient', 'N/A')}"),
-            ("Lift Coeff (Cl)", f"{data.get('lift_coefficient', 'N/A')}"),
-            ("Turbulence", str(data.get('viscosity_model', 'N/A'))),
+            ("Reynolds No.", reynolds_str),
         ]
+        
+        # Only include coefficients if they have numeric values (not 'N/A' or None)
+        cd = data.get('drag_coefficient', 'N/A')
+        cl = data.get('lift_coefficient', 'N/A')
+        
+        # Format if float
+        if isinstance(cd, float):
+            cd = f"{cd:.4f}"
+        if isinstance(cl, float):
+            cl = f"{cl:.4f}"
+        
+        if cd not in ['N/A', None, 'None']:
+            metrics.append(("Drag Coeff (Cd)", cd))
+        if cl not in ['N/A', None, 'None']:
+            metrics.append(("Lift Coeff (Cl)", cl))
+        
+        # Add turbulence model (dynamic, not hardcoded)
+        metrics.append(("Viscosity Model", str(data.get('viscosity_model', 'Laminar'))))
         
         c.setFont("Helvetica", 11)
         row_height = 0.8 * cm

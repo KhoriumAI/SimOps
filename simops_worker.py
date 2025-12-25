@@ -66,7 +66,7 @@ from core.solvers.calculix_adapter import CalculiXAdapter
 from core.solvers.calculix_structural import CalculiXStructuralAdapter
 from core.solvers.cfd_solver import CFDSolver
 from core.reporting.cfd_report import CFDPDFReportGenerator
-from core.reporting.multi_angle_viz import generate_multi_angle_streamlines
+from core.reporting.multi_angle_viz import generate_multi_angle_streamlines, generate_velocity_contour_slices
 
 # Supported Mesh Extensions
 MESH_EXTENSIONS = {'.msh', '.vtk', '.vtu', '.unv', '.inp'}
@@ -193,68 +193,91 @@ def generate_mesh_with_strategy(
     strategy: Dict,
     sim_config: Optional['SimulationConfig'] = None # Added config
 ) -> str:
-    """
-    Generate CFD mesh using the given strategy.
-    Delegates to core.strategies.cfd_strategy.
-    """
-    from core.strategies.cfd_strategy import CFDMeshStrategy, CFDMeshConfig
-    
     job_name = Path(cad_file).stem
-    output_file = output_dir / f"{job_name}_{strategy['name']}.msh"
+    strategy_name = strategy.get('name', 'Unknown')
+    output_file = output_dir / f"{job_name}_{strategy_name}.msh"
     
-    logger.info(f"Meshing with strategy: {strategy['name']}")
-    
-    # Map strategy params to config
-    # Use mesh_size_factor directly or fallback to mesh_size/0.5 for back-compat
-    base_factor = strategy.get('mesh_size_factor', strategy.get('mesh_size', 0.5) / 0.5)
-    
+    logger.info(f"Meshing with strategy: {strategy_name}")
+
+    # Define mesh scaling based on strategy (HighFi=1.0, LowFi=Coarser)
+    scalings = {
+        "HighFi_Layered": 1.0,
+        "MedFi_Robust": 2.0,
+        "LowFi_Emergency": 4.0
+    }
+    base_factor = scalings.get(strategy_name, strategy.get('mesh_size_factor', 1.0))
+
     # Overrides from Sidecar
     second_order = False
-    if sim_config and sim_config.meshing:
-        if sim_config.meshing.second_order:
+    config_mesh_size = 1.0
+    if sim_config and hasattr(sim_config, 'meshing') and sim_config.meshing:
+        config_mesh_size = getattr(sim_config.meshing, 'mesh_size_factor', 1.0)
+        if hasattr(sim_config.meshing, 'second_order') and sim_config.meshing.second_order:
             second_order = True
             logger.info("  [Override] Enabling Second-Order Elements (Sidecar)")
-        if sim_config.meshing.mesh_size_multiplier != 1.0:
+        if hasattr(sim_config.meshing, 'mesh_size_multiplier') and sim_config.meshing.mesh_size_multiplier != 1.0:
             base_factor *= sim_config.meshing.mesh_size_multiplier
             logger.info(f"  [Override] Scaling mesh size by {sim_config.meshing.mesh_size_multiplier}")
 
     # Intelligent Wind Tunnel Detection
-    # Enable wind tunnel for external flow CFD (when inlet_velocity > 0)
     enable_wind_tunnel = False
-    if sim_config and hasattr(sim_config.physics, 'simulation_type'):
-        if sim_config.physics.simulation_type == 'cfd':
+    sim_type = 'cfd'
+    if sim_config and hasattr(sim_config, 'physics'):
+        sim_type = getattr(sim_config.physics, 'simulation_type', 'thermal')
+        if sim_type == 'cfd':
             if hasattr(sim_config.physics, 'inlet_velocity') and sim_config.physics.inlet_velocity > 0:
                 enable_wind_tunnel = True
-                logger.info(f"  [Wind Tunnel] Enabled for external flow (v={sim_config.physics.inlet_velocity} m/s)")
-            else:
-                logger.info("  [Wind Tunnel] Disabled (inlet_velocity = 0 or not set)")
+                logger.info(f"  [Wind Tunnel] Enabled for external flow")
+
+    # ---------------------------------------------------------
+    # CHECKS & BALANCES: Load Correct Physics Configuration
+    # ---------------------------------------------------------
     
-    config = CFDMeshConfig(
-        num_layers=strategy.get('num_layers', 5),
-        growth_rate=strategy.get('growth_rate', 1.2),
-        mesh_size_factor=base_factor,
-        create_prisms=True,
-        optimize_netgen=strategy.get('optimize', True),
-        smoothing_steps=10,
-        second_order=second_order,
-        virtual_wind_tunnel=enable_wind_tunnel
-    )
-    
-    logger.info(f"  [DEBUG] CFDMeshConfig: virtual_wind_tunnel={config.virtual_wind_tunnel}")
-    
-    # Pass tagging rules from sidecar if available
-    tagging_rules = sim_config.tagging_rules if sim_config else []
-    
-    runner = CFDMeshStrategy(verbose=True)
-    # Note: We need to pass tagging rules to strategy. 
-    # Current API is generate_cfd_mesh(cad, out, config).
-    # We'll update strategy instance with rules before calling generate.
-    runner.tagging_rules = tagging_rules
-    
-    success, stats = runner.generate_cfd_mesh(cad_file, str(output_file), config)
+    # If structural, use Structural Strategy
+    if sim_type == 'structural':
+        from core.strategies.structural_strategy import StructuralMeshConfig, StructuralMeshStrategy
+        
+        logger.info("[Meshing] Using Structural Strategy (Checks & Balances)")
+        
+        mesh_config = StructuralMeshConfig(
+            mesh_size_factor=config_mesh_size * base_factor,
+            second_order=second_order,
+            optimize=strategy.get('optimize', True)
+        )
+        
+        runner = StructuralMeshStrategy(verbose=True)
+        success, stats = runner.generate_mesh(cad_file, str(output_file), mesh_config)
+
+    else:
+        # Default to CFD / Thermal 
+        from core.strategies.cfd_strategy import CFDMeshConfig, CFDMeshStrategy
+        
+        logger.info("[Meshing] Using CFD/Thermal Strategy")
+        
+        config = CFDMeshConfig(
+            num_layers=strategy.get('num_layers', 5),
+            growth_rate=strategy.get('growth_rate', 1.2),
+            mesh_size_factor=config_mesh_size * base_factor,
+            create_prisms=True,
+            optimize_netgen=strategy.get('optimize', True),
+            smoothing_steps=10,
+            virtual_wind_tunnel=enable_wind_tunnel
+        )
+        
+        logger.info(f"  [DEBUG] CFDMeshConfig: virtual_wind_tunnel={config.virtual_wind_tunnel}")
+        
+        # Pass tagging rules from sidecar if available
+        tagging_rules = sim_config.tagging_rules if sim_config else []
+        
+        runner = CFDMeshStrategy(verbose=True)
+        runner.tagging_rules = tagging_rules
+        
+        success, stats = runner.generate_cfd_mesh(cad_file, str(output_file), config)
     
     if not success:
         raise RuntimeError(f"Mesh generation failed: {stats.get('error')}")
+        
+    return str(output_file)
         
     # Export Metadata Sidecar (e.g. for Characteristic Length)
     if runner.wind_tunnel_data:
@@ -1316,10 +1339,27 @@ def run_cfd_simulation(
                 viz_success = True
                 # Set primary path to the first one (likely iso) for metadata
                 viz_path = Path(generated_paths[0]) 
-                logger.info(f"Generated {len(all_viz_paths)} visualization images.")
+                logger.info(f"Generated {len(all_viz_paths)} streamline images.")
                 
         except Exception as e:
             logger.warning(f"Multi-Angle viz failed: {e}")
+
+        # Also generate velocity contour slices (planar cuts showing velocity heatmap)
+        try:
+            logger.info("Generating Velocity Contour Slices (Cross-Sectional Heatmaps)...")
+            contour_paths = generate_velocity_contour_slices(
+                vtk_path=str(vtk_path),
+                output_dir=output_dir,
+                job_name=job_name,
+                planes=['xy', 'xz', 'yz']
+            )
+            
+            if contour_paths:
+                all_viz_paths.extend(contour_paths)
+                logger.info(f"Generated {len(contour_paths)} contour slice images.")
+                
+        except Exception as e:
+            logger.warning(f"Contour slice viz failed: {e}")
 
         # Fallback to internal velocity visualization if simple
         if not viz_success:
@@ -1386,8 +1426,13 @@ def run_cfd_simulation(
             logger.info("-" * 40)
             logger.info(f"   RESULTS SUMMARY: {job_name}")
             logger.info(f"   Converged: {result_data.get('converged', 'N/A')}")
+            # Show failure reason prominently if simulation failed
+            if not result_data.get('converged', False) and 'error_message' in result_data:
+                logger.error(f"   FAILURE: {result_data['error_message']}")
             logger.info(f"   Solve Time: {result_data.get('solve_time', 0):.2f} s")
             logger.info(f"   Reynolds:   {result_data.get('reynolds', 'N/A')}")
+            logger.info(f"   Mesh Cells: {result_data.get('num_cells', 0):,}")
+            logger.info(f"   Turbulence: {result_data.get('turbulence_model', 'N/A')}")
             # If using fallback, these will be N/A. If OpenFOAM runs, we might see values if parsed.
             logger.info("-" * 40)
 
