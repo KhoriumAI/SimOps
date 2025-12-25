@@ -184,17 +184,20 @@ try:
     gmsh.option.setNumber("General.Terminal", 0)  # Completely silent
     gmsh.option.setNumber("General.Verbosity", 0) # No output at all
     
-    # FAST PREVIEW: Disable geometry healing and metadata parsing
-    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
-    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
-    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
-    # Revert to standard tolerance (aggressive coarsening should handle speed, not sloppy tolerance)
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-7)
-    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-7)
+    # SAFETY: Enable minimal healing to prevent "No elements in surface" on complex CAD
+    # Disabling these caused failures on Mac/Linux for sliver surfaces
+    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)
+    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
+    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 1)
     
-    # Fast preview settings (standard OCC flags)
-    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
-    gmsh.option.setNumber("Geometry.AutoCoherence", 0)
+    # Use standard tolerance (1e-6) instead of aggressive 1e-3
+    # Aggressive tolerance was causing invalid geometry merges
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
+    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-6)
+    
+    # AutoCoherence already enabled by default or above
+    # Duplicate lines removed
 
     gmsh.model.add("ComplexityAnalysis")
     gmsh.open(r"{self.filepath}")
