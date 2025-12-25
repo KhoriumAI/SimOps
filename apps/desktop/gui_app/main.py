@@ -1974,8 +1974,8 @@ class ModernMeshGenGUI(QMainWindow):
         if filepath:
             file_ext = Path(filepath).suffix.lower()
 
-            # Check if it's a mesh file
-            if file_ext == '.msh':
+            # Check if it's a mesh file (MSH, STL, VTU)
+            if file_ext in ['.msh', '.stl', '.vtu']:
                 # Load mesh directly
                 self.cad_file = None  # No CAD file
                 self.file_label.setText(f"{Path(filepath).name}")
@@ -2015,6 +2015,11 @@ class ModernMeshGenGUI(QMainWindow):
         """Callback when VTK viewer finishes Stage 1 (preview) loading"""
         self.add_log(f"[DEBUG] CAD preview ready. Info: {geom_info}")
         self.current_geom_info = geom_info
+        
+        # Pass user's mesh size settings to viewer for HQ tessellation
+        self.viewer.user_max_size = self.max_size.value()
+        self.viewer.user_min_size = self.min_size.value()
+        self.add_log(f"[DEBUG] Passed mesh sizes to viewer: max={self.max_size.value()}, min={self.min_size.value()}")
         
         # Load geometry for paintbrush (after CAD is loaded)
         if self.paintbrush_selector and self.cad_file:

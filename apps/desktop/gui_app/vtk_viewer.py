@@ -181,8 +181,8 @@ import os
 
 try:
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 1)
-    gmsh.option.setNumber("General.Verbosity", 2) # Reduce log spam
+    gmsh.option.setNumber("General.Terminal", 0)  # Completely silent
+    gmsh.option.setNumber("General.Verbosity", 0) # No output at all
     
     # FAST PREVIEW: Disable geometry healing and metadata parsing
     gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
@@ -235,13 +235,18 @@ try:
     gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size_max)
     gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size_min)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
-    gmsh.option.setNumber("Mesh.Algorithm", 2)  # Automatic - usually fastest for messy models
     
-    # CRITICAL: Disable all internal fixing and quality-based retries
-    gmsh.option.setNumber("Mesh.MaxRetries", 1)         # Don't try to fix failed polygons
-    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 0) # Don't refine circles
-    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 0)  # Don't refine curves
-    gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 0) # Disable curvature checks
+    # Use Automatic algorithm (2) which is more robust than pure MeshAdapt (1)
+    # MeshAdapt failed on many surfaces in the log
+    gmsh.option.setNumber("Mesh.Algorithm", 2)
+    
+    # RELAXED "One-and-Done": Allow 2 retries instead of 1 to recover valid geometry
+    # The previous setting was strict "1" which caused "No elements in surface" errors
+    gmsh.option.setNumber("Mesh.MaxRetries", 2)
+    
+    # Minimal quality checks (enabled but very loose) to prevent total failure
+    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 3) # Very coarse circle
+    gmsh.option.setNumber("Mesh.MinimumCurvePoints", 2)  # Minimum needed
     
     # Set optional optimization flags (may not exist in older gmsh versions)
     try:
@@ -583,6 +588,10 @@ class VTK3DViewer(QFrame):
         # Progressive loading state
         self.hq_worker = None
         self.current_cad_path = None
+        
+        # User mesh size settings (from GUI)
+        self.user_max_size = None  # Will be set by main.py
+        self.user_min_size = None  # Will be set by main.py
 
         # Paintbrush visual feedback
         self.brush_cursor_actor = None
@@ -3795,15 +3804,35 @@ import sys
 import os
 try:
     gmsh.initialize()
-    gmsh.option.setNumber("General.Verbosity", 2)
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Verbosity", 3)  # Show progress
+    
+    print("[HQ] Opening CAD file...", flush=True)
     gmsh.open(r"{filepath}")
+    
     bbox_diag = {complexity['bbox_diagonal']}
-    gmsh.option.setNumber("Mesh.MeshSizeMax", bbox_diag / 40.0)
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 5)
+    
+    # Use user-specified mesh sizes from GUI if available
+    user_max = {self.user_max_size if self.user_max_size else 'bbox_diag / 20.0'}
+    user_min = {self.user_min_size if self.user_min_size else 'bbox_diag / 100.0'}
+    
+    gmsh.option.setNumber("Mesh.MeshSizeMax", user_max)
+    gmsh.option.setNumber("Mesh.MeshSizeMin", user_min)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 10)  # Less aggressive than 5
     gmsh.option.setNumber("General.NumThreads", {os.cpu_count() or 4})
+    
+    # Disable geometry healing to match fast preview
+    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
+    
+    print("[HQ] Generating 2D mesh...", flush=True)
     gmsh.model.mesh.generate(2)
+    
+    print(f"[HQ] Writing to cache...", flush=True)
     gmsh.write(r"{self.full_quality_stl_path}")
     gmsh.finalize()
+    print("[HQ] Complete!", flush=True)
     sys.exit(0)
 except Exception as e:
     print(f"Error: {{e}}")
@@ -3815,18 +3844,31 @@ except Exception as e:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         self.hq_tessellation_process = subprocess.Popen(
             [sys.executable, script_path],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags, text=True
         )
-        QTimer.singleShot(5000, self._check_hq_tessellation_progress)
+        print(f"[STAGE 3] Background HQ tessellation started (will check every 2s)")
+        QTimer.singleShot(2000, self._check_hq_tessellation_progress)
 
     def _check_hq_tessellation_progress(self):
         if not hasattr(self, 'hq_tessellation_process'): return
+        
+        # Read any output from the subprocess
+        if self.hq_tessellation_process.stdout:
+            try:
+                while True:
+                    line = self.hq_tessellation_process.stdout.readline()
+                    if not line:
+                        break
+                    print(line.strip())
+            except:
+                pass
+        
         if self.hq_tessellation_process.poll() is not None:
             if self.hq_tessellation_process.returncode == 0:
                 self.hq_tessellation_complete = True
                 print(f"[STAGE 3] ✓ High-quality STL cached at {os.path.basename(self.full_quality_stl_path)}")
             else:
-                print(f"[STAGE 3] ✗ Background tessellation failed")
+                print(f"[STAGE 3] ✗ Background tessellation failed (code {self.hq_tessellation_process.returncode})")
         else:
             QTimer.singleShot(3000, self._check_hq_tessellation_progress)
 
