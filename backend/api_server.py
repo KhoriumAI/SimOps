@@ -1100,20 +1100,47 @@ except Exception as e:
 '''
     
     try:
-        # Increase timeout to 600 seconds for complex geometry
-        result = subprocess.run(
-            [sys.executable, '-c', gmsh_script],
-            capture_output=True,
+        # Stream output in real-time so diagnostics appear immediately in logs
+        import time
+        process = subprocess.Popen(
+            [sys.executable, '-u', '-c', gmsh_script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=600
+            bufsize=1  # Line buffered
         )
         
-        print(f"[PREVIEW] Subprocess stdout: {result.stdout[:500] if result.stdout else 'empty'}")
-        if result.stderr:
-            print(f"[PREVIEW] Subprocess stderr: {result.stderr[:500]}")
+        print("[PREVIEW] Subprocess started, streaming output...")
+        
+        # Stream output line by line
+        stdout_lines = []
+        start_time = time.time()
+        
+        while True:
+            # Check for timeout
+            if time.time() - start_time > 600:
+                process.kill()
+                raise subprocess.TimeoutExpired(process.args, 600)
+            
+            # Read line (with timeout)
+            line = process.stdout.readline()
+            
+            if not line and process.poll() is not None:
+                break  # Process finished
+                
+            if line:
+                line = line.strip()
+                stdout_lines.append(line)
+                # Print immediately to logs
+                print(f"[GMSH-SUBPROCESS] {line}", flush=True)
+        
+        process.wait()
+        stdout = '\n'.join(stdout_lines)
+        
+        print(f"[PREVIEW] Subprocess finished with return code: {process.returncode}")
         
         # Parse output
-        for line in result.stdout.split('\n'):
+        for line in stdout.split('\n'):
             if line.startswith('MESH_DATA:'):
                 data = json_lib.loads(line[10:])
                 vertices = data['vertices']
@@ -1139,10 +1166,10 @@ except Exception as e:
                 raise Exception(line[6:])
         
         # Check for all failed message
-        if 'All meshing attempts failed' in result.stdout or 'All meshing attempts failed' in result.stderr:
+        if 'All meshing attempts failed' in stdout:
             raise Exception("Could not mesh this geometry - it may be too complex or have invalid surfaces")
         
-        raise Exception(f"No mesh data in output: {result.stdout[:200] if result.stdout else 'empty'} | stderr: {result.stderr[:200] if result.stderr else 'empty'}")
+        raise Exception(f"No mesh data in output: {stdout[:200] if stdout else 'empty'}")
         
     except subprocess.TimeoutExpired:
         print("[PREVIEW] Subprocess timed out after 600 seconds")
