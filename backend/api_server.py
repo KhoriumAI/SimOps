@@ -899,6 +899,42 @@ def parse_step_file_for_preview(step_filepath: str):
     
     print(f"[PREVIEW] Starting preview generation for: {step_filepath}")
     
+    # ============================================================================
+    # STEP 1: Try forwarding to Threadripper workstation via SSH tunnel
+    # ============================================================================
+    try:
+        import requests
+        print("[PREVIEW] Attempting to forward to Threadripper via SSH tunnel (localhost:8080)...")
+        
+        with open(step_filepath, 'rb') as f:
+            # SSH tunnel maps localhost:8080 -> Threadripper:8080
+            response = requests.post(
+                "http://localhost:8080/mesh",
+                files={'file': ('model.step', f, 'application/octet-stream')},
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                print("[PREVIEW] ✓ Threadripper completed successfully - using remote result")
+                result = response.json()
+                # Convert Threadripper response format to our format if needed
+                return result
+            else:
+                print(f"[PREVIEW] Threadripper returned error status {response.status_code}: {response.text[:200]}")
+                
+    except requests.exceptions.ConnectionError as e:
+        print(f"[PREVIEW] Threadripper unavailable (connection refused): {e}")
+    except requests.exceptions.Timeout as e:
+        print(f"[PREVIEW] Threadripper request timed out after 120s: {e}")
+    except Exception as e:
+        print(f"[PREVIEW] Threadripper forwarding failed: {e}")
+    
+    print("[PREVIEW] Falling back to AWS local compute...")
+    
+    # ============================================================================
+    # STEP 2: Fallback to AWS local GMSH computation
+    # ============================================================================
+    
     # Create temp file for STL output
     with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
         tmp_stl = tmp.name
