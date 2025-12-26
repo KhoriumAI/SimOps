@@ -1401,6 +1401,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
 
     except Exception as e:
         import traceback
+        print(f"[ERROR] Mesh generation failed: {e}", flush=True)
+        print(f"[ERROR] Traceback:\n{traceback.format_exc()}", flush=True)
         return {
             'success': False,
             'error': str(e),

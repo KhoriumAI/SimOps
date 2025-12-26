@@ -939,12 +939,19 @@ def try_mesh(mesh_factor, algorithm=5, tolerance=1e-3):
     
     # Generate 2D surface mesh
     gmsh.model.mesh.generate(2)
+    # Force GMSH to skip the 'stuck' healing process
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 0) 
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-3)
+    gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt is more stable for dirty CAD
     
     return True
 
 try:
+    print(f"[PREVIEW] Initializing Gmsh for CAD: {step_filepath}")
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 0)
+    # Increase verbosity for debugging
+    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Verbosity", 3)
     
     # Aggressive OCC healing options for problematic CAD files
     gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
@@ -966,8 +973,11 @@ try:
     gmsh.option.setNumber("Mesh.Smoothing", 3)
     gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
     
+    print(f"[PREVIEW] Loading STEP file: {step_filepath}")
     gmsh.open(r"{step_filepath}")
+    print("[PREVIEW] Synchronizing OCC model...")
     gmsh.model.occ.synchronize()
+    print("[PREVIEW] CAD loaded successfully.")
     
     # Extract CAD geometry info BEFORE meshing
     volumes = gmsh.model.getEntities(3)  # 3D entities (volumes)
@@ -979,6 +989,14 @@ try:
     bbox = gmsh.model.getBoundingBox(-1, -1)
     bbox_size = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
     diag = (bbox_size[0]**2 + bbox_size[1]**2 + bbox_size[2]**2)**0.5
+    
+    print(f"[PREVIEW] Geometry Info:")
+    print(f"  - Volumes: {len(volumes)}")
+    print(f"  - Surfaces: {len(surfaces)}")
+    print(f"  - Curves: {len(curves)}")
+    print(f"  - Points: {len(points)}")
+    print(f"  - Bounding Box: {bbox_size[0]:.2f} x {bbox_size[1]:.2f} x {bbox_size[2]:.2f}")
+    print(f"  - Diagonal: {diag:.2f}")
     
     # Calculate volume if possible
     total_volume = 0.0
@@ -1001,14 +1019,15 @@ try:
     ]
     
     mesh_success = False
-    for mesh_factor, algo, tol in mesh_attempts:
+    for i, (mesh_factor, algo, tol) in enumerate(mesh_attempts):
         try:
+            print(f"[PREVIEW] Attempt {i+1}/{len(mesh_attempts)}: sizing=diag/{mesh_factor}, algo={algo}, tolerance={tol}")
             try_mesh(mesh_factor, algorithm=algo, tolerance=tol)
             mesh_success = True
-            print(f"MESH_OK:factor={{mesh_factor}},algo={{algo}}", file=sys.stderr)
+            print(f"MESH_OK:factor={mesh_factor},algo={algo}", file=sys.stderr)
             break
         except Exception as mesh_err:
-            print(f"RETRY:factor={{mesh_factor}},algo={{algo}} failed: {{mesh_err}}", file=sys.stderr)
+            print(f"RETRY:factor={mesh_factor},algo={algo} failed: {mesh_err}", file=sys.stderr)
             continue
     
     if not mesh_success:

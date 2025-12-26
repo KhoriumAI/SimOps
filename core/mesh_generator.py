@@ -72,9 +72,13 @@ class BaseMeshGenerator(ABC):
         self.model_loaded = False
 
     def log_message(self, message: str, level: str = "INFO"):
-        """Print message with timestamp"""
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {message}", flush=True)
+        """Print message with timestamp (millisecond precision)"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        prefix = f"[{timestamp}]"
+        if level != "INFO":
+            prefix += f" {level}:"
+        print(f"{prefix} {message}", flush=True)
 
     def generate_mesh(self, input_file: str, output_file: Optional[str] = None) -> MeshGenerationResult:
         """
@@ -418,6 +422,13 @@ class BaseMeshGenerator(ABC):
             gmsh.model.occ.synchronize()
             self.log_message("[OK] CAD file imported successfully")
 
+            # NEW: Log detailed entity counts immediately after import
+            v_count = len(gmsh.model.getEntities(3))
+            s_count = len(gmsh.model.getEntities(2))
+            c_count = len(gmsh.model.getEntities(1))
+            p_count = len(gmsh.model.getEntities(0))
+            self.log_message(f"[Diagnostics] Imported entities: {v_count} Vols, {s_count} Surfs, {c_count} Curves, {p_count} Points")
+
             # CRITICAL: Do NOT call healShapes() here!
             # The GUI doesn't call it during import - it relies on OCCAutoFix + AutoCoherence
             # healShapes() triggers internal fragment operations that cause BOPAlgo errors
@@ -442,7 +453,9 @@ class BaseMeshGenerator(ABC):
             return True
 
         except Exception as e:
+            import traceback
             self.log_message(f"ERROR: Failed to load CAD file: {e}", level="ERROR")
+            self.log_message(f"Traceback:\n{traceback.format_exc()}", level="ERROR")
             return False
 
     def _extract_geometry_info(self):
