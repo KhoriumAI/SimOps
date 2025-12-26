@@ -952,7 +952,11 @@ try:
     gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
     gmsh.option.setNumber("Geometry.OCCSewFaces", 1)
     gmsh.option.setNumber("Geometry.OCCMakeSolids", 1)
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-1)
+    
+    # Dirty Geometry Workaround
+    gmsh.option.setNumber("Geometry.OCCBoundsUseStl", 1)
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-3) # Millimeter tolerance
+    
     gmsh.option.setNumber("Geometry.ToleranceBoolean", 0.5)
     gmsh.option.setNumber("Geometry.OCCScaling", 1)
     gmsh.option.setNumber("Geometry.OCCParallel", 1)
