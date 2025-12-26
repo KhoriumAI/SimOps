@@ -1004,9 +1004,14 @@ try:
     gmsh.option.setNumber("Geometry.OCCScaling", 1)
     gmsh.option.setNumber("Geometry.OCCParallel", 1)
     
-    # Meshing options for robustness
+    # Fast rendering - disable perfectionism for preview speed
+    gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
+    gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)         # Disable Netgen optimizer
+    gmsh.option.setNumber("Mesh.Algorithm", 1)              # Use MeshAdapt (most forgiving)
+    gmsh.option.setNumber("Mesh.MaxRetries", 1)             # Don't try to re-mesh failed surfaces
     gmsh.option.setNumber("Mesh.RecombineAll", 0)
-    gmsh.option.setNumber("Mesh.Smoothing", 3)
+    gmsh.option.setNumber("Mesh.Smoothing", 0)              # Disable smoothing for speed
     gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
     
     print(f"[PREVIEW] Loading STEP file: {step_filepath}")
