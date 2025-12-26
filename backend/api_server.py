@@ -1005,8 +1005,8 @@ try:
     gmsh.option.setNumber("Geometry.OCCParallel", 1)
     
     # Fast rendering - disable perfectionism for preview speed
-    gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
-    gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
+    # gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
+gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
     gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)         # Disable Netgen optimizer
     gmsh.option.setNumber("Mesh.Algorithm", 1)              # Use MeshAdapt (most forgiving)
     gmsh.option.setNumber("Mesh.MaxRetries", 1)             # Don't try to re-mesh failed surfaces
