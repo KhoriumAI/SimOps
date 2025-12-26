@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QWidget, QSlider, QSpinBox,
     QPushButton, QCheckBox, QComboBox, QApplication
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QProcess
 from PyQt5.QtGui import QFont, QColor
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
@@ -3891,36 +3891,35 @@ except Exception as e:
         script_path = tempfile.mktemp(suffix=".py")
         with open(script_path, 'w') as f: f.write(script_content)
         
-        flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        self.hq_tessellation_process = subprocess.Popen(
-            [sys.executable, script_path],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags, text=True
-        )
-        print(f"[STAGE 3] Background HQ tessellation started (will check every 2s)")
-        QTimer.singleShot(2000, self._check_hq_tessellation_progress)
+        # Use QProcess for non-blocking execution
+        self.hq_process = QProcess(self)
+        self.hq_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.hq_process.readyReadStandardOutput.connect(self._on_hq_process_ready_read)
+        self.hq_process.finished.connect(self._on_hq_process_finished)
+        
+        print(f"[STAGE 3] Background HQ tessellation started via QProcess")
+        self.hq_process.start(sys.executable, [script_path])
 
-    def _check_hq_tessellation_progress(self):
-        if not hasattr(self, 'hq_tessellation_process'): return
-        
-        # Read any output from the subprocess
-        if self.hq_tessellation_process.stdout:
-            try:
-                while True:
-                    line = self.hq_tessellation_process.stdout.readline()
-                    if not line:
-                        break
-                    print(line.strip())
-            except:
-                pass
-        
-        if self.hq_tessellation_process.poll() is not None:
-            if self.hq_tessellation_process.returncode == 0:
-                self.hq_tessellation_complete = True
-                print(f"[STAGE 3] ✓ High-quality STL cached at {os.path.basename(self.full_quality_stl_path)}")
-            else:
-                print(f"[STAGE 3] ✗ Background tessellation failed (code {self.hq_tessellation_process.returncode})")
+    def _on_hq_process_ready_read(self):
+        """Non-blocking read of HQ process output"""
+        if not hasattr(self, 'hq_process'): return
+        data = self.hq_process.readAllStandardOutput().data().decode().strip()
+        if data:
+            for line in data.split('\n'):
+                print(line)
+                # Forward to GUI log if needed
+                if line.startswith('[HQ]'):
+                    self.log_requested.emit(line)
+
+    def _on_hq_process_finished(self, exit_code, exit_status):
+        """Handle HQ process completion"""
+        if exit_code == 0:
+            self.hq_tessellation_complete = True
+            print(f"[STAGE 3] ✓ High-quality STL cached at {os.path.basename(self.full_quality_stl_path)}")
+            # If no cached file was found before, we might want to reload it now
+            # but for now we just mark it as complete.
         else:
-            QTimer.singleShot(3000, self._check_hq_tessellation_progress)
+            print(f"[STAGE 3] ✗ Background tessellation failed (code {exit_code})")
 
     def get_hq_stl_for_meshing(self) -> str:
         if hasattr(self, 'hq_tessellation_complete') and self.hq_tessellation_complete:
