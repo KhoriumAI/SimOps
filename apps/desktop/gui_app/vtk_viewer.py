@@ -64,7 +64,7 @@ import os
 try:
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 1)
-    gmsh.option.setNumber("General.Verbosity", 1) # Less spam
+    gmsh.option.setNumber("General.Verbosity", 3) # Full verbosity for diagnostics
 
     # Open config
     gmsh.open(r"{self.cad_path}")
@@ -88,7 +88,7 @@ try:
         "bbox_diagonal": bbox_diag,
         "units_detected": unit_name
     }}
-    print("GEOM_INFO:" + json.dumps(geom_info))
+    print("GEOM_INFO:" + json.dumps(geom_info), flush=True)
 
     # --- HIGH QUALITY TESSELLATION ---
     # "Perfect Circle" Logic using Curvature
@@ -105,7 +105,7 @@ try:
     print("SUCCESS_MARKER")
 
 except Exception as e:
-    print("GMSH_ERROR:" + str(e))
+    print("GMSH_ERROR:" + str(e), flush=True)
     sys.exit(1)
 """
             # Run subprocess
@@ -115,7 +115,7 @@ except Exception as e:
             # Use same python executable
             # Use Popen to allow killing
             self.process = subprocess.Popen(
-                [sys.executable, "-c", gmsh_script],
+                [sys.executable, "-u", "-c", gmsh_script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -187,21 +187,21 @@ try:
         gmsh.option.setNumber("General.NumThreads", 1)
         gmsh.option.setNumber("Mesh.RandomFactor", 1e-9)
         # Mesh.Seed is invalid/non-existent in many versions, removed
-        print("DIAGNOSTIC:Threading and RandomFactor set for determinism.")
+        print("DIAGNOSTIC:Threading and RandomFactor set for determinism.", flush=True)
     except Exception as e:
-        print(f"DIAGNOSTIC:Could not set some determinism options: {{e}}")
+        print(f"DIAGNOSTIC:Could not set some determinism options: {e}", flush=True)
 
     # [DIAGNOSTIC 3] Version & Kernel Check
     try:
         info_opts = gmsh.option.getString("General.BuildOptions")
-        print(f"DIAGNOSTIC:Gmsh Version: {{gmsh.option.getString('General.Version')}}")
-        print(f"DIAGNOSTIC:Build Info: {{info_opts}}")
-        print(f"DIAGNOSTIC:Default Kernel Tolerance: {{gmsh.option.getNumber('Geometry.Tolerance')}}")
+        print(f"DIAGNOSTIC:Gmsh Version: {gmsh.option.getString('General.Version')}", flush=True)
+        print(f"DIAGNOSTIC:Build Info: {info_opts}", flush=True)
+        print(f"DIAGNOSTIC:Default Kernel Tolerance: {gmsh.option.getNumber('Geometry.Tolerance')}", flush=True)
     except Exception as e:
-        print(f"DIAGNOSTIC:Could not retrieve version info: {{e}}")
+        print(f"DIAGNOSTIC:Could not retrieve version info: {e}", flush=True)
 
-    gmsh.option.setNumber("General.Terminal", 0)  # Completely silent
-    gmsh.option.setNumber("General.Verbosity", 0) # No output at all
+    gmsh.option.setNumber("General.Terminal", 1)  # Enable terminal output
+    gmsh.option.setNumber("General.Verbosity", 3) # Full verbosity
     
     # SAFETY: Enable minimal healing to prevent "No elements in surface" on complex CAD
     # Disabling these caused failures on Mac/Linux for sliver surfaces
@@ -219,28 +219,31 @@ try:
     # Duplicate lines removed
 
     gmsh.model.add("ComplexityAnalysis")
+    print(r"[CAD] Opening file: {self.filepath}", flush=True)
     gmsh.open(r"{self.filepath}")
+    print("[CAD] Synchronizing OCC...", flush=True)
+    gmsh.model.occ.synchronize()
     
     # [DIAGNOSTIC 1] Check Topology Interpretation
     # Check if OCC created a volume (3D entity) or just surfaces (2D entities)
     dims = gmsh.model.occ.getEntities()
     n_vol = len([d for d in dims if d[0] == 3])
     n_surf = len([d for d in dims if d[0] == 2])
-    print(f"DIAGNOSTIC:Entities Detected -> Volumes: {{n_vol}}, Surfaces: {{n_surf}}")
+    print(f"DIAGNOSTIC:Entities Detected -> Volumes: {n_vol}, Surfaces: {n_surf}", flush=True)
 
     # Check Bounding Box Diagonal (Float precision check)
     xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
     diag = math.sqrt((xmax-xmin)**2 + (ymax-ymin)**2 + (zmax-zmin)**2)
-    print(f"DIAGNOSTIC:Model Diagonal Precision: {{diag:.20f}}")
+    print(f"DIAGNOSTIC:Model Diagonal Precision: {diag:.20f}", flush=True)
 
     # [DIAGNOSTIC 1.1] Deep Volume Analysis
     # We found 151 volumes on Mac but expect 165. Let's see if synchronize changes anything.
     gmsh.model.occ.synchronize()
     entities_3d = gmsh.model.getEntities(3)
-    print(f"DIAGNOSTIC:Entities Detected AFTER Synchronize -> Volumes: {{len(entities_3d)}}")
+    print(f"DIAGNOSTIC:Entities Detected AFTER Synchronize -> Volumes: {len(entities_3d)}", flush=True)
     
     if len(entities_3d) < 165:
-        print(f"DIAGNOSTIC:CRITICAL DISCREPANCY: {{165 - len(entities_3d)}} volumes are missing from OCC import.")
+        print(f"DIAGNOSTIC:CRITICAL DISCREPANCY: {165 - len(entities_3d)} volumes are missing from OCC import.", flush=True)
     
     surfaces = gmsh.model.getEntities(2)
     surface_count = len(surfaces)
@@ -255,15 +258,15 @@ try:
     mesh_size_min = bbox_diag / 50.0  # Prevent overly small elements
     quality_level = "Preview"
     
-    complexity = {{
+    complexity = {
         "surface_count": surface_count,
         "mesh_size_max": mesh_size_max,
         "quality_level": quality_level,
         "bbox_diagonal": bbox_diag,
         "volume": volume
-    }}
+    }
     
-    print("COMPLEXITY:" + json.dumps(complexity))
+    print("COMPLEXITY:" + json.dumps(complexity), flush=True)
     
     # Progress callback (if available in this gmsh version)
     if hasattr(gmsh, 'onProgress'):
@@ -325,7 +328,7 @@ except Exception as e:
             print(msg)
             self.log.emit(msg)
             process = subprocess.Popen(
-                [sys.executable, "-c", script_content],
+                [sys.executable, "-u", "-c", script_content],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

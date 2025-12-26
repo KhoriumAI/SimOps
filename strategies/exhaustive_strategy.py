@@ -89,12 +89,10 @@ def run_strategy_wrapper(args):
         # We use a dummy thread count of 1 because we are already parallelizing at process level
         generator.initialize_gmsh(thread_count=1)
         
-        # CRITICAL: Silence Gmsh output completely in workers
-        # This prevents "out of memory" errors caused by pipe buffer overflows
-        # when 4+ processes try to write to stdout simultaneously
+        # [DEBUG] Enable Gmsh output in workers for diagnostics
         import gmsh
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.option.setNumber("General.Verbosity", 0)
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Verbosity", 3)
         
         try:
             # Load the file

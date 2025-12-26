@@ -223,7 +223,7 @@ class MeshWorker:
             self.signals.log.emit("Starting parallel mesh generation...")
 
             # Prepare command with quality parameters
-            cmd = [sys.executable, str(worker_script), cad_file]
+            cmd = [sys.executable, "-u", str(worker_script), cad_file]
             
             # Use temporary file for configuration to avoid command line limits
             if quality_params:
@@ -366,7 +366,7 @@ try:
     gmsh.finalize()
     
     if not per_element_quality:
-        print(json.dumps({{"error": "No tetrahedral elements found"}}))
+        print(json.dumps({"error": "No tetrahedral elements found"}), flush=True)
         sys.exit(0)
         
     # Calculate statistics
@@ -394,10 +394,10 @@ try:
         }}
     }}
     
-    print("JSON_RESULT:" + json.dumps(result))
+    print("JSON_RESULT:" + json.dumps(result), flush=True)
 
 except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
+    print(json.dumps({"error": str(e)}), flush=True)
     sys.exit(1)
 """
             # Set PYTHONPATH to ensure imports work if run from source
@@ -412,7 +412,7 @@ except Exception as e:
 
             # Run using same python environment
             process = subprocess.Popen(
-                [sys.executable, "-c", script],
+                [sys.executable, "-u", "-c", script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

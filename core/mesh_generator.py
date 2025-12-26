@@ -463,17 +463,42 @@ class BaseMeshGenerator(ABC):
         volumes = gmsh.model.getEntities(dim=3)
         surfaces = gmsh.model.getEntities(dim=2)
         curves = gmsh.model.getEntities(dim=1)
+        points = gmsh.model.getEntities(dim=0)
 
         self.geometry_info = {
-            'volumes': len(volumes),
-            'surfaces': len(surfaces),
-            'curves': len(curves)
+            'num_volumes': len(volumes),
+            'num_surfaces': len(surfaces),
+            'num_curves': len(curves),
+            'num_points': len(points)
         }
 
-        self.log_message(
-            f"Geometry: {len(volumes)} volumes, "
-            f"{len(surfaces)} surfaces, {len(curves)} curves"
-        )
+        self.log_message(f"[Geometry] Analysis results:")
+        self.log_message(f"  - Volumes: {len(volumes)}")
+        self.log_message(f"  - Surfaces: {len(surfaces)}")
+        self.log_message(f"  - Curves: {len(curves)}")
+        self.log_message(f"  - Points: {len(points)}")
+
+        # Individual volume analysis
+        total_mass = 0
+        valid_volumes = 0
+        for i, (dim, tag) in enumerate(volumes):
+            try:
+                mass = gmsh.model.occ.getMass(dim, tag)
+                if mass > 1e-12:
+                    valid_volumes += 1
+                total_mass += mass
+                bbox = gmsh.model.getBoundingBox(dim, tag)
+                # Only log details for the first 30 volumes or if explicitly debugging
+                if i < 30:
+                    self.log_message(f"    V{tag}: mass={mass:.6f}, bbox=[{bbox[0]:.2f}, {bbox[1]:.2f}, {bbox[2]:.2f}] to [{bbox[3]:.2f}, {bbox[4]:.2f}, {bbox[5]:.2f}]")
+            except:
+                pass
+        
+        if len(volumes) > 30:
+            self.log_message(f"    ... (and {len(volumes)-30} more volumes)")
+            
+        self.log_message(f"  - Valid Volumes (Mass > 0): {valid_volumes}")
+        self.log_message(f"  - Total Model Mass: {total_mass:.6f}")
 
         if not volumes:
             self.log_message("[!] No volumes detected - attempting shell-to-solid repair...")
