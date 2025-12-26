@@ -1021,13 +1021,13 @@ try:
     mesh_success = False
     for i, (mesh_factor, algo, tol) in enumerate(mesh_attempts):
         try:
-            print(f"[PREVIEW] Attempt {i+1}/{len(mesh_attempts)}: sizing=diag/{mesh_factor}, algo={algo}, tolerance={tol}")
+            print(f"[PREVIEW] Attempt {{i+1}}/{{len(mesh_attempts)}}: sizing=diag/{{mesh_factor}}, algo={{algo}}, tolerance={{tol}}")
             try_mesh(mesh_factor, algorithm=algo, tolerance=tol)
             mesh_success = True
-            print(f"MESH_OK:factor={mesh_factor},algo={algo}", file=sys.stderr)
+            print(f"MESH_OK:factor={{mesh_factor}},algo={{algo}}", file=sys.stderr)
             break
         except Exception as mesh_err:
-            print(f"RETRY:factor={mesh_factor},algo={algo} failed: {mesh_err}", file=sys.stderr)
+            print(f"RETRY:factor={{mesh_factor}},algo={{algo}} failed: {{mesh_err}}", file=sys.stderr)
             continue
     
     if not mesh_success:
