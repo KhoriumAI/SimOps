@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime
 from threading import Thread, Lock
 import traceback
+import shutil
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -444,19 +445,57 @@ def register_routes(app):
         
         # Use storage abstraction (local or S3 based on config)
         storage = get_storage()
+        
+        # 1. Save the incoming file to a temporary path explicitly for preview generation
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, filename)
+        with open(temp_path, 'wb') as f:
+            f.write(file_content)
+        
+        preview_path = None
         try:
-            # For S3: saves to {user_email}/uploads/{filename}
-            # For local: saves to uploads/{filename}
-            filepath = storage.save_file(
-                file_data=file,
+            # 2. Generate the preview IMMEDIATELY using the local temp file
+            print(f"[PREVIEW] Generating coarse mesh locally for {filename}...", flush=True)
+            preview_data = parse_step_file_for_preview(temp_path)
+            
+            if preview_data and "error" not in preview_data:
+                # Save preview data as JSON to upload
+                preview_temp_path = os.path.join(temp_dir, f"{project_id}_preview.json")
+                with open(preview_temp_path, 'w') as f:
+                    json.dump(preview_data, f)
+                
+                # 3. Upload preview to S3
+                preview_filename = f"{project_id}_preview.json"
+                preview_path = storage.save_local_file(
+                    local_path=preview_temp_path,
+                    filename=preview_filename,
+                    user_email=user.email,
+                    file_type='uploads'
+                )
+                print(f"[PREVIEW] Preview uploaded: {preview_path}")
+        except Exception as e:
+            print(f"[PREVIEW ERROR] Failed to generate/upload preview: {e}")
+            preview_path = None
+
+        try:
+            # 4. Upload original file to storage
+            # We can use the temp file we already created
+            filepath = storage.save_local_file(
+                local_path=temp_path,
                 filename=storage_filename,
                 user_email=user.email,
                 file_type='uploads'
             )
             print(f"[UPLOAD] File saved to: {filepath}")
         except Exception as e:
+            # Cleanup
+            shutil.rmtree(temp_dir, ignore_errors=True)
             print(f"[UPLOAD ERROR] Failed to save file: {e}")
             return jsonify({"error": "Failed to save file"}), 500
+
+        # Cleanup local temp files
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         project = Project(
             id=project_id,
@@ -464,6 +503,7 @@ def register_routes(app):
             filename=filename,
             original_filename=original_filename,
             filepath=filepath,  # Can be local path or S3 URI
+            preview_path=preview_path,
             file_size=file_size,
             file_hash=file_hash,
             mime_type=file.content_type,
@@ -480,7 +520,8 @@ def register_routes(app):
                 'filename': original_filename,
                 'file_size': file_size,
                 'file_type': file_ext,
-                'storage_path': filepath
+                'storage_path': filepath,
+                'preview_generated': preview_path is not None
             },
             ip_address=request.remote_addr,
             user_agent=request.user_agent.string[:500] if request.user_agent else None
@@ -495,9 +536,11 @@ def register_routes(app):
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            # Try to clean up the uploaded file
+            # Try to clean up the uploaded files
             try:
                 storage.delete_file(filepath)
+                if preview_path:
+                    storage.delete_file(preview_path)
             except:
                 pass
             return jsonify({"error": "Failed to create project"}), 500
@@ -505,7 +548,8 @@ def register_routes(app):
         return jsonify({
             "project_id": project_id,
             "filename": filename,
-            "status": "uploaded"
+            "status": "uploaded",
+            "preview_ready": preview_path is not None
         })
 
     @app.route('/api/projects/<project_id>/generate', methods=['POST'])
@@ -707,9 +751,26 @@ def register_routes(app):
             return jsonify({"error": "CAD file not found"}), 404
         
         try:
-            filepath = project.filepath
             storage = get_storage()
             use_s3 = app.config.get('USE_S3', False)
+            
+            # 1. Check if we already have a cached preview
+            if project.preview_path:
+                try:
+                    print(f"[PREVIEW] Using cached preview for project {project_id}: {project.preview_path}")
+                    preview_bytes = storage.get_file(project.preview_path)
+                    preview_data = json.loads(preview_bytes)
+                    
+                    # Ensure it has the geometry/volumes info 
+                    # If it's an old version or corrupt, fallback
+                    if "vertices" in preview_data:
+                        return jsonify(preview_data)
+                    print(f"[PREVIEW] Cached preview data incomplete, regenerating...")
+                except Exception as e:
+                    print(f"[PREVIEW] Failed to load cached preview: {e}")
+            
+            # 2. Fallback: Generate preview if not found (Double Hop - for legacy files)
+            filepath = project.filepath
             
             # If S3, download to temp file for parsing
             if use_s3 and filepath.startswith('s3://'):

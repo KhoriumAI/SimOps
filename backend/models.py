@@ -51,6 +51,7 @@ class Project(db.Model):
     filename = db.Column(db.String(255), nullable=False)
     original_filename = db.Column(db.String(255), nullable=True)  # Original name before sanitization
     filepath = db.Column(db.String(500), nullable=False)
+    preview_path = db.Column(db.String(500), nullable=True)  # Path to generated preview JSON
     file_size = db.Column(db.BigInteger, default=0)  # Size in bytes
     file_hash = db.Column(db.String(64), nullable=True)  # SHA256 hash for deduplication
     mime_type = db.Column(db.String(100), nullable=True)
@@ -77,6 +78,7 @@ class Project(db.Model):
             'filename': self.filename,
             'original_filename': self.original_filename,
             'file_size': self.file_size,
+            'preview_path': self.preview_path,
             'status': self.status,
             'error_message': self.error_message,
             'mesh_count': self.mesh_count,
