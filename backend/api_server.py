@@ -991,12 +991,12 @@ try:
     diag = (bbox_size[0]**2 + bbox_size[1]**2 + bbox_size[2]**2)**0.5
     
     print(f"[PREVIEW] Geometry Info:")
-    print(f"  - Volumes: {len(volumes)}")
-    print(f"  - Surfaces: {len(surfaces)}")
-    print(f"  - Curves: {len(curves)}")
-    print(f"  - Points: {len(points)}")
-    print(f"  - Bounding Box: {bbox_size[0]:.2f} x {bbox_size[1]:.2f} x {bbox_size[2]:.2f}")
-    print(f"  - Diagonal: {diag:.2f}")
+    print(f"  - Volumes: {{len(volumes)}}")
+    print(f"  - Surfaces: {{len(surfaces)}}")
+    print(f"  - Curves: {{len(curves)}}")
+    print(f"  - Points: {{len(points)}}")
+    print(f"  - Bounding Box: {{bbox_size[0]:.2f}} x {{bbox_size[1]:.2f}} x {{bbox_size[2]:.2f}}")
+    print(f"  - Diagonal: {{diag:.2f}}")
     
     # Calculate volume if possible
     total_volume = 0.0
