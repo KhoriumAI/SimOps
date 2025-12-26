@@ -1100,12 +1100,12 @@ except Exception as e:
 '''
     
     try:
-        # Increase timeout to 180 seconds for complex geometry
+        # Increase timeout to 600 seconds for complex geometry
         result = subprocess.run(
             [sys.executable, '-c', gmsh_script],
             capture_output=True,
             text=True,
-            timeout=180
+            timeout=600
         )
         
         print(f"[PREVIEW] Subprocess stdout: {result.stdout[:500] if result.stdout else 'empty'}")
@@ -1145,7 +1145,7 @@ except Exception as e:
         raise Exception(f"No mesh data in output: {result.stdout[:200] if result.stdout else 'empty'} | stderr: {result.stderr[:200] if result.stderr else 'empty'}")
         
     except subprocess.TimeoutExpired:
-        print("[PREVIEW] Subprocess timed out after 180 seconds")
+        print("[PREVIEW] Subprocess timed out after 600 seconds")
         return {"error": "Preview generation timed out - geometry is too complex", "vertices": [], "colors": [], "numVertices": 0, "numTriangles": 0, "isPreview": True}
     except Exception as e:
         import traceback
