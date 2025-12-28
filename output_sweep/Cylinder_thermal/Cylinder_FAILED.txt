@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Cylinder
+Input:    C:\Users\markm\Downloads\SimOps\cad_files\Cylinder.step
+Time:     2025-12-27T12:49:38.920241
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 150.00 mm
+  Min Dim:  50.00 mm
+  Est. Wall:16.67 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: Thermal Solver failed: None
+- MedFi_Robust: Thermal Solver failed: None
+- LowFi_Emergency: Thermal Solver failed: None
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T18:04:30.779088",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "cad_files/Cube.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\thermal\\Cube_thermal\\Cube_HighFi_Layered.msh",
+    "vtk_file": "verification_runs\\thermal\\Cube_thermal\\Cube_thermal.vtk",
+    "png_file": "verification_runs\\thermal\\Cube_thermal\\Cube_temperature.png",
+    "pdf_file": "verification_runs\\thermal\\Cube_thermal\\Cube_report.pdf",
+    "transient_png": "verification_runs\\thermal\\Cube_thermal\\Cube_transient.png",
+    "animation_gif": "verification_runs\\thermal\\Cube_thermal\\Cube_anim.gif",
+    "min_temp_K": 68.68,
+    "max_temp_K": 300.0,
+    "num_elements": 1352,
+    "solve_time_s": 0.7740223407745361,
+    "total_time_s": 4.669751882553101,
+    "completed_at": "2025-12-27T18:04:30",
+    "success": true
+  }
+}

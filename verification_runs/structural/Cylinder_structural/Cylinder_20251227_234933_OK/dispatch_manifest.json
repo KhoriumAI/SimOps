@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T23:49:33.544824",
+  "original_result": {
+    "job_name": "Cylinder",
+    "input_file": "cad_files/Cylinder.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_MedFi_Robust.msh",
+    "vtk_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_structural.vtk",
+    "png_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_stress_iso.png",
+    "pdf_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_structural_report.pdf",
+    "max_stress_pa": 37365.04859635288,
+    "max_stress_mpa": 0.037365048596352875,
+    "max_displacement_mm": 6.220848656760787e-05,
+    "num_elements": 623,
+    "solve_time_s": 0.4373362064361572,
+    "total_time_s": 7.7252116203308105,
+    "completed_at": "2025-12-27T23:49:33",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

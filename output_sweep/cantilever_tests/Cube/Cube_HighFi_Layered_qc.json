@@ -1,0 +1,20 @@
+{
+  "passed": false,
+  "reason": "Inverted elements detected: 38891 cells with negative Jacobian (min=-1.0000)",
+  "metadata": {
+    "n_cells": 38891,
+    "n_points": 49402,
+    "bounds": [
+      -1.04083408558608e-14,
+      50.0,
+      -50.0,
+      0.0,
+      0.0,
+      50.0
+    ],
+    "min_jacobian": -1.0,
+    "mean_jacobian": -1.0,
+    "failure_type": "inverted_elements"
+  },
+  "mesh_file": "output_sweep\\cantilever_tests\\Cube\\Cube_HighFi_Layered.msh"
+}

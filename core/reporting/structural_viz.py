@@ -152,7 +152,8 @@ def generate_structural_visualization(
     von_mises: np.ndarray,
     output_path: Path,
     title: str = "Structural Analysis",
-    warp_scale: float = 100.0
+    warp_scale: float = 100.0,
+    **kwargs
 ) -> bool:
     """
     Generate visualization with warped mesh colored by Von Mises stress.
@@ -178,25 +179,60 @@ def generate_structural_visualization(
         nodes_per_elem = elements.shape[1] if elements.ndim == 2 else 4
         
         # PyVista format: [num_points, p0, p1, p2, p3, ...]
-        if nodes_per_elem == 10:
-            # TET10 - only use first 4 nodes for visualization
+        # elements[:, 0] is the element tag, elements[:, 1:] are the node tags
+        # Subtract 1 to convert from 1-indexed GMSH/CalculiX to 0-indexed PyVista
+        
+        # Determine if first column is tags
+        # Adapter output might be 0-based indices without tags now.
+        has_tags = False
+        if nodes_per_elem in [5, 11]:
+             has_tags = True
+        elif nodes_per_elem == 10 and elements.shape[1] == 10:
+             # If shape is 10, assume NO tags (standard Tet10 node count)
+             # Unless we have heuristics check? 
+             # Safe assumption: My remapping produces 10 cols.
+             has_tags = False
+        elif nodes_per_elem == 4 and elements.shape[1] == 4:
+             has_tags = False
+             
+        start_col = 1 if has_tags else 0
+        
+        # Check 0-based
+        # If min value is 0, it's 0-based. If min >= 1, likely 1-based.
+        sample_slice = elements[:, start_col:start_col+4]
+        is_one_based = np.min(sample_slice) >= 1
+        offset = 1 if is_one_based else 0
+        
+        if nodes_per_elem in [10, 11]: # TET10
+            # TET10 - only use corner nodes for visualization
+            indices = (elements[:, start_col:start_col+4] - offset).astype(int)
             cells = np.column_stack([
                 np.full(len(elements), 4),
-                elements[:, :4]
+                indices
+            ]).flatten()
+            cell_type = np.full(len(elements), 10)  # VTK_TETRA
+        elif nodes_per_elem in [4, 5]: # TET4
+            indices = (elements[:, start_col:start_col+4] - offset).astype(int)
+            cells = np.column_stack([
+                np.full(len(elements), 4),
+                indices
             ]).flatten()
             cell_type = np.full(len(elements), 10)  # VTK_TETRA
         else:
+            # Fallback/Direct
+            indices = (elements - offset).astype(int)
             cells = np.column_stack([
-                np.full(len(elements), 4),
-                elements
+                np.full(len(elements), indices.shape[1]),
+                indices
             ]).flatten()
-            cell_type = np.full(len(elements), 10)  # VTK_TETRA
+            cell_type = np.full(len(elements), 10) # Assume Tet
         
         # Create unstructured grid
         mesh = pv.UnstructuredGrid(cells, cell_type, node_coords)
         
         # Add data
-        mesh.point_data['Von Mises (MPa)'] = von_mises / 1e6  # Convert to MPa
+        # von_mises is already in MPa from the solver/adapter
+        mesh.point_data['Von Mises Stress (MPa)'] = von_mises
         mesh.point_data['Displacement'] = displacement
         
         # Apply warp
@@ -209,31 +245,34 @@ def generate_structural_visualization(
         surface = warped.extract_surface()
         
         # Setup plotter
-        pl = pv.Plotter(off_screen=True, window_size=[1920, 1080])
+        # Width/height ratio should be 4:3 for report
+        pl = pv.Plotter(off_screen=True, window_size=[1024, 768])
         pl.set_background('white')
         
         # Add mesh with stress coloring
         pl.add_mesh(
             surface,
-            scalars='Von Mises (MPa)',
+            scalars='Von Mises Stress (MPa)',
             cmap='jet',
             show_edges=False,
             lighting=True,
             scalar_bar_args={
-                'title': 'Von Mises Stress (MPa)',
-                'title_font_size': 16,
-                'label_font_size': 14,
+                'title': 'Von Mises (MPa)',
+                'n_labels': 5,
+                'fmt': '%.1f',
+                'title_font_size': 14,
+                'label_font_size': 10,
                 'color': 'black',
-                'position_x': 0.85,
+                'position_x': 0.78, # Move left to give label space
                 'position_y': 0.1,
-                'width': 0.08,
+                'width': 0.18, # Increase width significantly
                 'height': 0.8
             }
         )
         
         # Find and annotate max stress location
         max_idx = np.argmax(von_mises)
-        max_stress_mpa = von_mises[max_idx] / 1e6
+        max_stress_mpa = von_mises[max_idx]
         max_pos = node_coords[max_idx]
         
         if np.max(np.abs(displacement)) > 1e-12:
@@ -242,7 +281,7 @@ def generate_structural_visualization(
         
         pl.add_point_labels(
             [max_pos],
-            [f"Max: {max_stress_mpa:.1f} MPa"],
+            [f"Max: {max_stress_mpa:.2f} MPa"],
             font_size=14,
             point_size=15,
             point_color='red',
@@ -255,12 +294,24 @@ def generate_structural_visualization(
         
         # Camera setup
         pl.enable_parallel_projection()
-        pl.view_isometric()
+        
+        view = kwargs.get('view', 'iso')
+        if view == 'iso':
+            pl.view_isometric()
+        elif view == 'top':
+            pl.view_xy()  # Z up
+        elif view == 'front':
+            pl.view_xz()  # Y up (or -Y?) - Standard engineering front view often XZ
+            pl.camera.up = (0, 0, 1) # Ensure Z is up
+        elif view == 'side':
+            pl.view_yz()  # X up?
+            pl.camera.up = (0, 0, 1)
+            
         pl.camera.zoom(1.2)
         
         # Add title
         pl.add_text(
-            title,
+            f"{title} ({view.capitalize()} View)",
             position='upper_left',
             font_size=18,
             color='black'
@@ -276,6 +327,35 @@ def generate_structural_visualization(
     except Exception as e:
         logger.error(f"Visualization failed: {e}")
         return False
+
+
+def generate_multi_view_structural_viz(
+    node_coords: np.ndarray,
+    elements: np.ndarray,
+    displacement: np.ndarray,
+    von_mises: np.ndarray,
+    output_dir: Path,
+    job_name: str,
+    title: str = "Structural Analysis",
+    warp_scale: float = 100.0
+) -> List[str]:
+    """
+    Generate multiple visualization views (Iso, Top, Front, Side).
+    Returns list of generated image paths.
+    """
+    views = ['iso', 'top', 'front', 'side']
+    generated_images = []
+    
+    for view in views:
+        img_path = output_dir / f"{job_name}_stress_{view}.png"
+        success = generate_structural_visualization(
+            node_coords, elements, displacement, von_mises,
+            img_path, title, warp_scale, view=view
+        )
+        if success:
+            generated_images.append(str(img_path))
+            
+    return generated_images
 
 
 def evaluate_pass_fail(
@@ -346,15 +426,26 @@ def generate_structural_report(
     displacement = np.array(displacement) if displacement is not None else np.zeros_like(node_coords)
     
     # Calculate metrics
-    max_stress_pa = np.max(von_mises)
-    max_stress_mpa = max_stress_pa / 1e6
-    max_disp = np.max(np.linalg.norm(displacement, axis=1)) if displacement.size > 0 else 0
-    max_disp_mm = max_disp * 1000  # Assuming meters input
+    # CCX outputs MPa for stress, mm for displacement (if scale=1.0)
+    max_stress_mpa = np.max(von_mises)
     
+    # Displacement
+    max_disp_val = np.max(np.linalg.norm(displacement, axis=1)) if displacement.size > 0 else 0
+    # max_disp_val is in mm
+    max_disp_mm = max_disp_val
+    
+    # Display string for displacement
+    if max_disp_mm < 0.1:
+        disp_display = f"{max_disp_mm * 1000:.2f} um"
+    else:
+        disp_display = f"{max_disp_mm:.4f} mm"
+        
     report_output['max_stress_mpa'] = max_stress_mpa
     report_output['max_displacement_mm'] = max_disp_mm
+    report_output['displacement_display'] = disp_display
     
     # Pass/Fail evaluation
+    max_stress_pa = max_stress_mpa * 1e6
     passed, message = evaluate_pass_fail(max_stress_pa)
     report_output['passed'] = passed
     report_output['message'] = message
@@ -364,21 +455,26 @@ def generate_structural_report(
     logger.info(f"[StructuralReport] {message}")
     
     # Generate visualization
-    png_path = output_dir / f"{job_name}_stress.png"
+    # png_path = output_dir / f"{job_name}_stress.png" 
+    # Use multi-view generator
     title = f"Static Structural: {g_factor:.0f}G Z-Load"
     
-    viz_success = generate_structural_visualization(
+    generated_images = generate_multi_view_structural_viz(
         node_coords=node_coords,
         elements=elements,
         displacement=displacement,
         von_mises=von_mises,
-        output_path=png_path,
+        output_dir=output_dir,
+        job_name=job_name,
         title=title,
         warp_scale=100.0
     )
     
-    if viz_success:
-        report_output['png_file'] = str(png_path)
+    # viz_success = len(generated_images) > 0
+    
+    if generated_images:
+        # Assume first image (iso) is primary for legacy support
+        report_output['png_file'] = generated_images[0]
     
     # Generate PDF report
     try:
@@ -389,12 +485,14 @@ def generate_structural_report(
             'g_factor': g_factor,
             'max_stress_mpa': max_stress_mpa,
             'max_displacement_mm': max_disp_mm,
+            'displacement_display': disp_display,
             'yield_strength_mpa': AL6061_YIELD_STRENGTH_MPA,
             'passed': passed,
             'message': message,
             'num_nodes': len(node_coords),
             'num_elements': len(elements),
-            'material': 'Al6061-T6'
+            'material': 'Al6061-T6',
+            'success': passed # Ensure success status is passed correctly
         }
         
         generator = StructuralPDFReportGenerator()
@@ -402,7 +500,7 @@ def generate_structural_report(
             job_name=job_name,
             output_dir=output_dir,
             data=pdf_data,
-            image_paths=[str(png_path)] if viz_success else []
+            image_paths=generated_images # Pass all images
         )
         report_output['pdf_file'] = str(pdf_file)
         

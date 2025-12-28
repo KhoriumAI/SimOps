@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T18:36:31.883379",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "cad_files/Cube.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\structural\\Cube_structural\\Cube_HighFi_Layered.msh",
+    "vtk_file": "verification_runs\\structural\\Cube_structural\\Cube_structural.vtk",
+    "png_file": "verification_runs\\structural\\Cube_structural\\Cube_stress_iso.png",
+    "pdf_file": "verification_runs\\structural\\Cube_structural\\Cube_structural_report.pdf",
+    "max_stress_pa": 199266448.16482767,
+    "max_stress_mpa": 199.26644816482766,
+    "max_displacement_mm": 5.26579e+69,
+    "num_elements": 33073,
+    "solve_time_s": 36.408905029296875,
+    "total_time_s": 43.19348192214966,
+    "completed_at": "2025-12-27T18:36:31",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

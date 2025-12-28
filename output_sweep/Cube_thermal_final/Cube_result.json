@@ -1,0 +1,22 @@
+{
+  "job_name": "Cube",
+  "input_file": "cad_files\\Cube.step",
+  "strategy": "ALL_FAILED",
+  "success": false,
+  "error": "All automated strategies failed. Manual review needed.",
+  "failed_strategies": [
+    {
+      "name": "HighFi_Layered",
+      "error": "z array must not contain non-finite values within the triangulation"
+    },
+    {
+      "name": "MedFi_Robust",
+      "error": "z array must not contain non-finite values within the triangulation"
+    },
+    {
+      "name": "LowFi_Emergency",
+      "error": "z array must not contain non-finite values within the triangulation"
+    }
+  ],
+  "completed_at": "2025-12-27T16:15:49.535466"
+}

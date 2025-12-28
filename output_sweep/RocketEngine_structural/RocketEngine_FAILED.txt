@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: RocketEngine
+Input:    C:\Users\markm\Downloads\SimOps\cad_files\RocketEngine.step
+Time:     2025-12-27T12:50:00.202151
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 245.42 mm
+  Min Dim:  100.01 mm
+  Est. Wall:1.91 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: Mesh generation failed: HXT 3D mesh failed
+- MedFi_Robust: Mesh generation failed: HXT 3D mesh failed
+- LowFi_Emergency: Mesh generation failed: HXT 3D mesh failed
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

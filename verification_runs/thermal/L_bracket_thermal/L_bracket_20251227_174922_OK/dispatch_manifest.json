@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T17:49:22.819981",
+  "original_result": {
+    "job_name": "L_bracket",
+    "input_file": "cad_files/L_bracket.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_HighFi_Layered.msh",
+    "vtk_file": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_thermal.vtk",
+    "png_file": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_temperature.png",
+    "pdf_file": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_report.pdf",
+    "transient_png": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_transient.png",
+    "animation_gif": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_anim.gif",
+    "min_temp_K": 73.0,
+    "max_temp_K": 300.0,
+    "num_elements": 673,
+    "solve_time_s": 0.39496278762817383,
+    "total_time_s": 3.3106114864349365,
+    "completed_at": "2025-12-27T17:49:22",
+    "success": true
+  }
+}

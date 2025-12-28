@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "physics": {
+    "simulation_type": "structural",
+    "gravity_load_g": 1.0,
+    "material": "Al6061-T6",
+    "clamping_direction": "X_MAX",
+    "ccx_path": "C:/Users/markm/Downloads/SimOps/calculix_native/CalculiX-2.23.0-win-x64/bin/ccx.exe"
+  },
+  "meshing": {
+    "mesh_size_multiplier": 1.0,
+    "second_order": true
+  },
+  "job_name": "model_structural"
+}

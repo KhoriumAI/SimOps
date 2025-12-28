@@ -93,8 +93,8 @@ debug_*
 *.frd
 *.inp
 *.cvg
-*.dat
-*.sta
+# *.dat
+# *.sta
 *.12d
 spooles.out
 temp_test/

@@ -1,0 +1,20 @@
+{
+  "passed": false,
+  "reason": "Mesh too large: 2,004,191 cells > 2,000,000 limit (optimizer likely failed)",
+  "metadata": {
+    "n_cells": 2004191,
+    "n_points": 344807,
+    "bounds": [
+      -800.0000677666719,
+      1550.000145333344,
+      -450.0000406000032,
+      450.0000406000032,
+      -425.0000406000032,
+      475.0000406000032
+    ],
+    "min_jacobian": 0.20267239097479128,
+    "mean_jacobian": 0.7424220781710237,
+    "failure_type": "oversized_mesh"
+  },
+  "mesh_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cylinder_cfd\\Cylinder_HighFi_Layered.msh"
+}

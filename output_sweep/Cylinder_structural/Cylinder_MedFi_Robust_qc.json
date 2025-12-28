@@ -1,0 +1,20 @@
+{
+  "passed": false,
+  "reason": "Inverted elements detected: 1148 cells with negative Jacobian (min=-1.0000)",
+  "metadata": {
+    "n_cells": 1148,
+    "n_points": 1312,
+    "bounds": [
+      -50.0,
+      50.0,
+      -49.99999994315888,
+      50.0,
+      0.0,
+      50.0
+    ],
+    "min_jacobian": -1.0,
+    "mean_jacobian": -1.0,
+    "failure_type": "inverted_elements"
+  },
+  "mesh_file": "output_sweep\\Cylinder_structural\\Cylinder_MedFi_Robust.msh"
+}

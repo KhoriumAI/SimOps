@@ -1,0 +1,21 @@
+{
+  "dispatched_at": "2025-12-27T12:19:54.942561",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cube.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_structural\\Cube_HighFi_Layered.msh",
+    "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_structural\\Cube_structural.vtk",
+    "png_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_structural\\Cube_stress.png",
+    "pdf_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_structural\\Cube_structural_report.pdf",
+    "max_stress_pa": 170.52377287260603,
+    "max_displacement_mm": 9.919500000000864,
+    "num_elements": 0,
+    "solve_time_s": 0.8117690086364746,
+    "total_time_s": 4.384979963302612,
+    "completed_at": "2025-12-27T12:19:54",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

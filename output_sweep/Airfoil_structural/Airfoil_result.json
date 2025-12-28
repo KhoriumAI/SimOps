@@ -1,0 +1,22 @@
+{
+  "job_name": "Airfoil",
+  "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Airfoil.step",
+  "strategy": "ALL_FAILED",
+  "success": false,
+  "error": "All automated strategies failed. Manual review needed.",
+  "failed_strategies": [
+    {
+      "name": "HighFi_Layered",
+      "error": "Structural Solver failed: CalculiX execution failed with code 201"
+    },
+    {
+      "name": "MedFi_Robust",
+      "error": "Structural Solver failed: CalculiX execution failed with code 201"
+    },
+    {
+      "name": "LowFi_Emergency",
+      "error": "Structural Solver failed: CalculiX execution failed with code 201"
+    }
+  ],
+  "completed_at": "2025-12-27T12:49:34.751501"
+}

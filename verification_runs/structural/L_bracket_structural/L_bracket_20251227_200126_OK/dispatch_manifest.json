@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T20:01:26.552039",
+  "original_result": {
+    "job_name": "L_bracket",
+    "input_file": "cad_files/L_bracket.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\structural\\L_bracket_structural\\L_bracket_MedFi_Robust.msh",
+    "vtk_file": "verification_runs\\structural\\L_bracket_structural\\L_bracket_structural.vtk",
+    "png_file": "verification_runs\\structural\\L_bracket_structural\\L_bracket_stress_iso.png",
+    "pdf_file": "verification_runs\\structural\\L_bracket_structural\\L_bracket_structural_report.pdf",
+    "max_stress_pa": 178781665.76130506,
+    "max_stress_mpa": 178.78166576130505,
+    "max_displacement_mm": 118.67387673422192,
+    "num_elements": 422,
+    "solve_time_s": 0.11975789070129395,
+    "total_time_s": 4.012148141860962,
+    "completed_at": "2025-12-27T20:01:26",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

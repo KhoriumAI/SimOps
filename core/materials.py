@@ -12,7 +12,16 @@ class MaterialProperties:
 
 # NIST / MPDB Standard Values
 MATERIAL_DB: Dict[str, MaterialProperties] = {
+    "Al6061-T6": MaterialProperties(
+        name="Aluminum 6061-T6",
+        density=2700.0,
+        conductivity=167.0,
+        specific_heat=896.0,
+        elastic_modulus=68.9e9,
+        poisson_ratio=0.33
+    ),
     "Aluminum_6061_T6": MaterialProperties(
+
         name="Aluminum 6061-T6",
         density=2700.0,
         conductivity=167.0,

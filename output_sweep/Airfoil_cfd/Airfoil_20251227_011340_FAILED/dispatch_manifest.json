@@ -1,0 +1,13 @@
+{
+  "dispatched_at": "2025-12-27T01:13:40.413665",
+  "original_result": {
+    "job_name": "Airfoil",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Airfoil.step",
+    "strategy": "CFD_HighFi",
+    "success": false,
+    "vtk_file": null,
+    "report_file": null,
+    "completed_at": "2025-12-27T01:13:40.413160",
+    "error": "Pre-simulation validation failed:\n[Pre-Sim Checks] FAILURES DETECTED\n\u2717 Geometry validation failed:\nFound 1 error(s) and 0 warning(s):\n  \u274c [exception] Validation crashed: exception: access violation writing 0x0000000000000028\n     \ud83d\udca1 Check CAD file integrity and try repairing in CAD software\n\n\u2713 Mesh file check skipped (placeholder)"
+  }
+}

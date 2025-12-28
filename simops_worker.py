@@ -76,8 +76,12 @@ def is_mesh_file(path: str) -> bool:
 
 try:
     from core.reporting.structural_report import StructuralPDFReportGenerator
+    from core.reporting.structural_viz import generate_structural_report
+    from core.reporting.thermal_report import ThermalPDFReportGenerator
 except ImportError:
     StructuralPDFReportGenerator = None
+    generate_structural_report = None
+    ThermalPDFReportGenerator = None
 
 try:
     from core.validation.pre_sim_checks import run_pre_simulation_checks
@@ -85,12 +89,9 @@ except ImportError:
     run_pre_simulation_checks = None
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [WORKER] %(levelname)s: %(message)s',
-)
-logger = logging.getLogger(__name__)
+# Configure logging via SimLogger
+from core.logging.sim_logger import SimLogger
+logger = SimLogger("Worker")
 
 # -----------------------------------------------------------------------------
 # CONSOLE CAPTURE UTILS
@@ -110,26 +111,43 @@ class ConsoleCapturer:
         self.file_handle = open(self.log_file, 'a', encoding='utf-8')
         # Write header
         self.file_handle.write(f"\\n=== LOG START: {datetime.now().isoformat()} ===\\n")
+        self.file_handle.write(f"\n=== LOG START: {datetime.now().isoformat()} ===\n")
         
         class Tee:
             def __init__(self, original, file):
                 self.original = original
                 self.file = file
             def write(self, message):
-                self.original.write(message)
-                self.file.write(message)
-                self.file.flush() # Ensure realtime persistence
+                self.file.write(message) # Always write to file
+                try:
+                    self.original.write(message) # Try writing to original stdout/stderr
+                except UnicodeEncodeError:
+                    # Fallback for consoles that don't support certain characters
+                    safe_msg = message.encode('ascii', errors='replace').decode('ascii')
+                    self.original.write(safe_msg)
+                except Exception:
+                    # Catch other potential errors during console write, but don't fail the whole process
+                    pass
+                self.file.flush() # Ensure realtime persistence for the file
             def flush(self):
                 self.original.flush()
                 self.file.flush()
                 
         sys.stdout = Tee(self.stdout_orig, self.file_handle)
         sys.stderr = Tee(self.stderr_orig, self.file_handle)
+        
+        # Refresh SimLogger to use the new Tee stream
+        logger.set_stream(sys.stdout)
+        
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         sys.stdout = self.stdout_orig
         sys.stderr = self.stderr_orig
+        
+        # Restore SimLogger to the original stdout
+        logger.set_stream(sys.stdout)
+        
         if self.file_handle:
             self.file_handle.write(f"\\n=== LOG END: {datetime.now().isoformat()} ===\\n")
             self.file_handle.close()
@@ -184,6 +202,8 @@ class SimulationResult:
     max_temp: Optional[float] = None
     num_elements: int = 0
     solve_time: float = 0
+    max_stress_mpa: Optional[float] = None
+    max_disp_mm: Optional[float] = None
     error: Optional[str] = None
 
 
@@ -197,7 +217,13 @@ def generate_mesh_with_strategy(
     strategy_name = strategy.get('name', 'Unknown')
     output_file = output_dir / f"{job_name}_{strategy_name}.msh"
     
-    logger.info(f"Meshing with strategy: {strategy_name}")
+    logger.log_stage("Meshing")
+    logger.log_metadata("strategy", strategy_name)
+
+    # Determine simulation type
+    sim_type = "thermal"
+    if sim_config and hasattr(sim_config, 'physics'):
+        sim_type = getattr(sim_config.physics, 'simulation_type', "thermal")
 
     # Define mesh scaling based on strategy (HighFi=1.0, LowFi=Coarser)
     scalings = {
@@ -206,6 +232,11 @@ def generate_mesh_with_strategy(
         "LowFi_Emergency": 4.0
     }
     base_factor = scalings.get(strategy_name, strategy.get('mesh_size_factor', 1.0))
+
+    # Higher quality for structural confirmation (User Request: aim for >5k elements)
+    if sim_type == 'structural' and strategy_name == "HighFi_Layered":
+        base_factor = 0.4 # Significant refinement to resolve "hotspots"
+        logger.info(f"  [Refinement] Increasing structural mesh density (factor={base_factor})")
 
     # Overrides from Sidecar
     second_order = False
@@ -276,6 +307,40 @@ def generate_mesh_with_strategy(
     
     if not success:
         raise RuntimeError(f"Mesh generation failed: {stats.get('error')}")
+    
+    # =========================================================================
+    # QUALITY CONTROL: Validate mesh before proceeding to solver
+    # =========================================================================
+    logger.log_stage("Quality Control")
+    
+    from core.validation.mesh_quality_validator import validate_mesh_quality
+    
+    qc_passed, qc_reason, qc_metadata = validate_mesh_quality(Path(output_file))
+    
+    if not qc_passed:
+        # Log detailed failure reason
+        logger.error(f"[MeshQC] ❌ {qc_reason}")
+        logger.log_metadata("qc_failure", qc_reason)
+        
+        # Store QC metadata for debugging
+        qc_file = output_dir / f"{job_name}_{strategy_name}_qc.json"
+        try:
+            with open(qc_file, 'w') as f:
+                json.dump({
+                    'passed': False,
+                    'reason': qc_reason,
+                    'metadata': qc_metadata,
+                    'mesh_file': str(output_file)
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to write QC metadata: {e}")
+        
+        raise RuntimeError(f"Mesh Quality Check Failed: {qc_reason}")
+    
+    logger.info(f"[MeshQC] [OK] {qc_reason}")
+    if qc_metadata:
+        logger.log_metadata("qc_cells", qc_metadata.get('n_cells', 0))
+        logger.log_metadata("qc_min_jacobian", qc_metadata.get('min_jacobian', 'N/A'))
         
     return str(output_file)
         
@@ -305,8 +370,18 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
     """
     # Try CalculiX first
     try:
-        logger.info(f"Running Thermal Solver via CalculiX...")
-        adapter = CalculiXAdapter()
+        logger.log_stage("Solving (Thermal)")
+        logger.log_metadata("solver", "CalculiX")
+        
+        if sim_config and hasattr(sim_config, 'physics'):
+             if hasattr(sim_config.physics, 'material'):
+                 logger.log_metadata("material", sim_config.physics.material)
+             if hasattr(sim_config.physics, 'heat_load_watts'):
+                 logger.log_metadata("heat_load", f"{sim_config.physics.heat_load_watts}W")
+        
+        ccx_path = getattr(sim_config.physics, 'ccx_path', 'ccx') if sim_config else 'ccx'
+        if not ccx_path: ccx_path = 'ccx'
+        adapter = CalculiXAdapter(ccx_binary=ccx_path)
         
         # Build Adapter Config from SimulationConfig
         adapter_config = {}
@@ -340,7 +415,12 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
              # Assuming standard fields: unit_scaling, convection_coeff, ambient_temperature
              if hasattr(phy, 'unit_scaling'): adapter_config['unit_scaling'] = phy.unit_scaling
              if hasattr(phy, 'convection_coeff'): adapter_config['convection_coeff'] = phy.convection_coeff
-             if hasattr(phy, 'ambient_temperature'): adapter_config['ambient_temperature'] = phy.ambient_temperature
+             
+             # Fix: Handle alias ambient_temp_c (Celsius)
+             if hasattr(phy, 'ambient_temperature'): 
+                 adapter_config['ambient_temperature'] = phy.ambient_temperature
+             elif hasattr(phy, 'ambient_temp_c'):
+                 adapter_config['ambient_temperature'] = phy.ambient_temp_c
              if hasattr(phy, 'transient'): adapter_config['transient'] = phy.transient
              if hasattr(phy, 'duration'): adapter_config['duration'] = phy.duration
              if hasattr(phy, 'time_step'): adapter_config['time_step'] = phy.time_step
@@ -422,11 +502,17 @@ def extract_surface_mesh(node_coords, elements):
     """
     # Faces of a tet: (0,1,2), (0,1,3), (0,2,3), (1,2,3)
     # Vectorized face extraction
+    # If elements have tag in column 0, skip it
+    if elements.shape[1] in [5, 11]:
+        elems_clean = elements[:, 1:5] # Take corner nodes
+    else:
+        elems_clean = elements[:, :4] # Assume no tags or already cleaned
+        
     faces = np.vstack([
-        elements[:, [0,1,2]],
-        elements[:, [0,1,3]],
-        elements[:, [0,2,3]],
-        elements[:, [1,2,3]]
+        elems_clean[:, [0,1,2]],
+        elems_clean[:, [0,1,3]],
+        elems_clean[:, [0,2,3]],
+        elems_clean[:, [1,2,3]]
     ])
     faces.sort(axis=1)
     
@@ -534,8 +620,8 @@ def generate_report(
     # Metric Switch: Kelvin -> Celsius
     temp_C = temp_K - 273.15
     
-    T_min = np.min(temp_C)
-    T_max = np.max(temp_C)
+    T_min = np.nanmin(temp_C)
+    T_max = np.nanmax(temp_C)
     
     # Safe Context Extraction (Handles Dict or Pydantic)
     def to_dict(obj):
@@ -587,8 +673,12 @@ def generate_report(
     
     elements = result.get('elements')
     surf_faces = None
-    if elements is not None and len(elements) > 0:
-         surf_faces = extract_surface_mesh(node_coords, np.array(elements))
+    try:
+         if elements is not None and len(elements) > 0:
+              surf_faces = extract_surface_mesh(node_coords, np.array(elements))
+    except Exception as e:
+         logger.warning(f"Surface mesh extraction failed: {e}")
+         surf_faces = None
          
     if surf_faces is not None and HAVE_VTK:
         logger.info("Attempting VTK Isometric Render...")
@@ -652,37 +742,11 @@ def generate_report(
             logger.warning(f"Failed to load VTK image: {e}")
             ax_iso.text(0.5, 0.5, "Image Load Error", ha='center')
     else:
-        # Fallback Matplotlib 3D
-        try:
-            from matplotlib.colors import LightSource
-            ls = LightSource(azdeg=315, altdeg=45)
-             
-            if surf_faces is not None:
-                 # Downsample if super dense
-                 tris_plot = surf_faces
-                 if len(surf_faces) > 50000:
-                     tris_plot = surf_faces[::2]
-                     
-                 x = node_coords[:, 0]
-                 y = node_coords[:, 1]
-                 z = node_coords[:, 2]
-                 
-                 # Create custom shading manually for better control
-                 trisurf = ax_iso.plot_trisurf(x, y, z, triangles=tris_plot, cmap='magma', 
-                                  antialiased=True, shade=True, linewidth=0,
-                                  vmin=T_min, vmax=T_max, lightsource=ls)
-                 
-            else:
-                 # Fallback Global Scatter
-                 sc = ax_iso.scatter(node_coords[:,0], node_coords[:,1], node_coords[:,2],
-                                c=temp_C, cmap='magma', s=2, alpha=0.1)
-    
-            ax_iso.view_init(elev=30, azim=45)
-            ax_iso.set_axis_off()
-
-        except Exception as e:
-            logger.warning(f"3D Surface View failed: {e}")
-            ax_iso.text(0.5, 0.5, "3D Render Error", ha='center')
+        # VTK didn't work - show placeholder
+        # Matplotlib 3D has triangulation issues with some element types
+        ax_iso.text(0.5, 0.5, 0.5, "3D Render Unavailable\n(Use VTK path)", 
+                   ha='center', va='center', fontsize=12)
+        ax_iso.set_axis_off()
 
     # --- Subplots 2,3,4: Cross Sections ---
     shape_views = [
@@ -704,26 +768,41 @@ def generate_report(
             sy = node_coords[mask, yi]
             st = temp_C[mask]
             
-            # Masking Logic (Hole deduction)
-            triang = mtri.Triangulation(sx, sy)
-            x_tri = sx[triang.triangles]
-            y_tri = sy[triang.triangles]
-            d1 = np.hypot(x_tri[:,0]-x_tri[:,1], y_tri[:,0]-y_tri[:,1])
-            d2 = np.hypot(x_tri[:,1]-x_tri[:,2], y_tri[:,1]-y_tri[:,2])
-            d3 = np.hypot(x_tri[:,2]-x_tri[:,0], y_tri[:,2]-y_tri[:,0])
-            max_edge = np.max(np.column_stack([d1,d2,d3]), axis=1)
+            # Robust Filtering
+            valid_mask = np.isfinite(sx) & np.isfinite(sy) & np.isfinite(st)
             
-            domain_size = max(np.max(sx)-np.min(sx), np.max(sy)-np.min(sy))
-            threshold = domain_size * 0.1
-            if len(st) > 100:
-                avg_edge = np.median(max_edge)
-                threshold = max(threshold, avg_edge * 3.0) 
+            if not np.all(valid_mask):
+                sx = sx[valid_mask]
+                sy = sy[valid_mask]
+                st = st[valid_mask]
             
-            triang.set_mask(max_edge > threshold)
+            if len(st) < 4:
+                continue
             
-            cntr = ax.tricontourf(triang, st, levels=levels, cmap='magma', extend='both')
-            # Add thin contour lines for better definition
-            ax.tricontour(triang, st, levels=levels, colors='k', linewidths=0.1, alpha=0.2)
+            try:
+                # Masking Logic (Hole deduction)
+                triang = mtri.Triangulation(sx, sy)
+                x_tri = sx[triang.triangles]
+                y_tri = sy[triang.triangles]
+                d1 = np.hypot(x_tri[:,0]-x_tri[:,1], y_tri[:,0]-y_tri[:,1])
+                d2 = np.hypot(x_tri[:,1]-x_tri[:,2], y_tri[:,1]-y_tri[:,2])
+                d3 = np.hypot(x_tri[:,2]-x_tri[:,0], y_tri[:,2]-y_tri[:,0])
+                max_edge = np.max(np.column_stack([d1,d2,d3]), axis=1)
+                
+                domain_size = max(np.max(sx)-np.min(sx), np.max(sy)-np.min(sy))
+                threshold = domain_size * 0.1
+                if len(st) > 100:
+                    avg_edge = np.median(max_edge)
+                    threshold = max(threshold, avg_edge * 3.0) 
+                
+                triang.set_mask(max_edge > threshold)
+                
+                cntr = ax.tricontourf(triang, st, levels=levels, cmap='magma', extend='both')
+                # Add thin contour lines for better definition
+                ax.tricontour(triang, st, levels=levels, colors='k', linewidths=0.1, alpha=0.2)
+            except Exception as e:
+                logger.warning(f"[Viz] Triangulation/Plotting failed for slice: {e}")
+                ax.text(0.5, 0.5, "Plot Error", ha='center')
         else:
             ax.text(0.5, 0.5, "Slice Empty", ha='center')
 
@@ -980,10 +1059,24 @@ def export_vtk_structural(result: Dict, output_file: str) -> str:
             
         num_cells = len(elements)
         f.write(f"\nCELLS {num_cells} {num_cells * 5}\n")
+        
+        # Tag skipping and 0-indexing
+        has_tag = elements.shape[1] in [5, 11]
+        start_col = 1 if has_tag else 0
+        
+        # Check if indices are 0-based (min 0) or 1-based (min >= 1)
+        # Safe check using a sample
+        sample_min = np.min(elements[:, start_col:start_col+4])
+        is_one_based = sample_min >= 1
+        
         for elem in elements:
-            # VTK expects 0-indexed. Solver returns 0-indexed from adapter?
-            # CalculiXAdapter returns 0-indexed.
-            f.write(f"4 {elem[0]} {elem[1]} {elem[2]} {elem[3]}\n")
+            # Get node indices
+            nodes = elem[start_col:start_col+4]
+            # Convert to 0-based if needed
+            if is_one_based:
+                nodes = nodes - 1
+            e0, e1, e2, e3 = nodes
+            f.write(f"4 {int(e0)} {int(e1)} {int(e2)} {int(e3)}\n")
             
         f.write(f"\nCELL_TYPES {num_cells}\n")
         for _ in range(num_cells):
@@ -1042,18 +1135,28 @@ def generate_structural_viz(
         )).flatten()
         
         cloud = pv.PolyData(node_coords, faces_flat)
+        # result['von_mises'] is already in MPa
         cloud.point_data['Von Mises Stress (MPa)'] = von_mises
         
         # Setup Plotter
-        pl = pv.Plotter(off_screen=True)
+        pl = pv.Plotter(off_screen=True, window_size=[1024, 768])
         pl.set_background('white')
         
         pl.add_mesh(cloud, 
+                   scalars='Von Mises Stress (MPa)',
                    cmap='jet', 
-                   smooth_shading=False, # Disabled to prevent Segfaults
-                   show_edges=False)
-                   # specular=0.5,
-                   # specular_power=15)
+                   smooth_shading=False, 
+                   show_edges=False,
+                   scalar_bar_args={
+                       'title': 'Von Mises (MPa)',
+                       'n_labels': 5,
+                       'fmt': '%.1f',
+                       'color': 'black',
+                       'title_font_size': 14,
+                       'label_font_size': 10,
+                       'position_x': 0.78,
+                       'width': 0.18
+                   })
         
         # FIX: Ensure scale is correct for engineering units
         pl.enable_parallel_projection()
@@ -1079,26 +1182,104 @@ def generate_structural_viz(
 
 def run_structural_solver(mesh_file: Path, output_dir: Path, strategy_name: str, sim_config: Optional['SimulationConfig'] = None) -> Dict:
     """Run Structural Solver via CalculiX"""
-    logger.info("Running Structural Solver via CalculiX...")
-    adapter = CalculiXStructuralAdapter()
+    logger.log_stage("Solving (Structural)")
+    logger.log_metadata("solver", "CalculiX")
     
-    # Config
+    ccx_path = 'ccx'
+    if sim_config and hasattr(sim_config, 'physics'):
+        # Log basic physics metadata
+        if hasattr(sim_config.physics, 'material'):
+            logger.log_metadata("material", sim_config.physics.material)
+        if hasattr(sim_config.physics, 'gravity_load_g'):
+            logger.log_metadata("gravity", f"{sim_config.physics.gravity_load_g}g")
+            
+        ccx_path = getattr(sim_config.physics, 'ccx_path', 'ccx')
+        ccx_path = getattr(sim_config.physics, 'ccx_path', 'ccx')
+        if not ccx_path: ccx_path = 'ccx'
+        
+        # Ensure absolute path if it exists locally
+        if os.path.exists(ccx_path):
+            ccx_path = os.path.abspath(ccx_path)
+        
+        # Check if exists, if not, try relative to worker directory
+        if not os.path.exists(ccx_path):
+             # Try determining standard locations
+             # 1. Relative to this script
+             worker_dir = Path(__file__).parent
+             candidate = worker_dir / ccx_path
+             if candidate.exists():
+                 ccx_path = str(candidate)
+             elif (worker_dir / "ccx_wsl.bat").exists() and "wsl" in ccx_path:
+                  ccx_path = str(worker_dir / "ccx_wsl.bat")
+        
+        logger.info(f"[Config] Using CalculiX binary from config: {ccx_path}")
+    else:
+        logger.info(f"[Config] No ccx_path in config, using default: {ccx_path}")
+    
+    adapter = CalculiXStructuralAdapter(ccx_binary=ccx_path)
+    
+    # Config - with material library hydration
     adapter_config = {}
     if sim_config and hasattr(sim_config, 'physics'):
         phy = sim_config.physics
+        
+        # Material hydration (same pattern as thermal solver)
+        from core.materials import get_material
+        
+        def get_structural_prop(field_name, mat_attr, default):
+            """Get property from explicit config, material library, or default."""
+            val = getattr(phy, field_name, None)
+            if val is not None:
+                return val
+            # Try material library
+            if phy.material:
+                try:
+                    mat = get_material(phy.material)
+                    lib_val = getattr(mat, mat_attr, None)
+                    if lib_val is not None:
+                        return lib_val
+                except KeyError:
+                    pass
+            return default
+        
+        # Get elastic modulus from library (stored in Pa) and convert to MPa
+        E_pa = get_structural_prop('youngs_modulus', 'elastic_modulus', 210000e6)  # Default: Steel in Pa
+        # If from config, assume already in MPa; if from library (very large number), convert
+        if E_pa is not None and E_pa > 1e6:  # Likely in Pa from library
+            adapter_config['youngs_modulus'] = E_pa / 1e6  # Convert Pa to MPa
+        else:
+            adapter_config['youngs_modulus'] = E_pa if E_pa else 210000.0  # Already MPa or default
+            
+        adapter_config['poissons_ratio'] = get_structural_prop('poissons_ratio', 'poisson_ratio', 0.3)
+        adapter_config['density'] = get_structural_prop('density', 'density', 7850.0)
         adapter_config['gravity_load_g'] = phy.gravity_load_g
         adapter_config['tip_load'] = getattr(phy, 'tip_load', None)
-        adapter_config['youngs_modulus'] = phy.youngs_modulus
-        adapter_config['poissons_ratio'] = phy.poissons_ratio
-        if hasattr(phy, 'density'):
-            adapter_config['density'] = phy.density
+        
+        # FIX: Map Clamping Direction (Critical for stability) and Material Name
+        if hasattr(phy, 'clamping_direction'):
+            adapter_config['clamping_direction'] = phy.clamping_direction
+        if hasattr(phy, 'material'):
+            adapter_config['material'] = phy.material
             
     # Run
     try:
+        # [Fix] Ensure file is flushed and accessible
+        import time
+        time.sleep(2.0)
+        
+        if not os.path.exists(mesh_file):
+            logger.error(f"Mesh file disappeared: {mesh_file}")
+            return {'success': False, 'error': "Mesh file missing"}
+            
+        size = os.path.getsize(mesh_file)
+        logger.info(f"Mesh file ready: {mesh_file} ({size} bytes)")
+
         result = adapter.run(mesh_file, output_dir, adapter_config)
         return result
     except Exception as e:
         logger.error(f"Structural Solver Failed: {e}")
+        import traceback
+        traceback.print_exc()
         return {'success': False, 'error': str(e)}
 
 
@@ -1188,6 +1369,12 @@ def run_cfd_simulation(
             
         if hasattr(phy, 'kinematic_viscosity'):
             solver_config['kinematic_viscosity'] = phy.kinematic_viscosity
+            
+        # Log CFD Metadata
+        if hasattr(phy, 'inlet_velocity'):
+             logger.log_metadata("inlet_velocity", f"{phy.inlet_velocity} m/s")
+        if hasattr(phy, 'material'):
+             logger.log_metadata("fluid", phy.material)
     
     # =========================================================================
     # PRE-SIMULATION ROBUSTNESS CHECKS
@@ -1453,10 +1640,12 @@ def run_simulation(file_path: str, output_dir: str, config_path: Optional[str] =
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    console_log = output_path / "worker_console.log"
+    # Identfy job name for the log file
+    job_name = Path(file_path).stem.replace("USED_", "")
+    log_file = output_path / f"{job_name}.log"
     
     # Wrap entire execution in capture
-    with ConsoleCapturer(console_log):
+    with ConsoleCapturer(log_file):
         return _run_simulation_internal(file_path, output_path, config_path)
 
 def _run_simulation_internal(file_path: str, output_path: Path, config_path_str: Optional[str]) -> SimulationResult:
@@ -1507,7 +1696,8 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
         logger.warning(f"Sidecar job_name='{sim_config.job_name}' differs from file '{job_name}'. Using filename.")
     # job_name stays as input_path.stem (set above)
 
-    logger.info(f"Starting job: {job_name}")
+    logger.log_stage("Initializing")
+    logger.log_metadata("job_name", job_name)
     if config_path.exists():
         logger.info(f"   [Config] Loaded from: {config_path.absolute()}")
     else:
@@ -1578,6 +1768,9 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
             if geo_analysis.is_too_small_for_highfi:
                 logger.warning("  [!] Geometry too small/thin for HighFi. Skipping to robust strategies.")
                 strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_Layered"]
+            elif sim_type in ['thermal', 'structural']:
+                logger.warning(f"  [Config] Skipping HighFi_Layered for {sim_type} (Msg Connectivity Risk).")
+                strategies_to_try = [s for s in STRATEGIES if s['name'] != "HighFi_Layered"]
         else:
             geo_analysis = None
             
@@ -1630,36 +1823,19 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
                 
                 # Report
                 report_file = None
-                if StructuralPDFReportGenerator:
+                if generate_structural_report:
                     try:
-                        gen = StructuralPDFReportGenerator()
-                        
-                        # Pack Data
-                        report_data = {
-                            'success': True,
-                            'strategy_name': strategy['name'],
-                            'max_stress': np.max(result.get('von_mises', [0])),
-                            'max_displacement': np.max(result.get('displacement_magnitude', [0])),
-                            'num_elements': result.get('num_elements', 0),
-                            'solve_time': result.get('solve_time', 0),
-                            'load_info': "Gravity" if (sim_config and getattr(sim_config.physics, 'gravity_load_g', 0) > 0) else "Tip Load",
-                            'max_strain': result.get('max_strain', 0.0),
-                            'reaction_force_z': result.get('reaction_force_z', 0.0)
-                        }
-                        # Small fix: config_overrides is not available here, use sim_config
-                        # Better: pass info from result if adapter put it there, or just generic.
-                        
-                        pdf_path = gen.generate(
-                            job_name,
-                            output_path,
-                            report_data,
-                            image_paths=[str(png_file)] if has_viz else []
+                        report_data = generate_structural_report(
+                            result=result,
+                            output_dir=output_path,
+                            job_name=job_name,
+                            g_factor=getattr(sim_config.physics, 'gravity_load_g', 1.0)
                         )
-                        report_file = str(pdf_path)
+                        report_file = report_data.get('pdf_file')
+                        png_file = report_data.get('png_file')
                         logger.info(f"   [Report] Saved to {report_file}")
                     except Exception as e:
                         logger.error(f"Structural Report Gen Failed: {e}", exc_info=True)
-                        # Create error flag file
                         with open(output_path / "REPORT_ERROR.txt", "w") as f:
                             f.write(str(e))
 
@@ -1670,14 +1846,50 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
                 logger.info(f"   [OK] STRUCTURAL SUCCESS with {strategy['name']}")
                 logger.info("=" * 60)
                 
+                # Write metadata (Required for Dashboard/Traffic Light)
+                metadata = {
+                    'job_name': job_name,
+                    'input_file': file_path,
+                    'strategy': strategy['name'],
+                    'attempts': attempt_num,
+                    'mesh_file': str(mesh_file),
+                    'vtk_file': str(vtk_file),
+                    'png_file': str(png_file) if has_viz else None,
+                    'pdf_file': report_file,
+                    'max_stress_pa': float(np.max(result.get('von_mises', [0]))) * 1e6,
+                    'max_stress_mpa': float(np.max(result.get('von_mises', [0]))),
+                    'max_displacement_mm': float(np.max(result.get('displacement_magnitude', [0]))),
+                    'num_elements': result.get('num_elements', 0),
+                    'solve_time_s': result.get('solve_time', 0),
+                    'total_time_s': total_time,
+                    'completed_at': time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    'success': True,
+                    'sim_type': 'structural'
+                }
+
+                meta_file = output_path / f"{job_name}_result.json"
+                with open(meta_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                # DISPATCH RESULTS
+                try:
+                    dispatcher = ResultDispatcher(output_path)
+                    dispatcher.dispatch_result(metadata)
+                    logger.info("   [Dispatch] Result sent to monitor.")
+                except Exception as e:
+                    logger.warning(f"   [Dispatch] Failed: {e}")
+
                 return SimulationResult(
                     success=True,
                     strategy_name=strategy['name'],
                     mesh_file=str(mesh_file),
                     vtk_file=str(vtk_file),
-                    png_file=str(png_file) if has_viz else None, 
-                    report_file=report_file,
-                    solve_time=result.get('solve_time', 0)
+                    png_file=str(png_file) if png_file else None, 
+                    report_file=str(report_file) if report_file else None,
+                    solve_time=result.get('solve_time', 0),
+                    num_elements=result.get('num_elements', 0),
+                    max_stress_mpa=float(np.max(result.get('von_mises', [0]))),
+                    max_disp_mm=float(np.max(result.get('displacement_magnitude', [0])))
                 )
 
             else:
@@ -1843,10 +2055,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="SimOps Worker - Run simulation")
     parser.add_argument("cad_file", help="Input CAD file")
     parser.add_argument("-o", "--output", default="./output", help="Output directory")
+    parser.add_argument("-c", "--config", help="Explicit path to sidecar JSON config")
     
     args = parser.parse_args()
     
-    result = run_simulation(args.cad_file, args.output)
+    result = run_simulation(args.cad_file, args.output, config_path=args.config)
     
     if result.success:
         print(f"\n[OK] SUCCESS: {result.strategy_name}")

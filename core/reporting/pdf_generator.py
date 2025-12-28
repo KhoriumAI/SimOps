@@ -119,9 +119,9 @@ class PDFReportGenerator:
         metrics_data = [
             ['Metric', 'Value'],
             ['Strategy Used', data.get('strategy_name', 'Unknown')],
-            ['Max Temperature', f"{max_temp:.1f} K"],
-            ['Min Temperature', f"{min_temp:.1f} K"],
-            ['Range (Delta T)', f"{delta_t:.1f} K"],
+            ['Max Temperature', f"{max_temp:.1f} °C"],
+            ['Min Temperature', f"{min_temp:.1f} °C"],
+            ['Range (Delta T)', f"{delta_t:.1f} °C"],
             ['Mesh Elements', f"{data.get('num_elements', 0):,}"],
             ['Solve Time', f"{data.get('solve_time', 0):.2f} s"]
         ]

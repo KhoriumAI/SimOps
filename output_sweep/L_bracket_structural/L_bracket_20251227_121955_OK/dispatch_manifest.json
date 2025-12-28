@@ -1,0 +1,21 @@
+{
+  "dispatched_at": "2025-12-27T12:19:55.842995",
+  "original_result": {
+    "job_name": "L_bracket",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\structural_test_env\\L_bracket.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_structural\\L_bracket_HighFi_Layered.msh",
+    "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_structural\\L_bracket_structural.vtk",
+    "png_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_structural\\L_bracket_stress.png",
+    "pdf_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_structural\\L_bracket_structural_report.pdf",
+    "max_stress_pa": 180.07587773365344,
+    "max_displacement_mm": 8.537730000000003,
+    "num_elements": 0,
+    "solve_time_s": 0.24946832656860352,
+    "total_time_s": 3.6772451400756836,
+    "completed_at": "2025-12-27T12:19:55",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

@@ -17,7 +17,8 @@ from typing import Dict, Any, List, Optional
 from .base import ISolver
 from .openfoam_parser import parse_boundary_file, verify_patches
 
-logger = logging.getLogger(__name__)
+from core.logging.sim_logger import SimLogger
+logger = SimLogger("CFDSolver")
 
 class CFDSolver(ISolver):
     """
@@ -114,6 +115,7 @@ class CFDSolver(ISolver):
                  if U_mag < 1e-9: U_mag = 1e-9 # Avoid ZeroDivision
                  
                  Re = (U_mag * L_char) / nu
+                 logger.log_metric("reynolds_number", Re)
                  logger.info(f"[Physics] Reynolds Number: {Re:.2e} (L={L_char:.3f}m, U={U_mag:.2f}m/s)")
                  
                  # 3. Determine Regime
@@ -164,6 +166,7 @@ class CFDSolver(ISolver):
              self._run_foam_cmd(case_dir, "foamToVTK -latestTime")  # ascii removed, all fields included by default
 
              solve_time = time.time() - start_time
+             logger.log_metric("solve_time", solve_time, "s")
              logger.info(f"[OpenFOAM] Solved in {solve_time:.2f}s")
              
              # 5. Parse Results
@@ -323,46 +326,42 @@ boundaryField
             run_args = ['bash', '-c', full_cmd]
             
         interrupted = False
-        with open(log_file, 'w') as f_log:
-            # Use Popen to stream output
-            process = subprocess.Popen(
-                run_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace' # Handle potential encoding issues gracefully
-            )
+        # Use Popen to stream output
+        process = subprocess.Popen(
+            run_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace' # Handle potential encoding issues gracefully
+        )
+        
+        # Read stdout line by line
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
             
-            # Read stdout line by line
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                
-                if line:
-                    # Echo to console
-                    print(line, end='')
-                    # Write to log
-                    f_log.write(line)
-                    f_log.flush() # Ensure log is up to date
-                
-                # Check for Stop Signal
-                if stop_file.exists():
-                    logger.warning(f"[OpenFOAM] Stop signal detected! Interrupting {cmd_name}...")
-                    process.terminate()
-                    interrupted = True
-                    try: process.wait(timeout=5)
-                    except: process.kill()
-                    stop_file.unlink()
-                    break
+            if line:
+                # Echo to console
+                print(line, end='')
             
-            # Check exit code
-            if process.returncode != 0 and not interrupted:
-                raise subprocess.CalledProcessError(process.returncode, cmd)
-                
-            if interrupted:
-                logger.info(f"[OpenFOAM] {cmd_name} interrupted. Proceeding to post-processing...")
+            # Check for Stop Signal
+            if stop_file.exists():
+                logger.warning(f"[OpenFOAM] Stop signal detected! Interrupting {cmd_name}...")
+                process.terminate()
+                interrupted = True
+                try: process.wait(timeout=5)
+                except: process.kill()
+                stop_file.unlink()
+                break
+        
+        # Check exit code
+        if process.returncode != 0 and not interrupted:
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+            
+        if interrupted:
+            logger.info(f"[OpenFOAM] {cmd_name} interrupted. Proceeding to post-processing...")
 
     def _fix_boundary_types(self, case_dir: Path):
         """Fixes patch types in polyMesh/boundary (e.g. frontAndBack to empty, wall patches to wall)."""
@@ -476,6 +475,7 @@ boundaryField
                 cell_match = re.search(r"total:\s+(\d+)", content)
                 if cell_match:
                     results["num_cells"] = int(cell_match.group(1))
+                    logger.log_metric("mesh_cells", results["num_cells"])
                     logger.info(f"[Parser] Extracted mesh cells: {results['num_cells']}")
             except Exception as e:
                 logger.warning(f"Failed to parse mesh stats: {e}")

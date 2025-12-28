@@ -1,0 +1,10 @@
+{
+  "timestamp": "2025-12-27T13:26:13.905457",
+  "job": "RocketEngine_cfd.json",
+  "intent": "run_sim",
+  "command": "python \"C:/Users/markm/downloads/simops/simops_worker.py\" \"C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\RocketEngine.step\" -o \"C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\RocketEngine_cfd\" -c \"C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\RocketEngine_cfd.json\"",
+  "status": "FAILED",
+  "duration": "1.97s",
+  "stdout": "[INFO] Using explicit sidecar config: RocketEngine_cfd.json\n[INFO] Found sidecar config: RocketEngine_cfd.json\n[WARNING] Sidecar job_name='RocketEngine_cfd' differs from file 'RocketEngine'. Using filename.\n[STAGE] Initializing\n[METADATA] job_name=RocketEngine\n[INFO]    [Config] Loaded from: C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\RocketEngine_cfd.json\n[DEBUG] Dispatch: Job=RocketEngine, Config=C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\RocketEngine_cfd.json, Type=cfd\n[INFO]    [Dispatch] Simulation Type: CFD\n[INFO] >>> DISPATCHING TO CFD PIPELINE <<<\n[INFO] Pre-simulation checks passed:\n[Pre-Sim Checks] ALL PASSED\n? Geometry has issues but auto-repair possible (7 issues)\n? Mesh file check skipped (placeholder)\n[STAGE] Meshing\n[METADATA] strategy=HighFi_Layered\n[ERROR] CFD Meshing failed: cannot access local variable 'sim_type' where it is not associated with a value\n\n[X] FAILED: cannot access local variable 'sim_type' where it is not associated with a value\n",
+  "stderr": "[Pre-Sim] Geometry validation: ISSUES FOUND (auto-repairable)\n"
+}

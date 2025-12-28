@@ -68,7 +68,15 @@ class StructuralMeshStrategy:
                 gmsh.option.setNumber("Mesh.SecondOrderLinear", 0) # Curved
             
             # Algorithms (HXT for 3D is good)
-            gmsh.option.setNumber("Mesh.Algorithm3D", 10) 
+            # Enable parallel meshing with HXT for speed
+            import os
+            # Cap at 8 threads to prevent system instability
+            num_threads = min(8, max(1, os.cpu_count() or 4))
+            gmsh.option.setNumber("General.NumThreads", num_threads)
+            gmsh.option.setNumber("Mesh.MaxNumThreads1D", num_threads)
+            gmsh.option.setNumber("Mesh.MaxNumThreads2D", num_threads)
+            gmsh.option.setNumber("Mesh.MaxNumThreads3D", num_threads)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Parallel, Robust) 
             
             if config.optimize:
                 gmsh.option.setNumber("Mesh.Optimize", 1)
@@ -77,12 +85,20 @@ class StructuralMeshStrategy:
             # Generate
             gmsh.model.mesh.generate(3)
             
-            # Write
+            # Write MSH
             gmsh.write(output_file)
             
-            # Also VTK
+            # Write VTK using PyVista (more robust node ordering for VTK)
             vtk_file = str(Path(output_file).with_suffix('.vtk'))
-            gmsh.write(vtk_file)
+            try:
+                import pyvista as pv
+                # Reading MSH via PyVista/meshio often fixes orientation/convention issues
+                mesh = pv.read(str(output_file))
+                mesh.save(vtk_file)
+                self._log(f"VTK written via PyVista: {vtk_file}")
+            except Exception as ev:
+                self._log(f"PyVista VTK export failed: {ev}. Falling back to Gmsh.")
+                gmsh.write(vtk_file)
             
             return True, {'vtk_file': vtk_file}
             

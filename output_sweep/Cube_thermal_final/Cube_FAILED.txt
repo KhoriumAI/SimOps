@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Cube
+Input:    cad_files\Cube.step
+Time:     2025-12-27T16:15:49.534446
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 86.60 mm
+  Min Dim:  50.00 mm
+  Est. Wall:16.67 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: z array must not contain non-finite values within the triangulation
+- MedFi_Robust: z array must not contain non-finite values within the triangulation
+- LowFi_Emergency: z array must not contain non-finite values within the triangulation
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

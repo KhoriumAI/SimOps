@@ -9,7 +9,9 @@ from typing import Dict, Any, List, Optional
 from .base import ISolver
 from ..materials import get_material, MaterialProperties
 
-logger = logging.getLogger(__name__)
+from core.logging.sim_logger import SimLogger
+
+logger = SimLogger("CalculiXAdapter")
 
 class CalculiXAdapter(ISolver):
     """
@@ -24,12 +26,11 @@ class CalculiXAdapter(ISolver):
         # Check if we are on Windows and check default install location
         if os.name == 'nt' and self.ccx_binary == "ccx":
              default_path = Path(r"C:\calculix\calculix_2.22_4win\ccx.exe")
-             logger.info(f"[Debug] Checking default path: {default_path} (Exists: {default_path.exists()})")
              if default_path.exists():
                  self.ccx_binary = str(default_path)
                  logger.info(f"[CalculiX] Found binary at {self.ccx_binary}")
         else:
-             logger.info(f"[Debug] Skipping default path check. os.name={os.name}, binary={self.ccx_binary}")
+             logger.info(f"[CalculiX] Using binary: {self.ccx_binary}")
         
     def run(self, mesh_file: Path, output_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -38,16 +39,28 @@ class CalculiXAdapter(ISolver):
         job_name = mesh_file.stem.replace(".msh", "")
         inp_file = output_dir / f"{job_name}.inp"
         
+        logger.log_stage("Meshing (Conversion)")
         logger.info(f"[CalculiX] Converting mesh {mesh_file.name} to INP...")
         
         # Scale Factor (mm->m default=1.0 unless configured)
         scale_factor = config.get("unit_scaling", 1.0)
         
         # 1. Convert Mesh and Generate INP
+        logger.info(f"DEBUG_CONFIG: {config}")
         stats = self._generate_inp(mesh_file, inp_file, config, scale=scale_factor)
         
         # 2. Run CalculiX
+        logger.log_stage("Solving (CalculiX)")
         logger.info(f"[CalculiX] executing {self.ccx_binary} {job_name}...")
+        
+        # Binary validation
+        import shutil
+        actual_binary = shutil.which(self.ccx_binary) or self.ccx_binary
+        if not os.path.exists(actual_binary) and not shutil.which(self.ccx_binary):
+            err_msg = f"CalculiX binary not found: {self.ccx_binary}. Check your installation."
+            logger.log_error("BINARY_NOT_FOUND", err_msg)
+            raise FileNotFoundError(err_msg)
+
         log_file = output_dir / f"{job_name}.log"
         stop_file = output_dir / "STOP_SIM"
         
@@ -63,43 +76,42 @@ class CalculiXAdapter(ISolver):
             env["OMP_NUM_THREADS"] = "4"
             
             interrupted = False
-            with open(log_file, 'w') as f_log:
-                process = subprocess.Popen(
-                    cmd, 
-                    cwd=cwd, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=env,
-                    encoding='utf-8',
-                    errors='replace'
-                )
+            process = subprocess.Popen(
+                cmd, 
+                cwd=cwd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
                 
-                while True:
-                    line = process.stdout.readline()
-                    if not line and process.poll() is not None:
-                        break
+                if line:
+                    print(f"[CCX] {line}", end='')
                     
-                    if line:
-                        print(f"[CCX] {line}", end='')
-                        f_log.write(line)
-                        f_log.flush()
-                        
-                    # Graceful Stop Check
-                    if stop_file.exists():
-                        logger.warning(f"[CalculiX] Stop signal detected! Terminating {job_name}...")
-                        process.terminate()
-                        interrupted = True
-                        # Wait a bit for it to flush
-                        try:
-                            process.wait(timeout=5)
-                        except:
-                            process.kill()
-                        stop_file.unlink() # Cleanup signal file
-                        break
+                # Graceful Stop Check
+                if stop_file.exists():
+                    logger.warning(f"[CalculiX] Stop signal detected! Terminating {job_name}...")
+                    process.terminate()
+                    interrupted = True
+                    # Wait a bit for it to flush
+                    try:
+                        process.wait(timeout=5)
+                    except:
+                        process.kill()
+                    stop_file.unlink() # Cleanup signal file
+                    break
             
             if process.returncode != 0 and not interrupted:
-                raise RuntimeError(f"CalculiX execution failed with code {process.returncode}")
+                err_msg = f"CalculiX execution failed with code {process.returncode}"
+                logger.log_error("SOLVER_CRASH", err_msg)
+                raise RuntimeError(err_msg)
                 
             if interrupted:
                 logger.info("[CalculiX] Proceeding to report generation from partial results...")
@@ -111,6 +123,7 @@ class CalculiXAdapter(ISolver):
             raise
             
         solve_time = time.time() - start_time
+        logger.log_metric("solve_time", solve_time, "s")
         
         # 3. Parse Results
         frd_file = output_dir / f"{job_name}.frd"
@@ -120,6 +133,7 @@ class CalculiXAdapter(ISolver):
         results = self._parse_frd(frd_file, stats['node_map'], stats['elements'], config)
         results['solve_time'] = solve_time
         results['mesh_stats'] = stats
+        results['success'] = True  # Mark as successful for worker
         
         return results
 
@@ -150,11 +164,12 @@ class CalculiXAdapter(ISolver):
                     c3d4_elems.append(chunk)
                 elif etype == 11: # Tet10
                     # Gmsh 11: 4 corners, 6 edges
-                    # CalculiX C3D10: Permutation verified by tools/verify_tet10_mapping.py
-                    # [0, 1, 2, 3, 8, 5, 4, 7, 9, 6] yields Uniform Stress (Std=0.0)
+                    # CalculiX C3D10: Permutation verified by skills/verify_tet10_mapping.py
+                    # [0, 1, 2, 3, 4, 5, 6, 7, 9, 8] (Swap89) passes CalculiX validation
+                    # This matches the structural adapter mapping.
                     raw_nodes = elem_nodes[i].reshape(-1, 10).astype(int)
                     tags = elem_tags[i].astype(int)
-                    permuted_nodes = raw_nodes[:, [0, 1, 2, 3, 8, 5, 4, 7, 9, 6]]
+                    permuted_nodes = raw_nodes[:, [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]]
                     chunk = np.column_stack((tags, permuted_nodes))
                     c3d10_elems.append(chunk)
 
@@ -370,8 +385,15 @@ class CalculiXAdapter(ISolver):
                     f.write(f"{int(tag)}")
                 f.write("\n")
 
+                # Intelligent Mapping: Check aliases
+                amb_in = config.get("ambient_temperature")
+                if amb_in is None: amb_in = config.get("ambient_temp_c", 293.0)
+
                 # Initial Conditions (Required for Transient)
-                init_temp = config.get("initial_temperature", config.get("ambient_temperature", 293.0))
+                init_temp_in = config.get("initial_temperature", amb_in)
+                init_temp = init_temp_in + 273.15
+                logger.info(f"   [Physics] Init Temp: {init_temp_in}C -> {init_temp}K")
+                
                 f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
                 f.write(f"N_All, {init_temp}\n")
 
@@ -391,8 +413,22 @@ class CalculiXAdapter(ISolver):
                 # Boundary Conditions (Conduction)
                 f.write("*BOUNDARY\n")
                 # Legacy Support: Hot Top / Cold Bottom
-                t_hot = config.get("heat_source_temperature", 373.0)  # Default to 373K (100°C)
-                t_cold = config.get("ambient_temperature", 293.0)  # Default to 293K (20°C)
+                # ANTIGRAVITY FIX: Force conversion to Kelvin. Inputs are likely Celsius.
+                t_hot_in = config.get("heat_source_temperature", 373.0)
+                
+                t_cold_in = amb_in
+                
+                # Heuristic: User inputs are Celsius (e.g. 20, 100). Solver needs Kelvin.
+                # Threshold check < 200 is risky if user inputs 150K (cryogenic).
+                # But given context, inputs are C. Use explicit conversion log.
+                
+                t_hot_K = t_hot_in + 273.15
+                t_cold_K = t_cold_in + 273.15
+                
+                logger.info(f"   [Physics] Converted Temp: Hot {t_hot_in}C -> {t_hot_K}K, Cold {t_cold_in}C -> {t_cold_K}K")
+                
+                t_hot = t_hot_K
+                t_cold = t_cold_K
                 
                 # Hot BC (Z-Max) - Always applied if T_hot defined (conceptually)
                 # We could make this optional too, but usually we need a source.
@@ -413,7 +449,9 @@ class CalculiXAdapter(ISolver):
                 h_si = config.get("convection_coeff", 25.0) 
                 h = h_si * 1e-6
                 
-                T_inf = config.get("ambient_temperature", 293.0) 
+                T_inf_in = amb_in # Use resolved ambient
+                T_inf = T_inf_in + 273.15
+                logger.info(f"   [Physics] Convection T_inf: {T_inf_in}C -> {T_inf}K")
                 
                 if h_si > 0 and (len(tri3_elems) > 0 or len(tri6_elems) > 0):
                     # Define a surface from the skin element faces
@@ -425,7 +463,8 @@ class CalculiXAdapter(ISolver):
                     
                     # Apply surface film (convection) to the defined surface
                     f.write(f"*SFILM\n")
-                    f.write(f"S_Convection, F, {T_inf}, {h}\n")
+                    # FIX: Remove spaces for safer parsing
+                    f.write(f"S_Convection,F,{T_inf},{h}\n")
 
                 # =========================================================
                 # NEW: Surface Flux (*DFLUX)
@@ -434,68 +473,49 @@ class CalculiXAdapter(ISolver):
                 if q_flux_si is not None:
                      # Identify where to apply flux. Default: Hot Boundary Nodes -> Elements?
                      # *DFLUX applies to element faces.
-                     # We can use the E_Skin set if we want to apply to ALL skin, 
-                     # but typically we want it on the "Hot" boundary only.
-                     # For now, let's apply to the SAME boundary as the "Fixed Hot" would be (z-max usually).
-                     # But *DFLUX needs element faces, not nodes. 
-                     # Simplest approach: Apply to ALL E_Skin if "Flux Slab" mode?
-                     # OR: Reuse the "Heat Source" detection logic but find faces instead of nodes?
-                     #
-                     # BETTER APPROACH: Apply to "S_HeatSource" surface.
-                     # We need to define S_HeatSource first.
-                     # Since we don't have facial-semantic-tagging fully plumbed to sets yet,
-                     # we will apply to E_Skin faces that are within the "Hot" zone.
-                     # This is tricky without "Sidecar" telling us exactly which faces.
+                     # We need element faces corresponding to the hot zone.
+                     # This is tricky without explicitly finding faces.
+                     # Re-use the E_Skin strategy? 
+                     # Create a new ELSET E_FluxSelect containing skin elements near Hot Zone.
                      
-                     # FOR THIS VALIDATION CASE (Slab): The "Hot" boundary is Z=min (bottom).
-                     # Let's support applying to "S_Convection" (All Skin) or a specific subset?
-                     #
-                     # Let's assume for the validation case we apply it to the "Hot" region.
-                     # We used 'hot_tags' (nodes) earlier. We need elements.
-                     #
-                     # Hack for Validation robustness: Apply to ALL skin for now, 
-                     # as the test case is 1D insulated side walls?
-                     # No, 1D slab has insulated sides. Flux only on bottom.
-                     #
-                     # Let's implementing a "Flux Surface" selector later.
-                     # For now: If 'surface_flux_wm2' is set, we assume the user WANTS it on the HeatSource.
-                     # We will create a surface S_HeatSource.
-                     # We need to find elements in E_Skin whose nodes are in 'hot_tags'.
-                     
-                     # 1. Find Skin Elements composed ONLY of hot_tags nodes
-                     hot_set = set(hot_tags)
-                     flux_elems = []
-                     
-                     # Check Tri3
-                     for row in np.vstack(tri3_elems) if len(tri3_elems)>0 else []:
-                         eid = row[0]
-                         nodes = row[1:]
-                         if all(nid in hot_set for nid in nodes):
-                             flux_elems.append(eid)
-                             
-                     # Check Tri6
-                     for row in np.vstack(tri6_elems) if len(tri6_elems)>0 else []:
-                         eid = row[0]
-                         nodes = row[1:]
-                         if all(nid in hot_set for nid in nodes):
-                             flux_elems.append(eid)
-                             
-                     if flux_elems:
-                         f.write(f"*ELSET, ELSET=E_FluxSelect\n")
-                         for eid in flux_elems:
-                             f.write(f"{int(eid)},\n")
-                             
-                         f.write("*SURFACE, NAME=S_Flux, TYPE=ELEMENT\n")
-                         f.write("E_FluxSelect, S1\n")
+                     # Filter tri_elems by Z location or heuristic
+                     if len(tri3_elems) + len(tri6_elems) > 0:
+                         flux_elems = []
                          
-                         # Convert W/m^2 -> W/mm^2 (1e-6)
-                         q_flux = q_flux_si * 1e-6
-                         f.write(f"*DFLUX\n")
-                         # Load type S means flux per unit area
-                         f.write(f"S_Flux, S, {q_flux}\n")
-                         logger.info(f"[CalculiX] Applied Surface Flux {q_flux_si} W/m^2 to {len(flux_elems)} elements")
-                     else:
-                         logger.warning("[CalculiX] Surface Flux requested but no elements found in Hot Zone!")
+                         skin_nodes_flat = []
+                         skin_tags_flat = []
+                         if len(tri3_elems) > 0:
+                             skin_nodes_flat.append(tri3_elems[:, 1:]) 
+                             skin_tags_flat.append(tri3_elems[:, 0])
+                         if len(tri6_elems) > 0:
+                             skin_nodes_flat.append(tri6_elems[:, 1:]) 
+                             skin_tags_flat.append(tri6_elems[:, 0])
+                             
+                         # Check geometric bounds of skin elements
+                         for stags, snodes in zip(skin_tags_flat, skin_nodes_flat):
+                             for i, eid in enumerate(stags):
+                                 # Get nodes for this element
+                                 enodes = snodes[i]
+                                 # Check if these nodes are in hot_tags
+                                 if np.any(np.isin(enodes, hot_tags)):
+                                     flux_elems.append(eid)
+                                     
+                         if flux_elems:
+                             f.write(f"*ELSET, ELSET=E_FluxSelect\n")
+                             for eid in flux_elems:
+                                 f.write(f"{int(eid)},\n")
+                             
+                             f.write("*SURFACE, NAME=S_Flux, TYPE=ELEMENT\n")
+                             f.write("E_FluxSelect, S1\n")
+                             
+                             # Convert W/m^2 -> W/mm^2 (1e-6)
+                             q_flux = q_flux_si * 1e-6
+                             f.write(f"*DFLUX\n")
+                             # Load type S means flux per unit area
+                             f.write(f"S_Flux, S, {q_flux}\n")
+                             logger.info(f"[CalculiX] Applied Surface Flux {q_flux_si} W/m^2 to {len(flux_elems)} elements")
+                         else:
+                             logger.warning("[CalculiX] Surface Flux requested but no elements found in Hot Zone!")
 
                 # =========================================================
                 # NEW: Volumetric Heat Source (*DFLUX with BF)
@@ -512,16 +532,42 @@ class CalculiXAdapter(ISolver):
 
 
                 # Output
-                # *NODE PRINT generates .frd (ASCII) which is parseable
-                # *NODE FILE generates .12d (binary) which we can't parse
+                # *NODE PRINT generates .dat (ASCII tabular) which is parseable 
+                # *NODE FILE generates .frd (ASCII results) for visualization/parsing
                 # Always set FREQUENCY=1 to ensure output is written
+                f.write("*NODE FILE, NSET=N_All, FREQUENCY=1\n")
+                f.write("NT\n")
                 f.write("*NODE PRINT, NSET=N_All, FREQUENCY=1\n")
                 f.write("NT\n")
                 f.write("*END STEP\n")
+            
+            # ANTIGRAVITY FIX: Remap element node tags to 0-based indices
+            # The all_elems array contains [Tag, Node1, Node2...] where Nodes are 1-based Tags.
+            # We need them to be indices into the node_coords array.
+            
+            # Create a lookup table: Node Tag -> Index
+            tag_to_index = {tag: idx for idx, tag in enumerate(node_tags)}
+            
+            # Remap elements
+            # all_elems[:, 1:] contains the node tags
+            remapped_elems = all_elems[:, 1:].copy()
+            
+            # Vectorized mapping is hard with dict, use loop or np.searchsorted if sorted
+            # Assuming node_tags returned by Gmsh are sorted (usually strict increasing)
+            # Use searchsorted for speed
+            
+            # Verify if tags are sorted
+            if np.all(np.diff(node_tags) >= 0):
+                # Sorted
+                remapped_elems = np.searchsorted(node_tags, remapped_elems)
+            else:
+                # Fallback to slow map or argsort
+                sorter = np.argsort(node_tags)
+                remapped_elems = sorter[np.searchsorted(node_tags, remapped_elems, sorter=sorter)]
                 
             return {
                 'node_map': dict(zip(node_tags, node_coords)),
-                'elements': all_elems[:, 1:] # Strip ID, keep nodes
+                'elements': remapped_elems # Now 0-based indices
             }
         finally:
             gmsh.finalize()
@@ -563,7 +609,14 @@ class CalculiXAdapter(ISolver):
                         current_temps = {} # Reset buffer
                     except ValueError:
                         pass
-                        
+            
+            # For steady-state (no 100CL), check if we're starting to read data
+            # and haven't initialized time yet
+            if stripped.startswith("-4") and current_time == 0.0 and not current_temps:
+                # This is likely a steady-state analysis, set time to 1.0
+                current_time = 1.0
+                
+
             # 2. Check for Temperature Block Start
             # " -4  NT..." or " -4  NDTEMP..."
             if stripped.startswith("-4") and ("NT" in stripped or "NDTEMP" in stripped or "P" in stripped):
@@ -585,14 +638,15 @@ class CalculiXAdapter(ISolver):
                 
             # 4. Parse Data lines
             if reading_nt:
-                # Format: " -1 <nid> <val>"
-                parts = line.split()
-                if len(parts) < 3: continue
-                
-                if parts[0] == '-1':
+                # FRD format is fixed-width: " -1" marker + node_id (10 chars) + value
+                # Example: " -1         13.29949E+002" = node 1, temp 329.949K
+                # Use regex to handle this format
+                import re
+                match = re.match(r'\s*-1\s+(\d+)([\d.Ee\+\-]+)', line)
+                if match:
                     try:
-                        nid = int(parts[1])
-                        val = float(parts[2])
+                        nid = int(match.group(1))
+                        val = float(match.group(2))
                         current_temps[nid] = val
                     except:
                         pass
@@ -729,7 +783,8 @@ class CalculiXAdapter(ISolver):
                 A_lateral = circumference * z_range / 1000**2  # Convert mm² to m²
                 
                 heat_flux_watts = h * A_lateral * (T_surface_mean - T_ambient)
-                logger.info(f"  [Heat Flux] Q = {heat_flux_watts:.1f}W (h={h} W/m²K, A={A_lateral:.4f}m², ΔT={T_surface_mean - T_ambient:.1f}K)")
+                logger.log_metric("heat_flux_watts", heat_flux_watts, "W")
+                logger.info(f"  [Heat Flux] Q = {heat_flux_watts:.1f}W (h={h} W/m^2K, A={A_lateral:.4f}m^2, dT={T_surface_mean - T_ambient:.1f}K)")
         except Exception as e:
             logger.warning(f"  [Heat Flux] Calculation failed: {e}")
 

@@ -1,0 +1,22 @@
+{
+  "job_name": "Cube",
+  "input_file": "cad_files\\Cube.step",
+  "strategy": "ALL_FAILED",
+  "success": false,
+  "error": "All automated strategies failed. Manual review needed.",
+  "failed_strategies": [
+    {
+      "name": "HighFi_Layered",
+      "error": "Thermal Solver failed: None"
+    },
+    {
+      "name": "MedFi_Robust",
+      "error": "Thermal Solver failed: None"
+    },
+    {
+      "name": "LowFi_Emergency",
+      "error": "Thermal Solver failed: None"
+    }
+  ],
+  "completed_at": "2025-12-27T16:09:11.121087"
+}

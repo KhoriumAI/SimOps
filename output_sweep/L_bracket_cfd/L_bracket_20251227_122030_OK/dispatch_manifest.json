@@ -1,0 +1,13 @@
+{
+  "dispatched_at": "2025-12-27T12:20:30.386113",
+  "original_result": {
+    "job_name": "L_bracket",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\structural_test_env\\L_bracket.step",
+    "strategy": "HighFi_Layered",
+    "success": true,
+    "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_cfd\\L_bracket_HighFi_Layered.vtk",
+    "report_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\L_bracket_cfd\\L_bracket_cfd_report.pdf",
+    "completed_at": "2025-12-27T12:20:30.332443",
+    "error": null
+  }
+}

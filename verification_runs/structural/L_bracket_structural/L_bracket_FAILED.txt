@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: L_bracket
+Input:    cad_files/L_bracket.step
+Time:     2025-12-27T17:52:07.777440
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 71.41 mm
+  Min Dim:  10.00 mm
+  Est. Wall:6.15 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: Structural Solver failed: cannot access local variable 'remapped_elems' where it is not associated with a value
+- MedFi_Robust: Structural Solver failed: cannot access local variable 'remapped_elems' where it is not associated with a value
+- LowFi_Emergency: Structural Solver failed: cannot access local variable 'remapped_elems' where it is not associated with a value
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

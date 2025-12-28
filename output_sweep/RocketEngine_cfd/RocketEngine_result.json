@@ -1,0 +1,10 @@
+{
+  "job_name": "RocketEngine",
+  "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\RocketEngine.step",
+  "strategy": "CFD_HighFi",
+  "success": false,
+  "vtk_file": null,
+  "report_file": null,
+  "completed_at": "2025-12-27T13:26:13.687011",
+  "error": "cannot access local variable 'sim_type' where it is not associated with a value"
+}

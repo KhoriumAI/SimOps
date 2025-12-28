@@ -1,0 +1,19 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Cube
+Input:    input/Cube.step
+Time:     2025-12-27T13:41:18.691846
+==================================================
+
+GEOMETRY ANALYSIS:
+Not available
+
+STRATEGY FAILURES:
+- HighFi_Layered: Mesh generation failed: File 'input/Cube.step' does not exist
+- MedFi_Robust: Mesh generation failed: File 'input/Cube.step' does not exist
+- LowFi_Emergency: Mesh generation failed: File 'input/Cube.step' does not exist
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

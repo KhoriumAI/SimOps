@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T18:36:44.158797",
+  "original_result": {
+    "job_name": "Cylinder",
+    "input_file": "cad_files/Cylinder.step",
+    "strategy": "HighFi_Layered",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_HighFi_Layered.msh",
+    "vtk_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_structural.vtk",
+    "png_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_stress_iso.png",
+    "pdf_file": "verification_runs\\structural\\Cylinder_structural\\Cylinder_structural_report.pdf",
+    "max_stress_pa": 5977962895.85296,
+    "max_stress_mpa": 5977.962895852959,
+    "max_displacement_mm": 9.9956e+93,
+    "num_elements": 15005,
+    "solve_time_s": 6.168985366821289,
+    "total_time_s": 11.256911516189575,
+    "completed_at": "2025-12-27T18:36:44",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

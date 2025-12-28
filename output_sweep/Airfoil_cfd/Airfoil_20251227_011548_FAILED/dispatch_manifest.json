@@ -1,0 +1,13 @@
+{
+  "dispatched_at": "2025-12-27T01:15:48.536877",
+  "original_result": {
+    "job_name": "Airfoil",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Airfoil.step",
+    "strategy": "CFD_HighFi",
+    "success": false,
+    "vtk_file": null,
+    "report_file": null,
+    "completed_at": "2025-12-27T01:15:48.533344",
+    "error": "Mesh generation failed: HXT 3D mesh failed"
+  }
+}

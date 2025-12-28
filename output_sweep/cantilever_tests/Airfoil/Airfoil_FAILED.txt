@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Airfoil
+Input:    cad_files/Airfoil.step
+Time:     2025-12-27T13:43:10.797882
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 224.15 mm
+  Min Dim:  34.21 mm
+  Est. Wall:3.44 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: Structural Solver failed: CalculiX execution failed with code 201
+- MedFi_Robust: Structural Solver failed: CalculiX execution failed with code 201
+- LowFi_Emergency: Structural Solver failed: CalculiX execution failed with code 201
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

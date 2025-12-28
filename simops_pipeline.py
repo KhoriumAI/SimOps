@@ -53,7 +53,7 @@ class SimOpsConfig:
     num_boundary_layers: int = 5
     growth_rate: float = 1.2
     mesh_size_factor: float = 1.0
-second_order_mesh: bool = False # Added for Structural
+    second_order_mesh: bool = False # Added for Structural
     
     # Thermal settings
     heat_source_power: float = 1e6          # W

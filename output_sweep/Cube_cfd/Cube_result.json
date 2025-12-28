@@ -1,0 +1,10 @@
+{
+  "job_name": "Cube",
+  "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cube.step",
+  "strategy": "HighFi_Layered",
+  "success": true,
+  "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_cfd\\Cube_HighFi_Layered.vtk",
+  "report_file": "C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cube_cfd\\Cube_cfd_report.pdf",
+  "completed_at": "2025-12-27T13:26:08.914562",
+  "error": null
+}

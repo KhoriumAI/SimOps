@@ -1,0 +1,22 @@
+{
+  "job_name": "Cylinder",
+  "input_file": "cad_files/Cylinder.step",
+  "strategy": "ALL_FAILED",
+  "success": false,
+  "error": "All automated strategies failed. Manual review needed.",
+  "failed_strategies": [
+    {
+      "name": "HighFi_Layered",
+      "error": "Mesh Quality Check Failed: Inverted elements detected: 19541 cells with negative Jacobian (min=-1.0000)"
+    },
+    {
+      "name": "MedFi_Robust",
+      "error": "Mesh Quality Check Failed: Inverted elements detected: 1138 cells with negative Jacobian (min=-1.0000)"
+    },
+    {
+      "name": "LowFi_Emergency",
+      "error": "Mesh Quality Check Failed: Inverted elements detected: 1064 cells with negative Jacobian (min=-1.0000)"
+    }
+  ],
+  "completed_at": "2025-12-27T13:42:32.912807"
+}

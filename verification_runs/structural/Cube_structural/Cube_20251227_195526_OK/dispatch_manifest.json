@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-27T19:55:26.182196",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "cad_files/Cube.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\structural\\Cube_structural\\Cube_MedFi_Robust.msh",
+    "vtk_file": "verification_runs\\structural\\Cube_structural\\Cube_structural.vtk",
+    "png_file": "verification_runs\\structural\\Cube_structural\\Cube_stress_iso.png",
+    "pdf_file": "verification_runs\\structural\\Cube_structural\\Cube_structural_report.pdf",
+    "max_stress_pa": 148067827.3866406,
+    "max_stress_mpa": 148.0678273866406,
+    "max_displacement_mm": 0.009049900033191862,
+    "num_elements": 1131,
+    "solve_time_s": 0.3317887783050537,
+    "total_time_s": 5.214252710342407,
+    "completed_at": "2025-12-27T19:55:26",
+    "success": true,
+    "sim_type": "structural"
+  }
+}

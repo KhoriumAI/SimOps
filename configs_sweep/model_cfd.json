@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "physics": {
+    "simulation_type": "cfd",
+    "inlet_velocity": 10.0,
+    "ambient_temp_c": 25.0
+  },
+  "meshing": {
+    "mesh_size_multiplier": 1.0,
+    "num_layers": 3
+  },
+  "job_name": "model_cfd"
+}

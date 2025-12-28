@@ -1,0 +1,10 @@
+{
+  "timestamp": "2025-12-27T13:26:10.680177",
+  "job": "Cylinder_cfd.json",
+  "intent": "run_sim",
+  "command": "python \"C:/Users/markm/downloads/simops/simops_worker.py\" \"C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cylinder.step\" -o \"C:\\Users\\markm\\Downloads\\SimOps\\output_sweep\\Cylinder_cfd\" -c \"C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\Cylinder_cfd.json\"",
+  "status": "FAILED",
+  "duration": "1.27s",
+  "stdout": "[INFO] Using explicit sidecar config: Cylinder_cfd.json\n[INFO] Found sidecar config: Cylinder_cfd.json\n[WARNING] Sidecar job_name='Cylinder_cfd' differs from file 'Cylinder'. Using filename.\n[STAGE] Initializing\n[METADATA] job_name=Cylinder\n[INFO]    [Config] Loaded from: C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\Cylinder_cfd.json\n[DEBUG] Dispatch: Job=Cylinder, Config=C:\\Users\\markm\\Downloads\\SimOps\\configs_sweep\\Cylinder_cfd.json, Type=cfd\n[INFO]    [Dispatch] Simulation Type: CFD\n[INFO] >>> DISPATCHING TO CFD PIPELINE <<<\n[INFO] Pre-simulation checks passed:\n[Pre-Sim Checks] ALL PASSED\n? Geometry has issues but auto-repair possible (4 issues)\n? Mesh file check skipped (placeholder)\n[STAGE] Meshing\n[METADATA] strategy=HighFi_Layered\n[ERROR] CFD Meshing failed: cannot access local variable 'sim_type' where it is not associated with a value\n\n[X] FAILED: cannot access local variable 'sim_type' where it is not associated with a value\n",
+  "stderr": "[Pre-Sim] Geometry validation: ISSUES FOUND (auto-repairable)\n"
+}

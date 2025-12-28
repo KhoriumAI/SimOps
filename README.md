@@ -55,8 +55,13 @@ MeshPackageLean/
 ├── core/            # Core meshing functionality
 ├── strategies/      # Meshing strategy implementations
 ├── converters/      # Mesh format converters
+├── skills/          # Reusable problem-solving and validation scripts
 └── tools/           # Utilities and testing
 ```
+
+## Skills Repository
+The `skills/` directory contains standalone scripts and tools developed to solve specific technical blockers (e.g., mesh topology validation, solver interface debugging). These are intended to be reused to maintain system reliability.
+
 
 ## License
 

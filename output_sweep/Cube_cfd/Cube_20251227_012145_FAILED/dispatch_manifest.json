@@ -1,0 +1,13 @@
+{
+  "dispatched_at": "2025-12-27T01:21:45.291708",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cube.step",
+    "strategy": "CFD_HighFi",
+    "success": false,
+    "vtk_file": null,
+    "report_file": null,
+    "completed_at": "2025-12-27T01:21:45.290199",
+    "error": "Mesh generation failed: HXT 3D mesh failed"
+  }
+}

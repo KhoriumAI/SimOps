@@ -1,0 +1,11 @@
+{
+  "wind_tunnel": {
+    "L_char": 216.23162177941285,
+    "diagonal": 224.15221451201455
+  },
+  "mesh_stats": {
+    "num_nodes": 402491,
+    "num_tets": 2245691,
+    "num_prisms": 0
+  }
+}

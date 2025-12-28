@@ -14,12 +14,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-try:
-    import pyvista as pv
-    HAVE_PYVISTA = True
-except ImportError:
-    HAVE_PYVISTA = False
-    logger.warning("PyVista not available - solution validation will be limited")
+# Lazy import to avoid circular dependency
+HAVE_PYVISTA = True  # We assume it's installed, let failure happen gracefully if not inside method
 
 @dataclass
 class SolutionIssue:
@@ -109,6 +105,7 @@ class SolutionValidator:
             if self.verbose:
                 logger.info(f"Validating solution file: {vtk_path.name}")
                 
+            import pyvista as pv
             mesh = pv.read(str(vtk_path))
             
             # Get available fields

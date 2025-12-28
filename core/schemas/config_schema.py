@@ -83,6 +83,9 @@ class PhysicsConfig(BaseModel):
     # Material
     youngs_modulus: Optional[float] = Field(default=None, description="Young's Modulus in MPa")
     poissons_ratio: Optional[float] = Field(default=None, description="Poisson's Ratio. Overrides material default.")
+    
+    # Solver Configuration
+    ccx_path: Optional[str] = Field(default=None, description="Path to CalculiX binary (ccx.exe or wrapper script)")
 
 
 class MeshingConfig(BaseModel):

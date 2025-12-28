@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "job_name": "model",
+  "physics": {
+    "material": "aluminum",
+    "simulation_type": "structural",
+    "ccx_path": "c:\\Users\\markm\\Downloads\\SimOps\\ccx_wsl.bat",
+    "gravity_load_g": 1.0,
+    "tip_load": null,
+    "youngs_modulus": null,
+    "poissons_ratio": null,
+    "density": null
+  },
+  "meshing": {
+    "second_order": false,
+    "mesh_size_multiplier": 1.0
+  },
+  "material_definitions": {},
+  "tagging_rules": [],
+  "validate_mesh": false
+}

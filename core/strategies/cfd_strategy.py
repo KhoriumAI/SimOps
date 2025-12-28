@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
+from core.logging.sim_logger import SimLogger
+logger = SimLogger("CFDStrategy")
+
 @dataclass
 class CFDMeshConfig:
     """Configuration for CFD mesh generation"""
@@ -60,7 +63,7 @@ class CFDMeshStrategy:
         
     def _log(self, message: str):
         if self.verbose:
-            print(message, flush=True)
+            logger.info(message)
             
     def generate_cfd_mesh(self, 
                           cad_file: str, 
@@ -255,28 +258,29 @@ class CFDMeshStrategy:
         self._log(f"  Min feature size (approx): {min_dim:.2f}")
         
         # Auto-calculate mesh sizes
+        # Modified for coarser sanity checks (target 5-20k tets instead of 500k)
         if config.min_mesh_size is None:
-            config.min_mesh_size = diagonal / 100.0
+            config.min_mesh_size = diagonal / 30.0  # Was / 100.0
         if config.max_mesh_size is None:
-            config.max_mesh_size = diagonal / 20.0
+            config.max_mesh_size = diagonal / 10.0  # Was / 20.0
             
         # ADAPTIVE FIRST LAYER HEIGHT
-        if config.first_layer_height is None:
+        if config.first_layer_height is None and config.num_layers > 0:
             # Base it on the smallest dimension to avoid collapsing thin parts
             # But keep it reasonable for boundary layers (y+ approx)
             
             # Start with 1/250 diameter standard (coarser for testing)
             base_h = diagonal / 250.0
             
-            # Clamp based on min dimension (ensure at least 5 layers fit in half the min thickness)
-            # min_dim / 2 is half thickness. We want 5 layers + core.
-            # So total BL thickness < min_dim / 3 is safe.
-            # total_t = h * (r^n - 1) / (r - 1)
-            # simplified: total_t approx n * h * r^(n/2)
-            
-            max_safe_h = (min_dim / 3.0) / config.num_layers
+            # Clamp based on min dimension (ensure at least 5 layers fit in 1/10th the min thickness)
+            # This is critical to prevent HXT 3D mesh failures due to self-intersecting BLs
+            max_safe_h = (min_dim / 10.0) / config.num_layers
             
             config.first_layer_height = min(base_h, max_safe_h)
+            
+        elif config.first_layer_height is None:
+            # No boundary layers - set a reasonable default
+            config.first_layer_height = diagonal / 100.0
             
         self._log(f"  Auto mesh size: {config.min_mesh_size:.4f} to {config.max_mesh_size:.4f}")
         self._log(f"  Adaptive first layer: {config.first_layer_height:.6f}")
@@ -350,9 +354,18 @@ class CFDMeshStrategy:
                 
             surf_tags = [tag for dim, tag in surfaces]
             
-            # Create BoundaryLayer field
+             # Create BoundaryLayer field
             field_tag = gmsh.model.mesh.field.add("BoundaryLayer")
-            gmsh.model.mesh.field.setNumbers(field_tag, "SurfacesList", surf_tags)
+            
+            # Robust Option Setting (GMSH API varies)
+            try:
+                gmsh.model.mesh.field.setNumbers(field_tag, "SurfacesList", surf_tags)
+            except Exception:
+                try:
+                    gmsh.model.mesh.field.setNumbers(field_tag, "Surfaces", surf_tags)
+                except Exception as e:
+                    self._log(f"  [Warning] Could not set surfaces for BL: {e}")
+                    
             gmsh.model.mesh.field.setNumber(field_tag, "Size", config.first_layer_height)
             gmsh.model.mesh.field.setNumber(field_tag, "Ratio", config.growth_rate)
             
@@ -420,15 +433,21 @@ class CFDMeshStrategy:
         gmsh.option.setNumber("Mesh.MeshSizeMin", config.min_mesh_size * config.mesh_size_factor)
         gmsh.option.setNumber("Mesh.MeshSizeMax", config.max_mesh_size * config.mesh_size_factor)
         
-        # Delaunay is generally most robust for 3D
+        # Enable parallel meshing with HXT for speed
+        import os
+        # Cap threads to 8 to prevent system instability on high-core machines
+        num_threads = min(8, max(1, os.cpu_count() or 4))
+        gmsh.option.setNumber("General.NumThreads", num_threads)
+        gmsh.option.setNumber("Mesh.MaxNumThreads1D", num_threads)
+        gmsh.option.setNumber("Mesh.MaxNumThreads2D", num_threads)
+        gmsh.option.setNumber("Mesh.MaxNumThreads3D", num_threads)
+        
+        # HXT 3D algorithm is parallel and robust
         gmsh.option.setNumber("Mesh.Algorithm", 6)      # Frontal-Delaunay 2D
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)    # Delaunay 3D
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)   # HXT (Parallel, Robust)
         
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.OptimizeThreshold", 0.3)
-        
-        # Ensure we generate 3D mesh
-        # gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0) # Sometimes helps
 
     def _get_mesh_stats(self) -> Dict:
         stats = {

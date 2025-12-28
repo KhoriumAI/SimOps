@@ -1,0 +1,24 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: L_bracket
+Input:    C:\Users\markm\Downloads\SimOps\structural_test_env\L_bracket.step
+Time:     2025-12-27T01:15:56.763714
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 71.41 mm
+  Min Dim:  10.00 mm
+  Est. Wall:6.15 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- HighFi_Layered: Structural Solver failed: CalculiX execution failed with code 1
+- MedFi_Robust: Structural Solver failed: CalculiX execution failed with code 1
+- LowFi_Emergency: Structural Solver failed: CalculiX execution failed with code 1
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.
