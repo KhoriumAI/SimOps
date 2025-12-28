@@ -2,6 +2,7 @@ import os
 import subprocess
 import numpy as np
 from pathlib import Path
+import atexit
 
 # Config
 CCX_PATH = r"C:\Users\markm\Downloads\SimOps\calculix_native\CalculiX-2.23.0-win-x64\bin\ccx.exe"
@@ -289,7 +290,31 @@ def run_mm_tonne_repro():
     except Exception as e:
         print(f"Repro failed: {e}")
 
+def cleanup():
+    """Clean up temporary test files."""
+    temp_files = [
+        "benchmark.inp", "benchmark.frd", "benchmark.dat", "benchmark.sta", "benchmark.cvg",
+        "si_cube_test.inp", "si_cube_test.frd", "si_cube_test.dat", "si_cube_test.sta", "si_cube_test.cvg",
+        "si_point_load.inp", "si_point_load.frd", "si_point_load.dat", "si_point_load.sta", "si_point_load.cvg",
+        "si_unity_test.inp", "si_unity_test.frd", "si_unity_test.dat", "si_unity_test.sta", "si_unity_test.cvg",
+        "si_user_benchmark.inp", "si_user_benchmark.frd", "si_user_benchmark.dat", "si_user_benchmark.sta",
+        "si_full_float.inp", "si_full_float.frd", "si_full_float.dat", "si_full_float.sta",
+        "repro_mm_tonne.inp", "repro_mm_tonne.frd", "repro_mm_tonne.dat", "repro_mm_tonne.sta",
+    ]
+    removed = 0
+    for f in temp_files:
+        if Path(f).exists():
+            try:
+                Path(f).unlink()
+                removed += 1
+            except:
+                pass
+    if removed > 0:
+        print(f"\nCleaned up {removed} temporary test files.")
+
 if __name__ == "__main__":
+    # Register cleanup to run at exit
+    atexit.register(cleanup)
     try:
         # run_standard_benchmark()
         run_mm_tonne_repro()

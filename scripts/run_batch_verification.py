@@ -10,6 +10,16 @@ shapes = ["Cube", "Cylinder", "L_bracket"]
 physics_types = ["structural"]
 base_cmd = [sys.executable, "simops_worker.py"]
 
+def cleanup_temp_files():
+    """Remove temporary test files before starting batch verification."""
+    print("[Batch] Cleaning up temporary test files...")
+    try:
+        cleanup_script = Path(__file__).parent / "cleanup_test_files.py"
+        if cleanup_script.exists():
+            subprocess.run([sys.executable, str(cleanup_script)], check=False)
+    except Exception as e:
+        print(f"[Batch] Warning: Cleanup failed: {e}")
+
 def run_simulation(shape, physics):
     cad_file = f"cad_files/{shape}.step"
     config_file = f"configs_sweep/{shape}_{physics}.json"
@@ -53,6 +63,9 @@ def main():
     print("========================================")
     print("   BATCH VERIFICATION START")
     print("========================================")
+    
+    # Clean up any leftover temp files from previous runs
+    cleanup_temp_files()
     
     results = {}
     

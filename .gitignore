@@ -102,3 +102,23 @@ temp_test_viz/
 tmp_test/
 test_output*/
 output_*_run/
+
+# SI Physics verification test files
+si_*.inp
+si_*.frd
+si_*.dat
+si_*.sta
+si_*.cvg
+benchmark.inp
+benchmark.frd
+benchmark.dat
+benchmark.sta
+benchmark.cvg
+repro_*.inp
+repro_*.frd
+repro_*.dat
+repro_*.sta
+
+# Test-specific directories
+structural_test_env/
+debug_structural_cube/
