@@ -158,18 +158,27 @@ class MeshWorker:
                 result = json.loads(line)
                 print(f"[GUI-WORKER] Parsed result, success={result.get('success')}")
                 if result.get('success'):
+                    # Load full result from file if available (prevents console spam)
+                    if 'full_result_file' in result:
+                        file_path = result['full_result_file']
+                        if os.path.exists(file_path):
+                            try:
+                                with open(file_path, 'r') as f:
+                                    full_result = json.load(f)
+                                # Update result with full data
+                                result.update(full_result)
+                                print(f"[GUI-WORKER] Loaded full result from: {file_path}")
+                            except Exception as e:
+                                print(f"[GUI-WORKER] Failed to load full result file: {e}")
+
                     # Mark all active phases as complete
                     for phase in ["strategy", "1d", "2d", "3d", "opt", "netgen", "order2", "quality"]:
                         if self.phase_max.get(phase, 0) > 0:
                             self._complete_phase(phase)
 
                     self.signals.log.emit("Mesh generation completed!")
-                    self.signals.log.emit(f"[DEBUG] About to emit finished signal with {len(result)} result keys")
-                    self.signals.log.emit(f"[DEBUG] Result keys: {list(result.keys())}")
-                    self.signals.log.emit(f"[DEBUG] per_element_quality present: {'per_element_quality' in result}")
-                    print(f"[GUI-WORKER] Emitting finished signal with result keys: {list(result.keys())}")
+                    self.signals.log.emit(f"[DEBUG] Emitting finished signal with {len(result)} metrics")
                     self.signals.finished.emit(True, result)
-                    self.signals.log.emit("[DEBUG] Finished signal emitted!")
                 else:
                     self.signals.log.emit(f"Failed: {result.get('error')}")
                     self.signals.finished.emit(False, result)

@@ -20,7 +20,11 @@ function App() {
   const [isPolling, setIsPolling] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
   const [targetElements, setTargetElements] = useState(2000)
+  const [useTargetElements, setUseTargetElements] = useState(true)
   const [maxElementSize, setMaxElementSize] = useState(3.0)
+  const [minElementSize, setMinElementSize] = useState(0.1)
+  const [elementOrder, setElementOrder] = useState('1')
+  const [ansysMode, setAnsysMode] = useState('None')
   const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (Delaunay)')
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(false)
   const [geometryInfo, setGeometryInfo] = useState(null)
@@ -52,8 +56,8 @@ function App() {
           const data = await response.json()
           setMeshStrategies(data.names || [])
           // Set default strategy if current selection isn't in the list
-          if (data.default && !data.names.includes(meshSettings.strategy)) {
-            setMeshSettings(prev => ({ ...prev, strategy: data.default }))
+          if (data.default && !data.names.includes(meshStrategy)) {
+            setMeshStrategy(data.default)
           }
         }
       } catch (err) {
@@ -323,8 +327,11 @@ function App() {
         method: 'POST',
         body: {
           quality_preset: qualityPreset,
-          target_elements: targetElements,
-          max_element_size: maxElementSize,
+          target_elements: useTargetElements ? targetElements : null,
+          max_size_mm: maxElementSize,
+          min_size_mm: minElementSize,
+          element_order: parseInt(elementOrder),
+          ansys_mode: ansysMode,
           mesh_strategy: meshStrategy,
           curvature_adaptive: curvatureAdaptive
         },
@@ -562,13 +569,21 @@ function App() {
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
+                      <div className="flex items-center justify-between">
+                        <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
+                        <input
+                          type="checkbox"
+                          checked={useTargetElements}
+                          onChange={(e) => setUseTargetElements(e.target.checked)}
+                          className="w-3 h-3 mb-1 accent-blue-500"
+                        />
+                      </div>
                       <input
                         type="number"
                         value={targetElements}
                         onChange={(e) => setTargetElements(parseInt(e.target.value) || 2000)}
-                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        disabled={isGenerating}
+                        className={`w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${!useTargetElements ? 'opacity-50' : ''}`}
+                        disabled={isGenerating || !useTargetElements}
                       />
                     </div>
                     <div>
@@ -585,6 +600,46 @@ function App() {
                         <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
                     </div>
+                    <div>
+                      <label className="text-gray-500 text-[10px] uppercase mb-1 block">Min Size</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={minElementSize}
+                          onChange={(e) => setMinElementSize(parseFloat(e.target.value) || 0.1)}
+                          className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          disabled={isGenerating}
+                        />
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-gray-500 text-[10px] uppercase mb-1 block">Order</label>
+                      <select
+                        value={elementOrder}
+                        onChange={(e) => setElementOrder(e.target.value)}
+                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        disabled={isGenerating}
+                      >
+                        <option value="1">Linear (Tet4)</option>
+                        <option value="2">Quadratic (Tet10)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Ansys Export</label>
+                    <select
+                      value={ansysMode}
+                      onChange={(e) => setAnsysMode(e.target.value)}
+                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      disabled={isGenerating}
+                    >
+                      <option value="None">None (Only .msh)</option>
+                      <option value="CFD (Fluent)">CFD (Fluent)</option>
+                      <option value="FEA (Mechanical)">FEA (Mechanical)</option>
+                    </select>
                   </div>
 
                   <div>
@@ -681,6 +736,7 @@ function App() {
           <div className="flex-1 relative min-h-0">
             <MeshViewer
               meshData={meshData}
+              projectId={currentProject?.id}
               geometryInfo={geometryInfo}
               filename={projectStatus?.filename}
               qualityMetrics={meshData?.qualityMetrics || projectStatus?.latest_result?.quality_metrics}

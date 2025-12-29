@@ -27,6 +27,9 @@ from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
+from slicing import generate_slice_mesh, parse_msh_for_slicing
+import meshio
+import numpy as np
 
 
 def create_app(config_class=None):
@@ -595,6 +598,78 @@ def register_routes(app):
             return jsonify({"error": "Access denied"}), 403
 
         return jsonify(project.to_dict(include_results=True))
+
+    @app.route('/api/projects/<project_id>/slice', methods=['POST'])
+    @jwt_required()
+    def slice_mesh(project_id: str):
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+
+        if not project:
+            return jsonify({"error": "Project not found"}), 404
+
+        if project.user_id != current_user_id:
+            return jsonify({"error": "Access denied"}), 403
+            
+        data = request.json
+        axis = data.get('axis', 'x').lower()
+        offset_percent = data.get('offset', 0)
+        
+        # Get latest successful mesh result
+        result = MeshResult.query.filter_by(project_id=project_id, success=True).order_by(MeshResult.created_at.desc()).first()
+        if not result or not result.output_path:
+            return jsonify({"error": "No mesh available for this project"}), 404
+            
+        msh_path = Path(result.output_path)
+        if not msh_path.exists():
+            return jsonify({"error": "Mesh file not found on disk"}), 404
+            
+        # Quality file
+        quality_path = msh_path.with_name(msh_path.stem + "_result.json")
+        quality_map = {}
+        if quality_path.exists():
+            try:
+                with open(quality_path, 'r') as f:
+                    res_data = json.load(f)
+                    quality_map = res_data.get('per_element_quality', {})
+            except: pass
+            
+        # Parse mesh for volume elements
+        print(f"[SLICE] Parsing mesh for slice: {msh_path.name}...")
+        nodes, elements = parse_msh_for_slicing(msh_path)
+        
+        if not nodes or not elements:
+            return jsonify({"error": "Could not parse volume elements from mesh"}), 400
+            
+        # Calculate bounds for plane positioning
+        pts = np.array(list(nodes.values()))
+        bbox_min = pts.min(axis=0)
+        bbox_max = pts.max(axis=0)
+        center = (bbox_min + bbox_max) / 2.0
+        size = bbox_max - bbox_min
+        
+        # Define plane
+        plane_origin = center.tolist()
+        if axis == 'x':
+            plane_normal = [1, 0, 0]
+            plane_origin[0] = bbox_min[0] + (offset_percent + 50) / 100.0 * size[0]
+        elif axis == 'y':
+            plane_normal = [0, 1, 0]
+            plane_origin[1] = bbox_min[1] + (offset_percent + 50) / 100.0 * size[1]
+        else: # z
+            plane_normal = [0, 0, 1]
+            plane_origin[2] = bbox_min[2] + (offset_percent + 50) / 100.0 * size[2]
+            
+        # Generate slice
+        print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
+        slice_data = generate_slice_mesh(nodes, elements, quality_map, plane_origin, plane_normal)
+        
+        return jsonify({
+            "success": True,
+            "axis": axis,
+            "offset": offset_percent,
+            "mesh": slice_data
+        })
 
     @app.route('/api/projects/<project_id>/logs', methods=['GET'])
     @jwt_required()
@@ -1453,55 +1528,95 @@ finally:
         entity_tags = mesh_data.get('entity_tags', []) # New field
         fallback_quality = mesh_data.get('fallback_quality', {}) # Parse fallback
 
-        # Build colors based on quality with smooth gradient
-        colors = []
+        def get_color(q, metric='sicn'):
+            if q is None:
+                return 0.29, 0.56, 0.89  # Default blue
+                
+            # Normalize q so that 0 is WORST and 1 is BEST for coloring
+            val = q
+            if metric == 'skewness':
+                val = max(0.0, min(1.0, 1.0 - q))
+            elif metric == 'aspect_ratio':
+                # AR 1.0 is best, 5.0+ is poor
+                val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
+            else:
+                val = max(0.0, min(1.0, q))
+                
+            # Smooth gradient from red (0) to green (1)
+            if val <= 0.1:
+                return 0.8, 0.0, 0.0  # Dark red - very bad
+            elif val < 0.3:
+                # Red to Orange
+                t = (val - 0.1) / 0.2
+                return 1.0, 0.3 * t, 0.0
+            elif val < 0.5:
+                # Orange to Yellow
+                t = (val - 0.3) / 0.2
+                return 1.0, 0.3 + 0.7 * t, 0.0
+            elif val < 0.7:
+                # Yellow to Light Green
+                t = (val - 0.5) / 0.2
+                return 1.0 - 0.5 * t, 1.0, 0.0
+            else:
+                # Light Green to Green
+                t = min(1.0, (val - 0.7) / 0.3)
+                return 0.5 - 0.5 * t, 0.8 + 0.2 * t, 0.2 * t
+
+        # Load all metrics from quality.json
+        per_element_gamma = {}
+        per_element_skewness = {}
+        per_element_aspect_ratio = {}
+        
+        try:
+            if quality_filepath.exists():
+                with open(quality_filepath, 'r') as f:
+                    qdata = json.load(f)
+                    per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
+                    per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
+                    per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
+        except: pass
+
+        # Build colors for all metrics
+        colors_sicn = []
+        colors_gamma = []
+        colors_skewness = []
+        colors_aspect_ratio = []
+        
         matched_count = 0
         unmatched_count = 0
         
         # If per_element_quality is empty (no file), initialize it with fallback
-        # This allows histogram calculation later to work
         if not per_element_quality and fallback_quality:
-            print("[MESH PARSE] Using fallback quality metrics from geometry")
-            # Convert string keys back to int if needed, but fallback comes from JSON as string keys typically
             per_element_quality = {k: v for k, v in fallback_quality.items()}
 
         for el_tag in element_tags:
-            # Priority: 1. quality.json (per_element_quality), 2. Fallback (fallback_quality)
-            q = per_element_quality.get(str(el_tag)) 
-            if q is None: q = per_element_quality.get(int(el_tag))
+            tag_key = int(el_tag)
             
-            # Try fallback if still None
-            if q is None:
-                q = fallback_quality.get(str(el_tag))
-                if q is None: q = fallback_quality.get(str(int(el_tag)) if isinstance(el_tag, float) else str(el_tag))
-
-            if q is not None:
-                matched_count += 1
-                # Smooth gradient from red (0) to green (1)
-                if q <= 0.1:
-                    r, g, b = 0.8, 0.0, 0.0  # Dark red - very bad
-                elif q < 0.3:
-                    # Red to Orange
-                    t = (q - 0.1) / 0.2
-                    r, g, b = 1.0, 0.3 * t, 0.0
-                elif q < 0.5:
-                    # Orange to Yellow
-                    t = (q - 0.3) / 0.2
-                    r, g, b = 1.0, 0.3 + 0.7 * t, 0.0
-                elif q < 0.7:
-                    # Yellow to Light Green
-                    t = (q - 0.5) / 0.2
-                    r, g, b = 1.0 - 0.5 * t, 1.0, 0.0
-                else:
-                    # Light Green to Green
-                    t = min(1.0, (q - 0.7) / 0.3)
-                    r, g, b = 0.5 - 0.5 * t, 0.8 + 0.2 * t, 0.2 * t
-            else:
-                unmatched_count += 1
-                r, g, b = 0.29, 0.56, 0.89  # Default blue
+            # 1. SICN
+            q_sicn = per_element_quality.get(tag_key)
+            if q_sicn is None: q_sicn = fallback_quality.get(tag_key)
+            if q_sicn is None: q_sicn = fallback_quality.get(str(tag_key))
             
-            # 3 vertices per triangle, 3 color components per vertex
-            colors.extend([r, g, b, r, g, b, r, g, b])
+            # 2. Others
+            q_gamma = per_element_gamma.get(tag_key)
+            q_skew = per_element_skewness.get(tag_key)
+            q_ar = per_element_aspect_ratio.get(tag_key)
+            
+            if q_sicn is not None: matched_count += 1
+            else: unmatched_count += 1
+            
+            # Calculate RGBs
+            r_s, g_s, b_s = get_color(q_sicn, 'sicn')
+            r_g, g_g, b_g = get_color(q_gamma, 'gamma')
+            r_k, g_k, b_k = get_color(q_skew, 'skewness')
+            r_a, g_a, b_a = get_color(q_ar, 'aspect_ratio')
+            
+            colors_sicn.extend([r_s, g_s, b_s] * 3)
+            colors_gamma.extend([r_g, g_g, b_g] * 3)
+            colors_skewness.extend([r_k, g_k, b_k] * 3)
+            colors_aspect_ratio.extend([r_a, g_a, b_a] * 3)
+        
+        print(f"[MESH PARSE] Mapped colors for {matched_count} elements ({unmatched_count} missing)")
         
         print(f"[MESH PARSE] Quality color mapping: {matched_count} matched, {unmatched_count} unmatched")
                 
@@ -1571,7 +1686,13 @@ finally:
 
         return {
             "vertices": vertices,
-            "colors": colors,
+            "colors": colors_sicn, # Compatibility
+            "qualityColors": {
+                "sicn": colors_sicn,
+                "gamma": colors_gamma,
+                "skewness": colors_skewness,
+                "aspectRatio": colors_aspect_ratio
+            },
             "entityTags": entity_tags,  # Pass raw array of surface IDs per triangle
             "numVertices": len(vertices) // 3,
             "numTriangles": len(vertices) // 9,
