@@ -2,8 +2,34 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, Loader2, MousePointer2, Tag, X, BarChart3 } from 'lucide-react'
+import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
+
+function SliceMesh({ sliceData, clippingPlanes }) {
+  const geometry = useMemo(() => {
+    if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(sliceData.vertices, 3))
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(sliceData.colors, 3))
+    if (sliceData.indices && sliceData.indices.length > 0) {
+      geo.setIndex(sliceData.indices)
+    }
+    geo.computeVertexNormals()
+    return geo
+  }, [sliceData])
+
+  if (!geometry) return null
+
+  return (
+    <mesh geometry={geometry}>
+      <meshBasicMaterial
+        vertexColors={true}
+        side={THREE.DoubleSide}
+        clippingPlanes={clippingPlanes}
+      />
+    </mesh>
+  )
+}
 
 function AxesIndicator({ visible }) {
   if (!visible) return null
@@ -14,7 +40,7 @@ function AxesIndicator({ visible }) {
   )
 }
 
-function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces }) {
+function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces }) {
   const meshRef = useRef()
   const { camera, gl, raycaster, pointer } = useThree()
 
@@ -34,36 +60,49 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
     // Colors (Float32Array) - if available (for quality mode)
-    if (meshData.colors && meshData.colors.length > 0) {
-      const colors = new Float32Array(meshData.colors)
+    // Support multiple color sets if available
+    const activeColors = (meshData.qualityColors && showQuality) ?
+      meshData.qualityColors[showQuality === true ? 'sicn' : showQuality] :
+      meshData.colors;
+
+    if (activeColors && activeColors.length > 0) {
+      const colors = new Float32Array(activeColors)
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     }
 
     geo.computeVertexNormals()
     geo.computeBoundingBox()
 
+    // Position geometry so it sits ON the XY plane at z=0 
+    // and is centered on X and Y
+    const offset = new THREE.Vector3();
+    geo.boundingBox.getCenter(offset).negate();
+    offset.z = -geo.boundingBox.min.z;
+    geo.translate(offset.x, offset.y, offset.z);
+    geo.computeBoundingBox();
+
     return geo
-  }, [meshData])
+  }, [meshData, showQuality])
 
   // Create gradient colors based on height (Z position in original coords)
   const gradientGeometry = useMemo(() => {
     if (!geometry) return null
-    
+
     const geo = new THREE.BufferGeometry()
-    
+
     // Copy position attribute
     geo.setAttribute('position', geometry.attributes.position.clone())
-    
+
     // Copy normals if available
     if (geometry.attributes.normal) {
       geo.setAttribute('normal', geometry.attributes.normal.clone())
     } else {
       geo.computeVertexNormals()
     }
-    
+
     const positions = geo.attributes.position.array
     const vertexCount = positions.length / 3
-    
+
     // Find min/max Z (height in original CAD coords)
     let minZ = Infinity, maxZ = -Infinity
     for (let i = 0; i < vertexCount; i++) {
@@ -71,51 +110,54 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
       minZ = Math.min(minZ, z)
       maxZ = Math.max(maxZ, z)
     }
-    
+
     // Create gradient colors
     const colors = new Float32Array(vertexCount * 3)
     const range = maxZ - minZ || 1
-    
+
     // Parse gradient colors
     const color1 = new THREE.Color(gradientColors?.start || '#4a9eff')
     const color2 = new THREE.Color(gradientColors?.end || '#ff6b6b')
-    
+
     for (let i = 0; i < vertexCount; i++) {
       const z = positions[i * 3 + 2]
       const t = (z - minZ) / range // Normalized 0-1
-      
+
       // Interpolate between colors
       colors[i * 3] = color1.r + (color2.r - color1.r) * t
       colors[i * 3 + 1] = color1.g + (color2.g - color1.g) * t
       colors[i * 3 + 2] = color1.b + (color2.b - color1.b) * t
     }
-    
+
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     geo.computeBoundingBox()
-    
+
+    // Position geometry to match main geometry (Z-base at 0)
+    const offset = new THREE.Vector3();
+    geo.boundingBox.getCenter(offset).negate();
+    offset.z = -geo.boundingBox.min.z;
+    geo.translate(offset.x, offset.y, offset.z);
+    geo.computeBoundingBox();
+
     return geo
   }, [geometry, gradientColors])
 
   // Auto-fit camera (accounting for Z-up to Y-up rotation)
   useEffect(() => {
     if (geometry && camera) {
-      const boundingBox = geometry.boundingBox
-      const center = new THREE.Vector3()
-      boundingBox.getCenter(center)
       const size = new THREE.Vector3()
-      boundingBox.getSize(size)
+      geometry.boundingBox.getSize(size)
       const maxDim = Math.max(size.x, size.y, size.z)
 
-      // After rotation: original Z becomes Y, original Y becomes -Z
+      // The model is centered on XY, and its base is at Z=0.
+      // After rotation [-90, 0, 0], original Z becomes Y, original Y becomes -Z.
+      // So the center in viewer space is [0, height/2, 0].
+      const viewerCenter = new THREE.Vector3(0, size.z / 2, 0)
+
       // Position camera closer for larger initial view
-      const distance = maxDim * 1.4
-      // Camera looks from front-right-top (isometric-like view)
-      camera.position.set(
-        center.x + distance * 0.8,
-        center.z + distance * 0.6,  // Original Z is now Y
-        -center.y + distance * 0.8  // Original Y is now -Z
-      )
-      camera.lookAt(center.x, center.z, -center.y)
+      const distance = maxDim * 1.5
+      camera.position.set(distance * 0.8, distance * 0.6 + viewerCenter.y, distance * 0.8)
+      camera.lookAt(viewerCenter)
       camera.updateProjectionMatrix()
     }
   }, [geometry, camera])
@@ -154,15 +196,15 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
   // Handle face click for selection
   const handleClick = useCallback((event) => {
     if (!selectionMode || !meshRef.current || !onFaceSelect) return
-    
+
     event.stopPropagation()
-    
+
     const intersects = raycaster.intersectObject(meshRef.current)
     if (intersects.length > 0) {
       const faceIndex = intersects[0].faceIndex
       const point = intersects[0].point
       const normal = intersects[0].face?.normal
-      
+
       onFaceSelect({
         faceIndex,
         point: { x: point.x, y: point.y, z: point.z },
@@ -174,10 +216,10 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
   // Create highlight geometry for selected faces
   const selectedFaceGeometry = useMemo(() => {
     if (!selectedFaces || selectedFaces.length === 0 || !geometry) return null
-    
+
     const positions = geometry.attributes.position.array
     const highlightPositions = []
-    
+
     selectedFaces.forEach(face => {
       const idx = face.faceIndex * 9 // 3 vertices * 3 coords
       if (idx + 8 < positions.length) {
@@ -186,9 +228,9 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
         }
       }
     })
-    
+
     if (highlightPositions.length === 0) return null
-    
+
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.Float32BufferAttribute(highlightPositions, 3))
     geo.computeVertexNormals()
@@ -205,10 +247,10 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
   return (
     // Rotate from Z-up (CAD) to Y-up (Three.js) coordinate system
     <group rotation={[-Math.PI / 2, 0, 0]}>
-      <mesh 
+      <mesh
         key={`mesh-${colorMode}-${gradientColors?.start}-${gradientColors?.end}`}
-        ref={meshRef} 
-        geometry={activeGeometry} 
+        ref={meshRef}
+        geometry={activeGeometry}
         frustumCulled={true}
         onClick={handleClick}
       >
@@ -229,8 +271,8 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
       {/* Highlight selected faces */}
       {selectedFaceGeometry && (
         <mesh geometry={selectedFaceGeometry}>
-          <meshBasicMaterial 
-            color="#00ff00" 
+          <meshBasicMaterial
+            color="#00ff00"
             side={THREE.DoubleSide}
             transparent
             opacity={0.6}
@@ -244,8 +286,8 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
         <group scale={[wireframeScale, wireframeScale, wireframeScale]}>
           <lineSegments>
             <wireframeGeometry args={[activeGeometry]} />
-            <lineBasicMaterial 
-              color={wireframeColor} 
+            <lineBasicMaterial
+              color={wireframeColor}
               opacity={wireframeOpacity}
               transparent={true}
               linewidth={1}
@@ -254,23 +296,50 @@ function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeC
         </group>
       )}
 
-      {/* Cap for clipping (Simplified: just show backface with different color) */}
-      {clipping.enabled && (
-        <mesh geometry={activeGeometry}>
-          <meshBasicMaterial
-            color="#ff5555"
-            side={THREE.BackSide}
-            clippingPlanes={clippingPlanes}
-          />
-        </mesh>
+      {/* Volumetric Quality Slice */}
+      {clipping.enabled && clipping.showQualitySlice && sliceData && (
+        <SliceMesh sliceData={sliceData} clippingPlanes={clippingPlanes} />
       )}
     </group>
   )
 }
 
-export default function MeshViewer({ meshData, geometryInfo, filename, qualityMetrics, status, isLoading, loadingProgress, loadingMessage }) {
+function QualityColorPanel({ activeMetric, onMetricChange, hasAdditionalMetrics }) {
+  const metrics = [
+    { id: 'sicn', label: 'SICN (Shape)', desc: '0=Bad, 1=Perfect' },
+    { id: 'gamma', label: 'Gamma (Radius)', desc: '0=Flat, 1=Equilateral' },
+    { id: 'skewness', label: 'Skewness', desc: '0=Ideal, 1=Degenerate' },
+    { id: 'aspectRatio', label: 'Aspect Ratio', desc: '1=Ideal, 5+=Poor' }
+  ]
+
+  return (
+    <div className="absolute top-10 right-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-48 shadow-xl border border-gray-700">
+      <div className="font-medium text-white mb-2 text-sm">📊 Quality Metric</div>
+      <div className="space-y-1.5">
+        {metrics.map(m => (
+          <button
+            key={m.id}
+            onClick={() => onMetricChange(m.id)}
+            className={`w-full text-left px-2 py-1.5 rounded transition-colors flex flex-col ${activeMetric === m.id ? 'bg-blue-600 text-white' : 'hover:bg-gray-800 text-gray-400'}`}
+          >
+            <span className="font-medium">{m.label}</span>
+            <span className="text-[10px] opacity-60">{m.desc}</span>
+          </button>
+        ))}
+      </div>
+      {!hasAdditionalMetrics && (
+        <div className="mt-2 pt-2 border-t border-gray-800 text-[10px] text-yellow-500/80 italic">
+          Metric switching requires mesh re-generation or modern backend.
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function MeshViewer({ meshData, projectId, geometryInfo, filename, qualityMetrics, status, isLoading, loadingProgress, loadingMessage }) {
   const [clipping, setClipping] = useState({
     enabled: false,
+    showQualitySlice: true,
     x: false,
     y: false,
     z: false,
@@ -279,6 +348,58 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
     zValue: 0
   })
 
+  const [sliceData, setSliceData] = useState(null)
+  const [isSlicing, setIsSlicing] = useState(false)
+
+  // Fetch slice from backend when clipping changes
+  useEffect(() => {
+    if (!clipping.enabled || !clipping.showQualitySlice || !projectId || !meshData) {
+      setSliceData(null)
+      return
+    }
+
+    // Determine active axis
+    let activeAxis = null
+    let value = 0
+    if (clipping.x) { activeAxis = 'x'; value = clipping.xValue }
+    else if (clipping.y) { activeAxis = 'y'; value = clipping.yValue }
+    else if (clipping.z) { activeAxis = 'z'; value = clipping.zValue }
+
+    if (!activeAxis) {
+      setSliceData(null)
+      return
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSlicing(true)
+      try {
+        const token = localStorage.getItem('token')
+        const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/projects/${projectId}/slice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            axis: activeAxis,
+            offset: value
+          })
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          setSliceData(data.mesh)
+        }
+      } catch (err) {
+        console.error("Failed to fetch slice:", err)
+      } finally {
+        setIsSlicing(false)
+      }
+    }, 500) // Debounce 500ms
+
+    return () => clearTimeout(timer)
+  }, [clipping.enabled, clipping.showQualitySlice, clipping.x, clipping.y, clipping.z, clipping.xValue, clipping.yValue, clipping.zValue, projectId, meshData])
+
   const [showQuality, setShowQuality] = useState(false)
   const [showControls, setShowControls] = useState(false)
   const [showPaintPanel, setShowPaintPanel] = useState(false)
@@ -286,15 +407,17 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
   const [showWireframe, setShowWireframe] = useState(false)
   const [showHistogram, setShowHistogram] = useState(false)
   const [showWireframePanel, setShowWireframePanel] = useState(false)
-  
+
   // Wireframe options
   const [wireframeColor, setWireframeColor] = useState('#000000')
   const [wireframeOpacity, setWireframeOpacity] = useState(0.6)
   const [wireframeScale, setWireframeScale] = useState(1.0) // Scale factor for mesh when viewing wireframe
-  
+
   // Paint/Color options
   const [meshColor, setMeshColor] = useState('#4a9eff')
   const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
+  const [qualityMetric, setQualityMetric] = useState('sicn')
+  const [showQualityPanel, setShowQualityPanel] = useState(false)
   const [opacity, setOpacity] = useState(1.0)
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
@@ -313,7 +436,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
   // Handle face selection
   const handleFaceSelect = useCallback((faceData) => {
     if (!selectionMode) return
-    
+
     setSelectedFaces(prev => {
       const exists = prev.find(f => f.faceIndex === faceData.faceIndex)
       if (exists) {
@@ -346,7 +469,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
     setShowFacePanel(false)
     setPendingFaceName('')
   }, [])
-  
+
   // Gradient presets
   const gradientPresets = [
     { name: 'Blue to Red', start: '#4a9eff', end: '#ff6b6b' },
@@ -382,16 +505,16 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                 <div className="w-10 h-10 rounded-full bg-blue-500/20"></div>
               </div>
             </div>
-            
+
             {/* Loading Message */}
             <p className="text-white font-medium mb-3">
               {loadingMessage || 'Loading...'}
             </p>
-            
+
             {/* Progress Bar */}
             {loadingProgress !== undefined && (
               <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                <div 
+                <div
                   className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300 ease-out"
                   style={{ width: `${loadingProgress}%` }}
                 />
@@ -427,9 +550,9 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
               <span className="text-gray-500">|</span>
               <span>{meshData.numTriangles?.toLocaleString()} tris</span>
             </div>
-            
+
             <div className="flex-1" />
-            
+
             {/* View toggles */}
             <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
               <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} className="accent-blue-500 w-3 h-3" />
@@ -451,10 +574,21 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
               )}
             </div>
             {hasQualityData && (
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
-                <input type="checkbox" checked={showQuality} onChange={(e) => { setShowQuality(e.target.checked); if(e.target.checked) setColorMode('quality'); else setColorMode('solid'); }} className="accent-blue-500 w-3 h-3" />
-                Quality
-              </label>
+              <div className="flex items-center gap-1">
+                <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                  <input type="checkbox" checked={showQuality} onChange={(e) => { setShowQuality(e.target.checked); if (e.target.checked) setColorMode('quality'); else setColorMode('solid'); }} className="accent-blue-500 w-3 h-3" />
+                  Quality
+                </label>
+                {showQuality && (
+                  <button
+                    onClick={() => setShowQualityPanel(!showQualityPanel)}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${showQualityPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+                    title="Change Quality Metric"
+                  >
+                    {qualityMetric.toUpperCase()}
+                  </button>
+                )}
+              </div>
             )}
             <button
               onClick={() => setShowHistogram(!showHistogram)}
@@ -476,12 +610,12 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
               onClick={() => setShowPaintPanel(!showPaintPanel)}
               className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showPaintPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
             >
-              <span 
-                className="w-3 h-2 rounded-sm" 
-                style={{ 
-                  background: colorMode === 'gradient' 
-                    ? `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})` 
-                    : meshColor 
+              <span
+                className="w-3 h-2 rounded-sm"
+                style={{
+                  background: colorMode === 'gradient'
+                    ? `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})`
+                    : meshColor
                 }}
               ></span>
               Paint
@@ -492,17 +626,25 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
             >
               Clip
             </button>
+
+            {showQuality && showQualityPanel && (
+              <QualityColorPanel
+                activeMetric={qualityMetric}
+                onMetricChange={(m) => { setQualityMetric(m); setShowQualityPanel(false); }}
+                hasAdditionalMetrics={!!meshData?.qualityColors}
+              />
+            )}
           </div>
 
           {/* Paint Panel */}
           {showPaintPanel && (
             <div className="absolute top-10 left-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-48">
               <div className="font-medium text-white mb-2 text-sm">🎨 Paint Options</div>
-              
+
               {/* Color Mode */}
               <div className="mb-3">
                 <label className="text-gray-400 text-[10px] uppercase">Color Mode</label>
-                <select 
+                <select
                   value={colorMode}
                   onChange={(e) => { setColorMode(e.target.value); setShowQuality(e.target.value === 'quality'); }}
                   className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
@@ -512,21 +654,21 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   <option value="gradient">Gradient</option>
                 </select>
               </div>
-              
+
               {/* Color Picker - Solid */}
               {colorMode === 'solid' && (
                 <div className="mb-3">
                   <label className="text-gray-400 text-[10px] uppercase">Mesh Color</label>
                   <div className="flex items-center gap-2 mt-1">
-                    <input 
-                      type="color" 
+                    <input
+                      type="color"
                       value={meshColor}
                       onChange={(e) => setMeshColor(e.target.value)}
                       className="w-8 h-8 rounded cursor-pointer border-0"
                     />
                     <span className="text-gray-400">{meshColor}</span>
                   </div>
-                  
+
                   {/* Preset Colors */}
                   <div className="flex flex-wrap gap-1 mt-2">
                     {colorPresets.map(preset => (
@@ -546,19 +688,19 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
               {colorMode === 'gradient' && (
                 <div className="mb-3">
                   <label className="text-gray-400 text-[10px] uppercase mb-2 block">Height Gradient</label>
-                  
+
                   {/* Gradient Preview */}
-                  <div 
+                  <div
                     className="h-6 rounded mb-2 border border-gray-600"
                     style={{ background: `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})` }}
                   />
-                  
+
                   {/* Start/End Color Pickers */}
                   <div className="flex gap-2 mb-2">
                     <div className="flex-1">
                       <label className="text-gray-500 text-[9px]">Bottom</label>
-                      <input 
-                        type="color" 
+                      <input
+                        type="color"
                         value={gradientColors.start}
                         onChange={(e) => setGradientColors(prev => ({ ...prev, start: e.target.value }))}
                         className="w-full h-6 rounded cursor-pointer border-0"
@@ -566,15 +708,15 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                     </div>
                     <div className="flex-1">
                       <label className="text-gray-500 text-[9px]">Top</label>
-                      <input 
-                        type="color" 
+                      <input
+                        type="color"
                         value={gradientColors.end}
                         onChange={(e) => setGradientColors(prev => ({ ...prev, end: e.target.value }))}
                         className="w-full h-6 rounded cursor-pointer border-0"
                       />
                     </div>
                   </div>
-                  
+
                   {/* Gradient Presets */}
                   <label className="text-gray-500 text-[9px]">Presets</label>
                   <div className="flex flex-wrap gap-1 mt-1">
@@ -590,52 +732,52 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   </div>
                 </div>
               )}
-              
+
               {/* Opacity */}
               <div className="mb-3">
                 <div className="flex justify-between text-[10px]">
                   <label className="text-gray-400 uppercase">Opacity</label>
                   <span>{Math.round(opacity * 100)}%</span>
                 </div>
-                <input 
-                  type="range" 
+                <input
+                  type="range"
                   min="0.1" max="1" step="0.1"
                   value={opacity}
                   onChange={(e) => setOpacity(parseFloat(e.target.value))}
                   className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
                 />
               </div>
-              
+
               {/* Metalness */}
               <div className="mb-3">
                 <div className="flex justify-between text-[10px]">
                   <label className="text-gray-400 uppercase">Metalness</label>
                   <span>{Math.round(metalness * 100)}%</span>
                 </div>
-                <input 
-                  type="range" 
+                <input
+                  type="range"
                   min="0" max="1" step="0.1"
                   value={metalness}
                   onChange={(e) => setMetalness(parseFloat(e.target.value))}
                   className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
                 />
               </div>
-              
+
               {/* Roughness */}
               <div className="mb-2">
                 <div className="flex justify-between text-[10px]">
                   <label className="text-gray-400 uppercase">Roughness</label>
                   <span>{Math.round(roughness * 100)}%</span>
                 </div>
-                <input 
-                  type="range" 
+                <input
+                  type="range"
                   min="0" max="1" step="0.1"
                   value={roughness}
                   onChange={(e) => setRoughness(parseFloat(e.target.value))}
                   className="w-full h-1 mt-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
                 />
               </div>
-              
+
               {/* Reset Button */}
               <button
                 onClick={() => { setMeshColor('#4a9eff'); setOpacity(1); setMetalness(0.1); setRoughness(0.5); setColorMode('solid'); setGradientColors({ start: '#4a9eff', end: '#ff6b6b' }); }}
@@ -650,7 +792,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
           {showWireframe && showWireframePanel && (
             <div className="absolute top-10 left-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-52">
               <div className="font-medium text-white mb-3 text-sm">🔲 Wireframe Settings</div>
-              
+
               {/* Wireframe Color */}
               <div className="mb-3">
                 <label className="text-[10px] text-gray-400 uppercase mb-1 block">Color</label>
@@ -665,7 +807,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   ))}
                 </div>
               </div>
-              
+
               {/* Custom Color */}
               <div className="mb-3">
                 <label className="text-[10px] text-gray-400 uppercase mb-1 block">Custom Color</label>
@@ -676,7 +818,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   className="w-full h-6 rounded cursor-pointer"
                 />
               </div>
-              
+
               {/* Wireframe Opacity */}
               <div className="mb-3">
                 <div className="flex justify-between text-[10px] mb-1">
@@ -691,7 +833,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
                 />
               </div>
-              
+
               {/* Wireframe Scale (Explode) */}
               <div className="mb-3">
                 <div className="flex justify-between text-[10px] mb-1">
@@ -707,7 +849,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                 />
                 <p className="text-[9px] text-gray-500 mt-1">Scale &gt; 1 to "explode" wireframe outward</p>
               </div>
-              
+
               {/* Reset Wireframe */}
               <button
                 onClick={() => { setWireframeColor('#000000'); setWireframeOpacity(0.6); setWireframeScale(1.0); }}
@@ -722,7 +864,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
           {isCompleted && qualityMetrics && !showPaintPanel && (
             <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur rounded p-2.5 z-10 text-[10px] text-gray-300 min-w-[180px]">
               <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
-              
+
               {/* SICN */}
               <div className="mb-2 pb-2 border-b border-gray-700">
                 <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
@@ -743,7 +885,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   </div>
                 </div>
               </div>
-              
+
               {/* Gamma */}
               {((qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined)) && (
                 <div className="mb-2 pb-2 border-b border-gray-700">
@@ -764,7 +906,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   </div>
                 </div>
               )}
-              
+
               {/* Element Count */}
               <div className="flex justify-between">
                 <span className="text-gray-400">Elements:</span>
@@ -807,11 +949,11 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              
+
               <div className="text-[10px] text-gray-400 mb-2">
                 {selectedFaces.length} face{selectedFaces.length > 1 ? 's' : ''} selected
               </div>
-              
+
               <input
                 type="text"
                 value={pendingFaceName}
@@ -820,7 +962,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                 className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500 mb-2"
                 onKeyDown={(e) => e.key === 'Enter' && saveFaceName()}
               />
-              
+
               <div className="flex gap-2">
                 <button
                   onClick={saveFaceName}
@@ -874,8 +1016,8 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
             </div>
           )}
 
-          <Canvas 
-            gl={{ 
+          <Canvas
+            gl={{
               localClippingEnabled: true,
               antialias: true,
               powerPreference: "high-performance",
@@ -885,9 +1027,8 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
             className="!pt-8"
           >
             <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
-            <OrbitControls 
-              enableDamping 
-              dampingFactor={0.1} 
+            <OrbitControls
+              enableDamping={false}
               rotateSpeed={0.8}
               panSpeed={0.8}
               zoomSpeed={1.2}
@@ -902,8 +1043,9 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
 
             <MeshObject
               meshData={meshData}
+              sliceData={sliceData}
               clipping={clipping}
-              showQuality={showQuality}
+              showQuality={showQuality ? qualityMetric : false}
               showWireframe={showWireframe}
               wireframeColor={wireframeColor}
               wireframeOpacity={wireframeOpacity}
@@ -928,15 +1070,30 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
             <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur p-3 rounded z-10 text-xs text-gray-300 w-48">
               <div className="flex items-center justify-between mb-2">
                 <span className="font-medium text-white">Clipping</span>
-                  <input
-                    type="checkbox"
-                    checked={clipping.enabled}
-                    onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
+                <input
+                  type="checkbox"
+                  checked={clipping.enabled}
+                  onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
                   className="accent-blue-500 w-3 h-3"
-                  />
-                </div>
+                />
+              </div>
 
-                {clipping.enabled && (
+              {clipping.enabled && (
+                <div className="mb-3 pb-2 border-b border-gray-800">
+                  <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={clipping.showQualitySlice}
+                      onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
+                      className="accent-blue-500 w-3 h-3"
+                    />
+                    View Quality Slice
+                  </label>
+                  {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
+                </div>
+              )}
+
+              {clipping.enabled && (
                 <div className="space-y-2">
                   {[
                     { axis: 'x', label: 'X', color: 'red' },
@@ -951,7 +1108,7 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                             checked={clipping[axis]}
                             onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
                             className="accent-blue-500 w-3 h-3"
-                      />
+                          />
                           {label}
                         </label>
                         <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
@@ -965,8 +1122,8 @@ export default function MeshViewer({ meshData, geometryInfo, filename, qualityMe
                       />
                     </div>
                   ))}
-                    </div>
-                )}
+                </div>
+              )}
             </div>
           )}
         </>

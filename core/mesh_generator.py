@@ -367,7 +367,7 @@ class BaseMeshGenerator(ABC):
             self.gmsh_initialized = True
             self.log_message(f"Gmsh initialized with {thread_count} threads (Verbosity: {v_level})")
 
-    def elevate_verbosity(self, level=4):
+    def elevate_verbosity(self, level=3):
         """Increase Gmsh verbosity for detailed progress reporting"""
         if self.gmsh_initialized:
             self.log_message(f"[Verbosity] Elevating Gmsh verbosity to level {level} for detailed progress...")

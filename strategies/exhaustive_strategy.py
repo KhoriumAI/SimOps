@@ -330,7 +330,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             
             # Elevate verbosity for single parts (<= 3 volumes) as requested
             if num_vols <= 3:
-                self.elevate_verbosity(level=4)
+                self.elevate_verbosity(level=3)
             
 
             for strategy_name in strategy_names:
@@ -1044,24 +1044,25 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             
             # Calculate heuristic size based on target elements
             target_elements = getattr(self.config.mesh_params, 'target_elements', 8000)
-            target_elements = max(target_elements, 100) # prevent zero/negative
             
             heuristic_max = None
-            if volume and volume > 0:
-                # Volume-based sizing (Robust)
-                # Size ~ 2.0 * (Volume / Target)^(1/3)
-                # Assumes element volume ~ Size^3/8 and some irregularity factor
-                curr_vol_per_elem = volume / float(target_elements)
-                heuristic_max = 2.0 * (curr_vol_per_elem ** (1.0/3.0))
-                self.log_message(f"[DEBUG] Volume-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
-            
-            if not heuristic_max:
-                # Fallback to Diagonal scaling if volume missing
-                # Baseline: 38000 elements ~ diagonal/10 sizing (observed empirically)
-                # scaling_factor = 10 * (Target/38000)^(1/3)
-                scaling_factor = 10.0 * (target_elements / 38000.0) ** (1.0/3.0)
-                heuristic_max = diagonal / scaling_factor
-                self.log_message(f"[DEBUG] Diagonal-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
+            if target_elements and target_elements > 0:
+                target_elements = max(target_elements, 100) # prevent tiny targets
+                if volume and volume > 0:
+                    # Volume-based sizing (Robust)
+                    # Size ~ 2.0 * (Volume / Target)^(1/3)
+                    curr_vol_per_elem = volume / float(target_elements)
+                    heuristic_max = 2.0 * (curr_vol_per_elem ** (1.0/3.0))
+                    self.log_message(f"[DEBUG] Volume-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
+                
+                if not heuristic_max:
+                    # Fallback to Diagonal scaling if volume missing
+                    scaling_factor = 10.0 * (target_elements / 38000.0) ** (1.0/3.0)
+                    heuristic_max = diagonal / scaling_factor
+                    self.log_message(f"[DEBUG] Diagonal-based sizing: Target {target_elements} -> Size {heuristic_max:.4f} mm")
+            else:
+                self.log_message("[DEBUG] No target_elements specified - skipping volume-based heuristic")
+
 
             heuristic_min = heuristic_max / 10.0
 

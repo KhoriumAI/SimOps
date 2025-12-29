@@ -47,7 +47,30 @@ import tempfile
 # Strategies and GPU mesher are now imported lazily in generate_mesh()
 # ==============================================================================
 
-vprint("[INIT] Ready.", flush=True)
+        vprint("[INIT] Ready.", flush=True)
+# ==============================================================================
+
+def get_node_to_element_map(types, tags, nodes):
+    """Build a map from node ID to list of element IDs that contain it."""
+    node_to_elem = {}
+    for etype, etags, enodes in zip(types, tags, nodes):
+        # We only care about 3D elements for quality mapping
+        if etype not in [4, 11, 5, 12]: # Tet4, Tet10, Hex8, Hex27
+            continue
+            
+        nodes_per_elem = len(enodes) // len(etags)
+        for i, tag in enumerate(etags):
+            start = i * nodes_per_elem
+            # Corner nodes are always the first 4 for tets or 8 for hexes
+            corner_count = 4 if etype in [4, 11] else 8
+            corner_nodes = enodes[start:start+corner_count]
+            for nid in corner_nodes:
+                nid = int(nid)
+                if nid not in node_to_elem:
+                    node_to_elem[nid] = []
+                node_to_elem[nid].append(int(tag))
+    return node_to_elem
+
 # ==============================================================================
 
 def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -1216,9 +1239,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 print(f"[DEBUG] Using quality preset: {quality_params['quality_preset']}")
                 
             # Update target elements if present (used by adaptive sizing in strategies)
-            if 'target_elements' in quality_params:
+            if 'target_elements' in quality_params and quality_params['target_elements'] is not None:
                 config.mesh_params.target_elements = int(quality_params['target_elements'])
                 print(f"[DEBUG] Set target_elements to: {quality_params['target_elements']}")
+            else:
+                print(f"[DEBUG] target_elements not specified or None - using defaults")
             
             # Update max size if present (used by adaptive sizing in strategies)
             if 'max_size_mm' in quality_params:
@@ -1342,69 +1367,116 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 entities_3d = gmsh_reload.model.getEntities(3)
                 print(f"[DEBUG] Entities: 0D={len(entities_0d)}, 1D={len(entities_1d)}, 2D={len(entities_2d)}, 3D={len(entities_3d)}")
                 
-                # Initialize quality maps
-                per_element_quality = {} # Default (SICN)
-                per_element_gamma = {}
-                per_element_skewness = {}
-                per_element_aspect_ratio = {}
+                # Get 3D elements (tets/hexes)
+                vol_types, vol_tags, vol_nodes = gmsh_reload.model.mesh.getElements(3)
                 
-                # Get 2D elements (triangles)
-                tri_types, tri_tags, tri_nodes = gmsh_reload.model.mesh.getElements(2)
-                triangle_count = 0
-                for elem_type, tags in zip(tri_types, tri_tags):
-                    if elem_type in [2, 9]: # Linear & Quadratic Triangles
+                # Build node-to-volume-element map for efficient quality mapping
+                node_to_vol = get_node_to_element_map(vol_types, vol_tags, vol_nodes)
+                
+                # Extract volume qualities first
+                vol_qualities = {}
+                vol_gammas = {}
+                vol_skews = {}
+                vol_ars = {}
+                for etype, etags, enodes in zip(vol_types, vol_tags, vol_nodes):
+                    if etype in [4, 11, 5, 12]:
                         try:
-                            # 1. SICN (Default) - use "minSICN" for post-processing
-                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                            
-                            # 2. Gamma
-                            gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
-                            
-                            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(etags.tolist(), "minSICN")
+                            gamma_vals = gmsh_reload.model.mesh.getElementQualities(etags.tolist(), "gamma")
+                            for i, tag in enumerate(etags):
                                 tag_int = int(tag)
-                                per_element_quality[tag_int] = float(sicn)
-                                per_element_gamma[tag_int] = float(gamma)
-                                # Derived metrics matching ExhaustiveStrategy logic
-                                per_element_skewness[tag_int] = 1.0 - float(sicn)
-                                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                sicn = float(sicn_vals[i])
+                                gamma = float(gamma_vals[i])
+                                skew = 1.0 - sicn
+                                ar = 1.0 / sicn if sicn > 0 else 100.0
                                 
-                            triangle_count += len(tags)
-                            print(f"[DEBUG] Extracted qualities for {len(tags)} triangles (type {elem_type})")
-                        except Exception as e:
-                            print(f"[DEBUG] Error getting triangle qualities: {e}")
-                
-                # Get 3D elements (tets)
-                tet_types, tet_tags, tet_nodes = gmsh_reload.model.mesh.getElements(3)
-                tet_count = 0
-                all_qualities = [] # For statistics (SICN)
-                
-                for elem_type, tags in zip(tet_types, tet_tags):
-                    if elem_type in [4, 11]: # Linear & Quadratic Tets
-                        try:
-                            # 1. SICN - use "minSICN" for post-processing
-                            sicn_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                            # 2. Gamma  
-                            gamma_vals = gmsh_reload.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                                vol_qualities[tag_int] = sicn
+                                vol_gammas[tag_int] = gamma
+                                vol_skews[tag_int] = skew
+                                vol_ars[tag_int] = ar
+                                
+                                # Global map for return
+                                per_element_quality[tag_int] = sicn
+                                per_element_gamma[tag_int] = gamma
+                                per_element_skewness[tag_int] = skew
+                                per_element_aspect_ratio[tag_int] = ar
+                        except: pass
+
+                # Now map to 2D surface elements (triangles/quads)
+                surf_types, surf_tags, surf_nodes = gmsh_reload.model.mesh.getElements(2)
+                for etype, etags, enodes in zip(surf_types, surf_tags, surf_nodes):
+                    if etype in [2, 9, 3, 16]: # Tris & Quads
+                        nodes_per_elem = len(enodes) // len(etags)
+                        corner_count = 3 if etype in [2, 9] else 4
+                        
+                        for i, tag in enumerate(etags):
+                            tag_int = int(tag)
+                            start = i * nodes_per_elem
+                            element_corners = set([int(nid) for nid in enodes[start:start+corner_count]])
                             
-                            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
-                                tag_int = int(tag)
-                                per_element_quality[tag_int] = float(sicn)
-                                per_element_gamma[tag_int] = float(gamma)
-                                per_element_skewness[tag_int] = 1.0 - float(sicn)
-                                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
-                                all_qualities.append(sicn)
+                            # Find candidate volume elements using the first corner node
+                            first_node = int(enodes[start])
+                            candidates = node_to_vol.get(first_node, [])
+                            
+                            worst_sicn = 1.0
+                            worst_gamma = 1.0
+                            worst_skew = 0.0
+                            worst_ar = 1.0
+                            found_adj = False
+                            
+                            for vol_tag in candidates:
+                                # We'd need the volume nodes to be 100% sure, but this is a heuristic:
+                                # if all triangle corners are in the tet corners, they are definitely adjacent.
+                                # To be faster, we skip getting tet nodes again and rely on the fact that
+                                # a triangle sharing its first node with a tet is highly likely to be adjacent
+                                # if we check other corners too.
                                 
-                            tet_count += len(tags)
-                            print(f"[DEBUG] Extracted qualities for {len(tags)} tets (type {elem_type})")
-                        except Exception as e:
-                            print(f"[DEBUG] Error getting tet qualities: {e}")
-                
-                # Calculate statistics
+                                # A better/faster way: since we already have node_to_vol, 
+                                # the intersection of sets of volume tags for all corner nodes results in exactly the adjacent volume.
+                                pass # Logic moved below to be more robust
+                            
+                            # ROBUST INTERSECTION:
+                            adj_vols = None
+                            for nid in element_corners:
+                                node_vols = set(node_to_vol.get(nid, []))
+                                if adj_vols is None:
+                                    adj_vols = node_vols
+                                else:
+                                    adj_vols &= node_vols
+                                if not adj_vols: break
+                                    
+                            if adj_vols:
+                                found_adj = True
+                                for v_tag in adj_vols:
+                                    worst_sicn = min(worst_sicn, vol_qualities.get(v_tag, 1.0))
+                                    worst_gamma = min(worst_gamma, vol_gammas.get(v_tag, 1.0))
+                                    worst_skew = max(worst_skew, vol_skews.get(v_tag, 0.0))
+                                    worst_ar = max(worst_ar, vol_ars.get(v_tag, 1.0))
+                            
+                            if found_adj:
+                                per_element_quality[tag_int] = worst_sicn
+                                per_element_gamma[tag_int] = worst_gamma
+                                per_element_skewness[tag_int] = worst_skew
+                                per_element_aspect_ratio[tag_int] = worst_ar
+                            else:
+                                # Fallback to intrinsic 2D quality if no adjacent volume found
+                                try:
+                                    sicn = float(gmsh_reload.model.mesh.getElementQualities([tag_int], "minSICN")[0])
+                                    gamma = float(gmsh_reload.model.mesh.getElementQualities([tag_int], "gamma")[0])
+                                    per_element_quality[tag_int] = sicn
+                                    per_element_gamma[tag_int] = gamma
+                                    per_element_skewness[tag_int] = 1.0 - sicn
+                                    per_element_aspect_ratio[tag_int] = 1.0 / sicn if sicn > 0 else 100.0
+                                except: pass
+
+                # Calculate statistics (for all 3D tets)
+                all_qualities = list(vol_qualities.values())
                 if all_qualities:
                     sorted_q = sorted(all_qualities)
                     idx_10 = max(0, int(len(sorted_q) * 0.10))
                     quality_metrics['sicn_10_percentile'] = sorted_q[idx_10]
-                    print(f"[DEBUG] Extracted quality for {triangle_count} triangles and {tet_count} tets")
+                    print(f"[DEBUG] Extracted quality for {len(vol_qualities)} volume elements")
+                    print(f"[DEBUG] Surface quality mapped for {sum(len(t) for t in surf_tags)} elements")
                     print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")
                     print(f"[DEBUG] 10th percentile: {sorted_q[idx_10]:.3f}")
                 else:
@@ -1429,7 +1501,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 print(f"[ERROR] Failed to extract per-element quality: {e}")
                 traceback.print_exc()
 
-            return {
+            # Create final result dictionary
+            final_result = {
                 'success': True,
                 'output_file': absolute_output_file,  # ABSOLUTE path for GUI
                 'metrics': metrics,
@@ -1445,6 +1518,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 'total_nodes': metrics.get('total_nodes', 0),
                 'deferred': metrics.get('deferred', False)  # Propagate deferred flag for background quality calc
             }
+
+            # Save full detailed result to file
+            try:
+                result_json_file = os.path.splitext(absolute_output_file)[0] + "_result.json"
+                with open(result_json_file, 'w') as f:
+                    json.dump(final_result, f, indent=2)
+                final_result['full_result_file'] = result_json_file
+                print(f"[OK] Full detailed result saved to: {result_json_file}")
+            except Exception as e:
+                print(f"[WARNING] Could not save result JSON file: {e}")
+            
+            return final_result
         else:
             return {
                 'success': False,
@@ -1464,6 +1549,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
 
 if __name__ == "__main__":
     import argparse
+    import copy
     
     parser = argparse.ArgumentParser(description='Mesh Generation Worker')
     parser.add_argument('cad_file', help='Path to CAD file')
@@ -1494,5 +1580,15 @@ if __name__ == "__main__":
     # Generate mesh
     result = generate_mesh(cad_file, output_dir, quality_params)
 
-    # Output result as JSON
-    print(json.dumps(result))
+    # Output sanitized result as JSON to stdout
+    # Create a copy to avoid modifying the original if it's used elsewhere
+    sanitized_result = copy.deepcopy(result)
+    
+    # Remove heavy per-element arrays from stdout output
+    keys_to_remove = ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio']
+    for key in keys_to_remove:
+        if key in sanitized_result:
+            del sanitized_result[key]
+            
+    # Print the clean, summary JSON
+    print(json.dumps(sanitized_result))
