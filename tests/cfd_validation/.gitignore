@@ -1,0 +1,10 @@
+# Ignore all temporary test outputs in this directory
+temp/
+output/
+*_case/
+*.log
+*.foam
+*.OpenFOAM
+*.vtk
+*.obj
+*.stl

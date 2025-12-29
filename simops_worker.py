@@ -256,9 +256,17 @@ def generate_mesh_with_strategy(
     if sim_config and hasattr(sim_config, 'physics'):
         sim_type = getattr(sim_config.physics, 'simulation_type', 'thermal')
         if sim_type == 'cfd':
-            if hasattr(sim_config.physics, 'inlet_velocity') and sim_config.physics.inlet_velocity > 0:
+            # Check for explicit override first
+            if hasattr(sim_config.physics, 'virtual_wind_tunnel') and sim_config.physics.virtual_wind_tunnel is not None:
+                enable_wind_tunnel = sim_config.physics.virtual_wind_tunnel
+                if enable_wind_tunnel:
+                    logger.info(f"  [Wind Tunnel] Enabled explicitly via config")
+                else:
+                    logger.info(f"  [Wind Tunnel] Disabled explicitly via config")
+            # Auto-detect only if not set
+            elif hasattr(sim_config.physics, 'inlet_velocity') and sim_config.physics.inlet_velocity > 0:
                 enable_wind_tunnel = True
-                logger.info(f"  [Wind Tunnel] Enabled for external flow")
+                logger.info(f"  [Wind Tunnel] Auto-enabled for external flow (Velocity > 0)")
 
     # ---------------------------------------------------------
     # CHECKS & BALANCES: Load Correct Physics Configuration
@@ -409,25 +417,41 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
              adapter_config['density'] = get_prop('density', 'density', 2700.0)
              adapter_config['specific_heat'] = get_prop('specific_heat', 'specific_heat', 900.0)
              
-             # Map other fields
-             # Heat source temperature (from schema, not heat_load_watts)
-             if hasattr(phy, 'heat_source_temperature'): adapter_config['heat_source_temperature'] = phy.heat_source_temperature
-             # Assuming standard fields: unit_scaling, convection_coeff, ambient_temperature
-             if hasattr(phy, 'unit_scaling'): adapter_config['unit_scaling'] = phy.unit_scaling
-             if hasattr(phy, 'convection_coeff'): adapter_config['convection_coeff'] = phy.convection_coeff
-             
-             # Fix: Handle alias ambient_temp_c (Celsius)
-             if hasattr(phy, 'ambient_temperature'): 
-                 adapter_config['ambient_temperature'] = phy.ambient_temperature
-             elif hasattr(phy, 'ambient_temp_c'):
-                 adapter_config['ambient_temperature'] = phy.ambient_temp_c
-             if hasattr(phy, 'transient'): adapter_config['transient'] = phy.transient
-             if hasattr(phy, 'duration'): adapter_config['duration'] = phy.duration
-             if hasattr(phy, 'time_step'): adapter_config['time_step'] = phy.time_step
-             if hasattr(phy, 'initial_temperature') and phy.initial_temperature: adapter_config['initial_temperature'] = phy.initial_temperature
-             if hasattr(phy, 'fix_hot_boundary'): adapter_config['fix_hot_boundary'] = phy.fix_hot_boundary
-             if hasattr(phy, 'fix_cold_boundary'): adapter_config['fix_cold_boundary'] = phy.fix_cold_boundary
+        # Mapping and Unit Normalization
+        def get_temp_c(obj, field_c, field_k, default):
+            """
+            Normalize temperature to Celsius for CalculiX adapter.
+            Priority: field_c (Celsius) > field_k (convert from Kelvin) > default
+            
+            CRITICAL: The CalculiXAdapter ONLY accepts Celsius input.
+            All temperatures are internally converted to Kelvin by the adapter.
+            """
+            val_c = getattr(obj, field_c, None)
+            if val_c is not None: 
+                return val_c
+            val_k = getattr(obj, field_k, None)
+            if val_k is not None: 
+                return val_k - 273.15
+            return default
 
+        adapter_config['ambient_temperature'] = get_temp_c(phy, 'ambient_temp_c', 'ambient_temperature', 25.0)
+        adapter_config['heat_source_temperature'] = get_temp_c(phy, 'source_temp_c', 'heat_source_temperature', 100.0)
+        adapter_config['initial_temperature'] = get_temp_c(phy, 'initial_temp_c', 'initial_temperature', 25.0)
+
+        # Log temperature configuration (verify Celsius normalization)
+        logger.log_metadata("ambient_temp_c", adapter_config['ambient_temperature'])
+        logger.log_metadata("source_temp_c", adapter_config['heat_source_temperature'])
+        logger.log_metadata("initial_temp_c", adapter_config['initial_temperature'])
+
+        adapter_config['convection_coeff'] = getattr(phy, 'convection_coeff', 25.0)
+        adapter_config['transient'] = getattr(phy, 'transient', True)
+        adapter_config['duration'] = getattr(phy, 'duration', 60.0)
+        adapter_config['time_step'] = getattr(phy, 'time_step', 2.0)
+        adapter_config['fix_hot_boundary'] = getattr(phy, 'fix_hot_boundary', True)
+        adapter_config['fix_cold_boundary'] = getattr(phy, 'fix_cold_boundary', False)
+        adapter_config['heat_load_watts'] = getattr(phy, 'heat_load_watts', 0.0)
+        adapter_config['volumetric_heat_wm3'] = getattr(phy, 'volumetric_heat_wm3', 0.0)
+        adapter_config['unit_scaling'] = getattr(phy, 'unit_scaling', 1.0)
 
         result = adapter.run(Path(mesh_file), Path(output_dir), adapter_config)
         
@@ -436,7 +460,15 @@ def run_thermal_solver(mesh_file: Path, output_dir: Path, strategy_name: str, si
         else:
             result['num_elements'] = 0
             
-        logger.info(f"  [CalculiX] Solver finished. Temp range: {result['min_temp']:.1f}K - {result['max_temp']:.1f}K")
+        # Defensive logging: Handle None temperatures from parser failures
+        try:
+            if result.get('min_temp') is not None and result.get('max_temp') is not None:
+                logger.info(f"  [CalculiX] Solver finished. Temp range: {result['min_temp']:.1f}K - {result['max_temp']:.1f}K")
+            else:
+                logger.warning(f"  [CalculiX] Solver finished but temperature data is incomplete (parse failure suspected)")
+        except Exception as e:
+            logger.warning(f"  [CalculiX] Solver finished but failed to log temperature: {e}")
+        
         return result
         
     except Exception as e:
@@ -570,10 +602,11 @@ def generate_vtk_isometric_view(
         
         pl.add_mesh(mesh, 
                    scalars='Temperature', 
-                   cmap='magma', 
+                   cmap='plasma', 
                    clim=[vmin, vmax],
                    smooth_shading=False, # Disabled to prevent LLVMpipe segfaults
-                   show_edges=False)
+                   show_edges=False,
+                   show_scalar_bar=False)
                    # specular=0.5,      # Disabled to prevent LLVMpipe segfaults
                    # specular_power=15)
         
@@ -615,29 +648,46 @@ def generate_report(
         Image = None
     import io
     
-    node_coords = np.array(result['node_coords'])
-    temp_K = np.array(result['temperature'])
-    # Metric Switch: Kelvin -> Celsius
-    temp_C = temp_K - 273.15
+    node_coords = np.array(result.get('node_coords', []))
+    temp_raw = result.get('temperature')
+    if temp_raw is None or len(temp_raw) == 0:
+        logger.warning("Report Generation: No temperature data found in result.")
+        temp_C = np.array([25.0]) # Dummy
+        T_min = 25.0
+        T_max = 25.0
+    else:
+        # Filter None values if any exist in the list
+        temp_list = [t if t is not None else 298.15 for t in temp_raw]
+        temp_K = np.array(temp_list)
+        # Metric Switch: Kelvin -> Celsius
+        temp_C = temp_K - 273.15
+        T_min = np.nanmin(temp_C)
+        T_max = np.nanmax(temp_C)
     
-    T_min = np.nanmin(temp_C)
-    T_max = np.nanmax(temp_C)
+    # CRITICAL: Verify data alignment
+    if len(node_coords) != len(temp_C):
+        logger.warning(f"Data mismatch: {len(node_coords)} nodes vs {len(temp_C)} temps. Attempting recovery...")
+        min_len = min(len(node_coords), len(temp_C))
+        node_coords = node_coords[:min_len]
+        temp_C = temp_C[:min_len]
     
-    # Safe Context Extraction (Handles Dict or Pydantic)
+    # Safe Context Extraction
     def to_dict(obj):
         if hasattr(obj, 'model_dump'): return obj.model_dump()
         if hasattr(obj, 'dict'): return obj.dict()
         return obj if isinstance(obj, dict) else {}
 
-    config_dict = to_dict(sim_config)
+    config_dict = to_dict(sim_config) if sim_config else {}
     phy = config_dict.get('physics', {})
         
-    init_C = phy.get('initial_temperature', 293.0)
-    if init_C is None: init_C = 293.0
-    init_C -= 273.15
-    
+    def get_safe_temp(val_c, val_k, default_c=25.0):
+        if val_c is not None: return float(val_c)
+        if val_k is not None: return float(val_k) - 273.15
+        return default_c
+
+    init_C = get_safe_temp(phy.get('initial_temp_c'), phy.get('initial_temperature'))
     mat_name = phy.get('material', 'Aluminum 6061')
-    amb_C = phy.get('ambient_temperature', 293.0) - 273.15
+    amb_C = get_safe_temp(phy.get('ambient_temp_c'), phy.get('ambient_temperature'))
     h_coeff = phy.get('convection_coeff', 25.0)
     
     # Solver Metrics
@@ -661,7 +711,8 @@ def generate_report(
         report_title = f"Sim Results - {clean_title} (Forced Conv.)"
     
     # Build subtitle with simulation params
-    src_temp_C = phy.get('heat_source_temperature', 373.15) - 273.15
+    _src_val = phy.get('heat_source_temperature')
+    src_temp_C = (_src_val if _src_val is not None else 373.15) - 273.15
     param_subtitle = f"Material: {mat_name} | Ambient: {amb_C:.0f}°C | Source: {src_temp_C:.0f}°C | h={h_coeff} W/m²K"
     
     # 1. Generate High-Quality PNG
@@ -706,7 +757,12 @@ def generate_report(
     axes.append(fig.add_subplot(gs[1, 0])) # XZ
     axes.append(fig.add_subplot(gs[1, 1])) # YZ
     
-    # Global Levels
+    # Global Levels - ensure minimum spread to prevent degenerate contours
+    temp_spread = T_max - T_min
+    if temp_spread < 1.0:  # Less than 1°C spread
+        logger.warning(f"Temperature spread very small ({temp_spread:.2f}°C), expanding for visualization.")
+        T_min -= 0.5
+        T_max += 0.5
     levels = np.linspace(T_min, T_max, 25)
 
     # --- Subplot 1: 3D Isometric View ---
@@ -755,62 +811,108 @@ def generate_report(
         (1, 2, 0, 'YZ Section (Side)', 'Y', 'Z'), 
     ]
     
-    for ax, (xi, yi, zi, title, xlabel, ylabel) in zip(axes, shape_views):
-        z_coords = node_coords[:, zi]
-        z_mid = (np.min(z_coords) + np.max(z_coords)) / 2.0
-        epsilon = (np.max(z_coords) - np.min(z_coords)) * 0.05
-        if epsilon == 0: epsilon = 1.0
-        
-        mask = np.abs(z_coords - z_mid) < epsilon
-        
-        if np.sum(mask) > 3:
-            sx = node_coords[mask, xi]
-            sy = node_coords[mask, yi]
-            st = temp_C[mask]
-            
-            # Robust Filtering
-            valid_mask = np.isfinite(sx) & np.isfinite(sy) & np.isfinite(st)
-            
-            if not np.all(valid_mask):
-                sx = sx[valid_mask]
-                sy = sy[valid_mask]
-                st = st[valid_mask]
-            
-            if len(st) < 4:
-                continue
-            
+    # Guard: Ensure temp_C matches node_coords length
+    if len(temp_C) != len(node_coords):
+        logger.warning(f"[Viz] Temperature array length ({len(temp_C)}) != node count ({len(node_coords)}). Skipping cross-sections.")
+        for ax in axes:
+            ax.text(0.5, 0.5, "Data Mismatch", ha='center', va='center', transform=ax.transAxes)
+            ax.set_axis_off()
+    else:
+        for ax, (xi, yi, zi, title, xlabel, ylabel) in zip(axes, shape_views):
             try:
-                # Masking Logic (Hole deduction)
-                triang = mtri.Triangulation(sx, sy)
-                x_tri = sx[triang.triangles]
-                y_tri = sy[triang.triangles]
-                d1 = np.hypot(x_tri[:,0]-x_tri[:,1], y_tri[:,0]-y_tri[:,1])
-                d2 = np.hypot(x_tri[:,1]-x_tri[:,2], y_tri[:,1]-y_tri[:,2])
-                d3 = np.hypot(x_tri[:,2]-x_tri[:,0], y_tri[:,2]-y_tri[:,0])
-                max_edge = np.max(np.column_stack([d1,d2,d3]), axis=1)
+                z_coords = node_coords[:, zi]
+                z_min_coord, z_max_coord = np.min(z_coords), np.max(z_coords)
+                z_mid = (z_min_coord + z_max_coord) / 2.0
+                z_range = z_max_coord - z_min_coord
+                epsilon = z_range * 0.15 if z_range > 0 else 1.0  # 15% slice for better node capture
                 
-                domain_size = max(np.max(sx)-np.min(sx), np.max(sy)-np.min(sy))
-                threshold = domain_size * 0.1
-                if len(st) > 100:
-                    avg_edge = np.median(max_edge)
-                    threshold = max(threshold, avg_edge * 3.0) 
+                mask = np.abs(z_coords - z_mid) < epsilon
+                n_points = np.sum(mask)
                 
-                triang.set_mask(max_edge > threshold)
+                if n_points < 4:
+                    ax.text(0.5, 0.5, f"Slice Empty\n({n_points} pts)", ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(title, fontsize=11, fontweight='bold')
+                    ax.set_axis_off()
+                    continue
                 
-                cntr = ax.tricontourf(triang, st, levels=levels, cmap='magma', extend='both')
-                # Add thin contour lines for better definition
-                ax.tricontour(triang, st, levels=levels, colors='k', linewidths=0.1, alpha=0.2)
-            except Exception as e:
-                logger.warning(f"[Viz] Triangulation/Plotting failed for slice: {e}")
-                ax.text(0.5, 0.5, "Plot Error", ha='center')
-        else:
-            ax.text(0.5, 0.5, "Slice Empty", ha='center')
+                sx = node_coords[mask, xi]
+                sy = node_coords[mask, yi]
+                st = temp_C[mask]
+                
+                # Filter NaN/Inf
+                valid_mask = np.isfinite(sx) & np.isfinite(sy) & np.isfinite(st)
+                sx, sy, st = sx[valid_mask], sy[valid_mask], st[valid_mask]
+                
+                if len(st) < 4:
+                    ax.text(0.5, 0.5, "Insufficient Data", ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(title, fontsize=11, fontweight='bold')
+                    ax.set_axis_off()
+                    continue
+                
+                # Deduplicate points (Qhull requires unique vertices)
+                # Round to avoid floating-point near-duplicates
+                coords_rounded = np.round(np.column_stack([sx, sy]), decimals=6)
+                _, unique_idx = np.unique(coords_rounded, axis=0, return_index=True)
+                unique_idx = np.sort(unique_idx)  # Preserve order
+                sx, sy, st = sx[unique_idx], sy[unique_idx], st[unique_idx]
+                
+                if len(st) < 4:
+                    ax.text(0.5, 0.5, "Too Few Unique Pts", ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(title, fontsize=11, fontweight='bold')
+                    ax.set_axis_off()
+                    continue
+                
+                # Method: Grid Interpolation (Robust for coarse meshes)
+                # We use linear interpolation for the main field and nearest to fill edges
+                try:
+                    from scipy.interpolate import griddata
+                    
+                    # Create dense grid (200x200)
+                    xi = np.linspace(sx.min(), sx.max(), 200)
+                    yi = np.linspace(sy.min(), sy.max(), 200)
+                    Xi, Yi = np.meshgrid(xi, yi)
+                    
+                    # Log-linear interpolation for smooth fields
+                    Zi = griddata((sx, sy), st, (Xi, Yi), method='linear')
+                    
+                    # Fill NaN edges (extrapolation) with nearest neighbor to "fill up" the shape
+                    # This prevents white gaps at the boundaries
+                    mask_nan = np.isnan(Zi)
+                    if np.any(mask_nan):
+                        Zi_nearest = griddata((sx, sy), st, (Xi, Yi), method='nearest')
+                        Zi[mask_nan] = Zi_nearest[mask_nan]
+                    
+                    # Plot filled mesh
+                    # Use 'plasma' for better visibility at low end (magma is too dark/black)
+                    cntr = ax.pcolormesh(Xi, Yi, Zi, cmap='plasma', vmin=T_min, vmax=T_max, shading='gouraud')
+                    
+                    # Overlay actual data points as small dots for ground truth
+                    ax.scatter(sx, sy, c='k', s=1, alpha=0.3)
+                    
+                except Exception as grid_err:
+                    logger.warning(f"[Viz] Griddata failed: {grid_err}. Fallback to Triangulation.")
+                    # Legacy Triangulation Fallback
+                    try:
+                        triang = mtri.Triangulation(sx, sy)
+                        cntr = ax.tricontourf(triang, st, levels=levels, cmap='plasma', extend='both')
+                    except Exception as tri_err:
+                        # Final Fallback: Scatter
+                        cntr = ax.scatter(sx, sy, c=st, cmap='plasma', s=20, vmin=T_min, vmax=T_max)
 
-        ax.set_title(title, fontsize=11, fontweight='bold')
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_aspect('equal')
-        ax.grid(True, linestyle=':', alpha=0.4)
+                ax.set_title(title, fontsize=11, fontweight='bold')
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(ylabel)
+                ax.set_aspect('equal')
+                ax.grid(True, linestyle=':', alpha=0.4)
+                
+            except Exception as e:
+                logger.error(f"[Viz] Cross-section {title} failed: {e}")
+                ax.text(0.5, 0.5, "Plot Error", ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(title, fontsize=11, fontweight='bold')
+                ax.set_axis_off()
+                
+
+
 
     # --- Manual Colorbar Placement ---
     # Fixes overlap by defining explicit axis on the right
@@ -844,31 +946,50 @@ def generate_report(
              stats = result['time_series_stats']
              ts_file = output_dir / f"{job_name}_transient.png"
              
-             times = [s['time'] for s in stats]
-             mins = [s['min'] - 273.15 for s in stats]
-             maxs = [s['max'] - 273.15 for s in stats]
-             means = [s['mean'] - 273.15 for s in stats]
+             valid_stats = [s for s in stats if s.get('min') is not None and s.get('max') is not None and s.get('mean') is not None]
              
-             plt.figure(figsize=(10, 6))
-             plt.plot(times, maxs, 'r-', linewidth=2, label='Max Temp')
-             plt.plot(times, means, 'g--', label='Mean Temp')
-             plt.plot(times, mins, 'b-', linewidth=2, label='Min Temp')
+             if len(valid_stats) == 0:
+                 logger.warning("[Transient Debug] No valid stats to plot!")
+                 raise ValueError("No valid time series data")
              
-             plt.title(f"Transient Response: {job_name}", fontsize=14, fontweight='bold')
-             plt.xlabel("Time (s)")
-             plt.ylabel("Temperature (°C)")
-             plt.grid(True, linestyle='--', alpha=0.5)
-             plt.legend()
+             if len(valid_stats) < 2:
+                 logger.info("[Transient] Only 1 time step (steady-state). Skipping line plot, creating summary instead.")
+                 # Create a simple summary figure instead
+                 plt.figure(figsize=(10, 6))
+                 s = valid_stats[0]
+                 plt.bar(['Min', 'Mean', 'Max'], [s['min']-273.15, s['mean']-273.15, s['max']-273.15], color=['blue', 'green', 'red'])
+                 plt.title(f"Steady-State Temperature: {job_name}", fontsize=14, fontweight='bold')
+                 plt.ylabel("Temperature (°C)")
+                 plt.grid(True, linestyle='--', alpha=0.5, axis='y')
+                 plt.savefig(ts_file, dpi=150, bbox_inches='tight')
+                 plt.close()
+                 logger.info(f"  Steady-State Summary saved: {ts_file.name}")
+             else:
+                 times = [s['time'] for s in valid_stats]
+                 mins = [s['min'] - 273.15 for s in valid_stats]
+                 maxs = [s['max'] - 273.15 for s in valid_stats]
+                 means = [s['mean'] - 273.15 for s in valid_stats]
              
-             # Annotation for final Steady State
-             plt.annotate(f"Final Max: {maxs[-1]:.1f}°C", 
-                          xy=(times[-1], maxs[-1]), xytext=(-40, 10), 
-                          textcoords='offset points', arrowprops=dict(arrowstyle="->"),
-                          fontsize=10, fontweight='bold')
+                 plt.figure(figsize=(10, 6))
+                 plt.plot(times, maxs, 'r-', linewidth=2, label='Max Temp', marker='o')
+                 plt.plot(times, means, 'g--', linewidth=2, label='Mean Temp', marker='s')
+                 plt.plot(times, mins, 'b-', linewidth=2, label='Min Temp', marker='^')
              
-             plt.savefig(ts_file, dpi=150, bbox_inches='tight')
-             plt.close()
-             logger.info(f"  Transient PNG saved")
+                 plt.title(f"Transient Response: {job_name}", fontsize=14, fontweight='bold')
+                 plt.xlabel("Time (s)")
+                 plt.ylabel("Temperature (°C)")
+                 plt.grid(True, linestyle='--', alpha=0.5)
+                 plt.legend()
+             
+                 # Annotation for final Steady State
+                 plt.annotate(f"Final Max: {maxs[-1]:.1f}°C", 
+                              xy=(times[-1], maxs[-1]), xytext=(-40, 10), 
+                              textcoords='offset points', arrowprops=dict(arrowstyle="->"),
+                              fontsize=10, fontweight='bold')
+             
+                 plt.savefig(ts_file, dpi=150, bbox_inches='tight')
+                 plt.close()
+                 logger.info(f"  Transient PNG saved")
         except Exception as e:
              logger.warning(f"Transient plot failed: {e}")
              print(f"Transient plot failed: {e}")
@@ -957,36 +1078,44 @@ def generate_report(
 
     # 2. PDF Report
     pdf_file = None
-    if PDFReportGenerator:
-         pdf_name = f"{report_title}.pdf" # Professional Filename
+    if ThermalPDFReportGenerator:
+         pdf_name = f"{job_name}_thermal_report.pdf"
          images = [str(png_file)]
          if ts_file: images.append(str(ts_file))
          
          try:
-             generator = PDFReportGenerator()
+             generator = ThermalPDFReportGenerator()
+             
+             # Prepare data for thermal report
+             t_min_k = T_min + 273.15
+             t_max_k = T_max + 273.15
+             
              report_data = {
+                 'success': True,
                  'job_name': job_name,
                  'strategy_name': strategy_name,
-                 'min_temp': float(T_min), # Celsius
-                 'max_temp': float(T_max), # Celsius
+                 'min_temp_k': float(t_min_k),
+                 'max_temp_k': float(t_max_k),
+                 'ambient_temp_c': float(amb_C),
+                 'source_temp_c': float(src_temp_C),
                  'num_elements': result.get('num_elements', 0),
+                 'num_nodes': len(node_coords),
                  'solve_time': result.get('solve_time', 0),
                  'heat_flux': result.get('heat_flux_watts'),
-                 'convergence': result.get('convergence_steps'),
-                 'courant_max': result.get('courant_max', 0.0)
+                 'convergence': convergence
              }
+             
              pdf_path = generator.generate(
-                 job_name=job_name, # Used for title in PDF?
+                 job_name=job_name,
                  output_dir=output_dir,
                  data=report_data,
                  image_paths=images
              )
              
-             # Rename the file after generation if needed
              pdf_file = pdf_path
-             logger.info(f"  PDF saved: {Path(pdf_file).name}")
+             logger.info(f"  Thermal PDF saved: {Path(pdf_file).name}")
          except Exception as e:
-             err_msg = f"PDF failed: {e}\n{traceback.format_exc()}"
+             err_msg = f"Thermal PDF failed: {e}\n{traceback.format_exc()}"
              logger.error(err_msg)
              print(err_msg)
              # Write to a special debug file if it fails
@@ -1899,10 +2028,16 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
                 if not result.get('success', False):
                      raise RuntimeError(f"Thermal Solver failed: {result.get('error')}")
 
-                # Step 3: Generate report
-                report_files = generate_report(job_name, output_path, result, strategy['name'], sim_config=sim_config, mesh_file=str(mesh_file))
-                png_file = report_files.get('png')
-                pdf_file = report_files.get('pdf')
+                # Step 3: Generate report (with error handling to not crash on report failures)
+                try:
+                    report_files = generate_report(job_name, output_path, result, strategy['name'], sim_config=sim_config, mesh_file=str(mesh_file))
+                    png_file = report_files.get('png')
+                    pdf_file = report_files.get('pdf')
+                except Exception as e:
+                    logger.error(f"Report generation failed (solver succeeded, results saved): {e}")
+                    report_files = {}  # Empty dict to prevent downstream errors
+                    png_file = None
+                    pdf_file = None
                 
                 # Step 4: Export VTK for GUI
                 vtk_file = output_path / f"{job_name}_thermal.vtk"
@@ -1929,8 +2064,8 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
                     'pdf_file': str(pdf_file) if pdf_file else None,
                     'transient_png': report_files.get('transient') if report_files else None,
                     'animation_gif': report_files.get('animation') if report_files else None,
-                    'min_temp_K': result.get('min_temp'),
-                    'max_temp_K': result.get('max_temp'),
+                    'min_temp_K': result.get('min_temp') or 0.0,
+                    'max_temp_K': result.get('max_temp') or 0.0,
                     'num_elements': result.get('num_elements', 0),
                     'solve_time_s': result.get('solve_time', 0),
                     'total_time_s': total_time,
@@ -1971,8 +2106,8 @@ def _run_simulation_internal(file_path: str, output_path: Path, config_path_str:
                     vtk_file=str(vtk_file),
                     png_file=str(png_file),
                     report_file=str(pdf_file) if pdf_file else None,
-                    min_temp=result.get('min_temp'),
-                    max_temp=result.get('max_temp'),
+                    min_temp=result.get('min_temp') or 0.0,
+                    max_temp=result.get('max_temp') or 0.0,
                     num_elements=result.get('num_elements', 0),
                     solve_time=result.get('solve_time', 0),
                 )

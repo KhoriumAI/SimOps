@@ -1,0 +1,19 @@
+{
+  "job_name": "Cylinder",
+  "input_file": "cad_files\\Cylinder.step",
+  "strategy": "MedFi_Robust",
+  "attempts": 1,
+  "mesh_file": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_MedFi_Robust.msh",
+  "vtk_file": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_thermal.vtk",
+  "png_file": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_temperature.png",
+  "pdf_file": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_report.pdf",
+  "transient_png": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_transient.png",
+  "animation_gif": "verification_runs\\thermal\\Cylinder_thermal_fixed\\Cylinder_anim.gif",
+  "min_temp_K": 39.693,
+  "max_temp_K": 300.0,
+  "num_elements": 949,
+  "solve_time_s": 1.452380895614624,
+  "total_time_s": 7.240605115890503,
+  "completed_at": "2025-12-28T13:17:53",
+  "success": true
+}

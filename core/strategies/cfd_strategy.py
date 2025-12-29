@@ -285,13 +285,100 @@ class CFDMeshStrategy:
         self._log(f"  Auto mesh size: {config.min_mesh_size:.4f} to {config.max_mesh_size:.4f}")
         self._log(f"  Adaptive first layer: {config.first_layer_height:.6f}")
 
+        # Tag Volume
+        volumes = gmsh.model.getEntities(dim=3)
+        if volumes:
+            vol_tags = [tag for dim, tag in volumes]
+            pv = gmsh.model.addPhysicalGroup(3, vol_tags)
+            gmsh.model.setPhysicalName(3, pv, "Material_Aluminum")
+            self._log(f"  [Tag] Assigned 'Material_Aluminum' to {len(vol_tags)} volumes")
+
+    def _apply_tagging_rules(self):
+        """Apply custom tagging rules provided in config"""
+        gmsh.model.removePhysicalGroups()
+        
+        if not self.tagging_rules:
+            return
+            
+        self._log(f"[Tagging] Processing {len(self.tagging_rules)} custom rules...")
+        
+        surfaces = gmsh.model.getEntities(dim=2)
+        remaining_surfaces = set(tag for dim, tag in surfaces)
+        used_surfaces = set()
+        
+        # BBox for reference
+        xmin, ymin, zmin, xmax, ymax, zmax = self.geometry_info['bbox']
+        diag = self.geometry_info['diagonal']
+        
+        # Helper to check selector
+        def match_selector(s_tag, selector):
+            # Handle Pydantic or dict
+            s_type = getattr(selector, 'type', selector.get('type') if isinstance(selector, dict) else '')
+            tol_val = getattr(selector, 'tolerance', selector.get('tolerance', 0.001) if isinstance(selector, dict) else 0.001)
+            
+            # Absolute tolerance based on diagonal if relative logic needed, but schema implies absolute?
+            # Schema says "tolerance: float = 0.001". Likely absolute or relative to unit?
+            # Let's assume absolute but scale by diagonal if very small? 
+            # safe logic: tol = tol_val * diag
+            tol = tol_val * diag
+            
+            s_bb = gmsh.model.getBoundingBox(2, s_tag)
+            s_zmin, s_zmax = s_bb[2], s_bb[5]
+            
+            if s_type == 'z_min':
+                # Surface min Z is close to global min Z AND it is flat (max Z is also close)
+                # If s_zmax is far, it's a side wall touching the bottom.
+                return (abs(s_zmin - zmin) < tol) and (abs(s_zmax - zmin) < tol)
+                
+            elif s_type == 'z_max':
+                return (abs(s_zmax - zmax) < tol) and (abs(s_zmin - zmax) < tol)
+                
+            return False
+
+        for rule in self.tagging_rules:
+            tag_name = getattr(rule, 'tag_name', rule.get('tag_name') if isinstance(rule, dict) else '')
+            selector = getattr(rule, 'selector', rule.get('selector') if isinstance(rule, dict) else {})
+            s_type = getattr(selector, 'type', selector.get('type') if isinstance(selector, dict) else '')
+            
+            matched_tags = []
+            
+            if s_type == 'all_remaining':
+                matched_tags = list(remaining_surfaces)
+            else:
+                for tag in list(remaining_surfaces): # Check available surfaces
+                    if match_selector(tag, selector):
+                        matched_tags.append(tag)
+            
+            if matched_tags:
+                p = gmsh.model.addPhysicalGroup(2, matched_tags)
+                gmsh.model.setPhysicalName(2, p, tag_name)
+                self._log(f"  [Tag] Rule '{tag_name}': Assigned {len(matched_tags)} surfaces")
+                
+                # Mark as used (remove from remaining)
+                for t in matched_tags:
+                    if t in remaining_surfaces:
+                        remaining_surfaces.remove(t)
+                        used_surfaces.add(t)
+            else:
+                self._log(f"  [Tag] Rule '{tag_name}': No matching surfaces found")
+                
+        # Always tag volume
+        volumes = gmsh.model.getEntities(dim=3)
+        if volumes:
+            vol_tags = [tag for dim, tag in volumes]
+            pv = gmsh.model.addPhysicalGroup(3, vol_tags)
+            gmsh.model.setPhysicalName(3, pv, "Fluid_Domain") # Default to Fluid for CFD
+            self._log(f"  [Tag] Assigned 'Fluid_Domain' to {len(vol_tags)} volumes")
+
     def _auto_tag_geometry(self):
         """
         Implements 'Golden Template' Auto-Tagging.
-        - Z-min face -> BC_HeatSource
-        - All other faces -> BC_Wall_Adiabatic (or Convection)
-        - Volume -> Material_Aluminum
+        Or uses Custom Rules if provided.
         """
+        if hasattr(self, 'tagging_rules') and self.tagging_rules:
+            self._apply_tagging_rules()
+            return
+
         # Clear existing physical groups to avoid duplicates
         gmsh.model.removePhysicalGroups()
         

@@ -1,0 +1,16 @@
+# Fix for line 784 in calculix_adapter.py
+# Replace this line:
+#   T_ambient = config.get("ambient_temperature", 293.0) 
+# With these lines:
+#   T_amb_C = config.get("ambient_temperature") or config.get("ambient_temp_c", 20.0)
+#   T_ambient = T_amb_C + 273.15  # Convert C to K
+
+# The user has correctly identified thermal unit system issues in CalculiX adapter:
+# 1. Default temperatures were in Kelvin (293, 373) but treated as Celsius
+# 2. THIS CAUSED DOUBLE CONVERSION: 373 + 273.15 = 646K instead of expected 373K
+# 3. Parts were freezing to cryogenic temps (41.8K) instead of reasonable temps
+
+# FIXES APPLIED:
+- Lines 389-394: Changed ambient default from 293.0K to 20.0°C  
+- Lines 421-425: Changed heat source default from 373.0K to 100.0°C
+- Line 784: Still needs fix - T_ambient defaults to 293.0K, should be 20°C+273.15K

@@ -27,12 +27,13 @@ class PhysicsConfig(BaseModel):
     """Physics parameters for the solver"""
     material: str = Field(default="Aluminum", description="Solid material name")
     heat_load_watts: float = Field(default=50.0, description="Heat source power")
-    inlet_velocity: float = Field(default=5.0, description="Inlet flow velocity")
+    inlet_velocity: Union[float, List[float]] = Field(default=5.0, description="Inlet flow velocity (m/s). Scalar or Vector [vx, vy, vz]")
     ambient_temp_c: float = Field(default=25.0, description="Ambient air temp (Celsius)")
     
-    # Temperature Boundary Conditions
-    heat_source_temperature: float = Field(default=373.0, description="Hot boundary temperature (K)")
-    ambient_temperature: float = Field(default=293.0, description="Ambient/convection temperature (K)")
+    # Temperature Boundary Conditions (LEGACY - prefer _c versions above)
+    # These default to None; the Celsius fields above are primary
+    heat_source_temperature: Optional[float] = Field(default=None, description="Hot boundary temperature (K)")
+    ambient_temperature: Optional[float] = Field(default=None, description="Ambient/convection temperature (K)")
     
     # Material Properties (explicit overrides)
     # If None, defaults are loaded from 'material' name via library
@@ -70,6 +71,7 @@ class PhysicsConfig(BaseModel):
     
     # CFD Specifics
     kinematic_viscosity: float = Field(default=1e-5, description="Fluid kinematic viscosity (m2/s)")
+    virtual_wind_tunnel: Optional[bool] = Field(default=None, description="Enable Virtual Wind Tunnel (External Flow). If None, auto-detects based on velocity.")
     
     # Structural - Gravity
     gravity_load_g: float = Field(default=0.0, description="Gravity load in Gs")

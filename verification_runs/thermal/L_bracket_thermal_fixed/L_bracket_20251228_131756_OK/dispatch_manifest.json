@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-28T13:17:57.006877",
+  "original_result": {
+    "job_name": "L_bracket",
+    "input_file": "cad_files\\L_bracket.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_MedFi_Robust.msh",
+    "vtk_file": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_thermal.vtk",
+    "png_file": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_temperature.png",
+    "pdf_file": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_report.pdf",
+    "transient_png": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_transient.png",
+    "animation_gif": "verification_runs\\thermal\\L_bracket_thermal_fixed\\L_bracket_anim.gif",
+    "min_temp_K": 46.15,
+    "max_temp_K": 300.0,
+    "num_elements": 689,
+    "solve_time_s": 0.7964367866516113,
+    "total_time_s": 6.367882490158081,
+    "completed_at": "2025-12-28T13:17:56",
+    "success": true
+  }
+}

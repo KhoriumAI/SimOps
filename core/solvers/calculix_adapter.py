@@ -25,10 +25,15 @@ class CalculiXAdapter(ISolver):
         
         # Check if we are on Windows and check default install location
         if os.name == 'nt' and self.ccx_binary == "ccx":
-             default_path = Path(r"C:\calculix\calculix_2.22_4win\ccx.exe")
-             if default_path.exists():
-                 self.ccx_binary = str(default_path)
-                 logger.info(f"[CalculiX] Found binary at {self.ccx_binary}")
+             default_paths = [
+                 Path(r"C:\calculix\calculix_2.22_4win\ccx.exe"),
+                 Path(r"C:\Users\markm\Downloads\Simops\calculix_native\CalculiX-2.23.0-win-x64\bin\ccx.exe")
+             ]
+             for dp in default_paths:
+                 if dp.exists():
+                     self.ccx_binary = str(dp)
+                     logger.info(f"[CalculiX] Found binary at {self.ccx_binary}")
+                     break
         else:
              logger.info(f"[CalculiX] Using binary: {self.ccx_binary}")
         
@@ -215,6 +220,21 @@ class CalculiXAdapter(ISolver):
             else:
                 all_elems = np.vstack(c3d4_elems + c3d10_elems)
             
+            # Heat Source Calculation (Needs node_coords)
+            heat_load = config.get("heat_load_watts", 0.0)
+            bf_val = 0.0
+            if heat_load > 0:
+                bbox_vol = (np.max(node_coords[:,0]) - np.min(node_coords[:,0])) * \
+                           (np.max(node_coords[:,1]) - np.min(node_coords[:,1])) * \
+                           (np.max(node_coords[:,2]) - np.min(node_coords[:,2]))
+                if bbox_vol > 0:
+                    # BF in mW/mm³ (mm-tonne-s with power in mW)
+                    bf_val = (heat_load * 1000.0) / bbox_vol
+                    logger.info(f"   [Physics] BBox Volume: {bbox_vol:.2f} mm³")
+                    logger.info(f"   [Physics] BF Density: {bf_val:.6g} mW/mm³")
+                else:
+                    logger.error("[Physics] Invalid bbox_vol = 0! Check mesh geometry.") 
+            
             # Identify Boundary Nodes from Physical Groups (Semantic Detection)
             # Look for BC_HeatSource physical group from mesh
             hot_tags = np.array([], dtype=int)
@@ -334,36 +354,45 @@ class CalculiXAdapter(ISolver):
                 rho_si = config.get("density", get_rho(material))
                 cp_si = config.get("specific_heat", get_cp(material))
 
-                # Scale Thermal Conductivity (W/mK -> W/mmK = * 0.001)
+                # ===================================================================
+                # UNIT SCALING: mm-tonne-s system
+                # ===================================================================
+                # Thermal Conductivity: W/mK -> mW/mmK (N/sK)
                 if isinstance(k_si, list):
                     k = [[val * 0.001, t] for val, t in k_si]
                 else:
                     k = k_si * 0.001
                 
-                # Scale Density (kg/m^3 -> kg/mm^3 = * 1e-9)
+                # Density: kg/m³ -> tonne/mm³
                 if isinstance(rho_si, list):
-                    rho = [[val * 1e-9, t] for val, t in rho_si]
+                    rho = [[val * 1e-12, t] for val, t in rho_si]
                 else:
-                    rho = rho_si * 1e-9
+                    rho = rho_si * 1e-12
                 
-                # Scale Specific Heat (J/kgK) - Identity (m and mm units both use kg)
+                # Specific Heat: J/kgK -> mm²/s²K
                 if isinstance(cp_si, list):
-                    cp = [[val, t] for val, t in cp_si]
+                    cp = [[val * 1e6, t] for val, t in cp_si]
                 else:
-                    cp = cp_si
+                    cp = cp_si * 1e6
                 
                 def write_param(card_name, value):
                     f.write(f"{card_name}\n")
                     if isinstance(value, list):
                         for pair in value:
                             # Expecting [Value, Temp]
-                            f.write(f"{pair[0]}, {pair[1]}\n")
+                            f.write(f"{pair[0]:g}, {pair[1]:g}\n")
                     else:
-                        f.write(f"{value}\n")
+                        f.write(f"{value:g}\n")
                         
+                # Write material properties to INP file
                 write_param("*CONDUCTIVITY", k)
                 write_param("*DENSITY", rho)
                 write_param("*SPECIFIC HEAT", cp)
+                
+                # Log final scaled values for verification
+                logger.info(f"   [Material] k={k if not isinstance(k, list) else k[0][0]:.6g} mW/mmK")
+                logger.info(f"   [Material] rho={rho if not isinstance(rho, list) else rho[0][0]:.6g} tonne/mm^3")
+                logger.info(f"   [Material] cp={cp if not isinstance(cp, list) else cp[0][0]:.6g} mm^2/s^2K")
                 
                 f.write("*SOLID SECTION, ELSET=E_Vol, MATERIAL=Mat1\n")
                 
@@ -377,17 +406,17 @@ class CalculiXAdapter(ISolver):
                 
                 # Create Node Set for All Nodes (for Initial Conditions)
                 f.write("*NSET, NSET=N_All\n")
-                # Write in chunks of 8 or so? No, free format.
-                # Just write one per line or comma sep.
-                for i, tag in enumerate(node_tags):
-                    if i > 0 and i % 10 == 0: f.write("\n")
-                    if i % 10 != 0: f.write(", ")
-                    f.write(f"{int(tag)}")
-                f.write("\n")
+                tag_strs = [str(t) for t in node_tags]
+                for k in range(0, len(tag_strs), 8):
+                    f.write(", ".join(tag_strs[k:k+8]) + "\n")
 
                 # Intelligent Mapping: Check aliases
+                # ALL inputs expected in CELSIUS. Defaults are in Celsius too.
                 amb_in = config.get("ambient_temperature")
-                if amb_in is None: amb_in = config.get("ambient_temp_c", 293.0)
+                if amb_in is None: 
+                    amb_in = config.get("ambient_temp_c")
+                if amb_in is None:
+                    amb_in = config.get("ambient_temp_celsius", 20.0)  # Default 20°C in CELSIUS
 
                 # Initial Conditions (Required for Transient)
                 init_temp_in = config.get("initial_temperature", amb_in)
@@ -403,18 +432,27 @@ class CalculiXAdapter(ISolver):
                 if config.get("transient", True):  # Default to transient
                      # Transient Analysis
                      dt = config.get("time_step", 2.0)
-                     t_end = config.get("duration", 10.0)
+                     t_end = config.get("duration", 60.0) # Increased default duration
                      f.write("*HEAT TRANSFER, DIRECT\n")
                      f.write(f"{dt}, {t_end}\n")
                 else:
                      # Steady State
                      f.write("*HEAT TRANSFER, STEADY STATE\n")
-                
-                # Boundary Conditions (Conduction)
+
+                # Heat Source (Volumetric) moved after nodes are loaded
+
+                if bf_val > 0:
+                     f.write("*DFLUX\n")
+                     f.write(f"E_Vol, BF, {bf_val:g}\n")
+                     logger.info(f"   [Physics] Applied Volumetric Heat: {heat_load}W -> BF={bf_val:g}")
                 f.write("*BOUNDARY\n")
-                # Legacy Support: Hot Top / Cold Bottom
-                # ANTIGRAVITY FIX: Force conversion to Kelvin. Inputs are likely Celsius.
-                t_hot_in = config.get("heat_source_temperature", 373.0)
+                # ANTIGRAVITY FIX: ALL temperature inputs are in CELSIUS.
+                # Check multiple key aliases for heat source temperature
+                t_hot_in = config.get("heat_source_temperature")
+                if t_hot_in is None:
+                    t_hot_in = config.get("source_temp_c")
+                if t_hot_in is None:
+                    t_hot_in = config.get("source_temp_celsius", 100.0)  # Default 100°C in CELSIUS
                 
                 t_cold_in = amb_in
                 
@@ -445,12 +483,17 @@ class CalculiXAdapter(ISolver):
                 # The old *FILM on E_Skin shell elements fails in CCX 2.17.
                 # Instead, we use *SURFACE to define boundary faces on the volume elements,
                 # then apply *SFILM (surface film) to that surface.
-                # Scale h: W/m^2K -> W/mm^2K (factor 1e-6)
+                # ===================================================================
+                # UNIT SCALING: h in mm-tonne-s system
+                # h [W/m²K] -> h [mW/mm²K] = h_si * 1e-3
+                # Benchmark: 25.0 W/m²K -> 0.025 mW/mm²K
+                # ===================================================================
                 h_si = config.get("convection_coeff", 25.0) 
-                h = h_si * 1e-6
+                h = h_si * 1e-3  # FIXED: was 1e-6 (wrong by 1000×)
                 
                 T_inf_in = amb_in # Use resolved ambient
                 T_inf = T_inf_in + 273.15
+                logger.info(f"   [Physics] Convection h: {h_si} W/m²K -> {h:.6g} mW/mm²K")
                 logger.info(f"   [Physics] Convection T_inf: {T_inf_in}C -> {T_inf}K")
                 
                 if h_si > 0 and (len(tri3_elems) > 0 or len(tri6_elems) > 0):
@@ -508,8 +551,11 @@ class CalculiXAdapter(ISolver):
                              f.write("*SURFACE, NAME=S_Flux, TYPE=ELEMENT\n")
                              f.write("E_FluxSelect, S1\n")
                              
-                             # Convert W/m^2 -> W/mm^2 (1e-6)
-                             q_flux = q_flux_si * 1e-6
+                             # ===================================================================
+                             # UNIT SCALING: Surface flux in mm-tonne-s system
+                             # q [W/m²] -> q [mW/mm²] = q_si * 1e-3
+                             # ===================================================================
+                             q_flux = q_flux_si * 1e-3  # FIXED: was 1e-6
                              f.write(f"*DFLUX\n")
                              # Load type S means flux per unit area
                              f.write(f"S_Flux, S, {q_flux}\n")
@@ -641,15 +687,20 @@ class CalculiXAdapter(ISolver):
                 # FRD format is fixed-width: " -1" marker + node_id (10 chars) + value
                 # Example: " -1         13.29949E+002" = node 1, temp 329.949K
                 # Use regex to handle this format
-                import re
-                match = re.match(r'\s*-1\s+(\d+)([\d.Ee\+\-]+)', line)
-                if match:
-                    try:
-                        nid = int(match.group(1))
-                        val = float(match.group(2))
+                try:
+                    # CalculiX FRD Format (Scientific Notation):
+                    # Columns 1-3:   " -1" (record type marker)
+                    # Columns 4-13:  Node ID (10 chars, right-justified)
+                    # Columns 14-25: Temperature value (12 chars, scientific notation)
+                    # Example: " -1       1143.70102E+002"
+                    #           ^^^  ^^^^^^^^^^  ^^^^^^^^^^^^
+                    #          0-3     3-13        13-25
+                    if line.startswith(" -1"):
+                        nid = int(line[3:13].strip())
+                        val = float(line[13:25].strip())
                         current_temps[nid] = val
-                    except:
-                        pass
+                except (ValueError, IndexError):
+                    pass
 
         # Flush final step check
         if current_temps:
@@ -773,14 +824,18 @@ class CalculiXAdapter(ISolver):
             
             if np.any(surface_mask):
                 T_surface_mean = np.mean(T_array[surface_mask])
-                T_ambient = config.get("ambient_temperature", 293.0) 
-                h = config.get("convection_coeff", 25.0) 
+                T_amb_val = config.get("ambient_temperature")
+                if T_amb_val is None: T_amb_val = config.get("ambient_temp_c")
+                if T_amb_val is None: T_amb_val = 20.0
                 
+                T_ambient = T_amb_val + 273.15  # Convert C to K
+                h = config.get("convection_coeff", 25.0)
                 
-                # Estimate surface area from bounding box
+                # Estimate surface area from bounding box (rough lateral surface)
                 z_range = np.max(parsed_coords[:, 2]) - np.min(parsed_coords[:, 2])
-                circumference = 2 * np.pi * r_max
-                A_lateral = circumference * z_range / 1000**2  # Convert mm² to m²
+                # Estimate radius from X/Y range
+                r_est = (np.max(parsed_coords[:, 0]) - np.min(parsed_coords[:, 0])) / 2.0
+                A_lateral = (2 * np.pi * r_est * z_range) / 1e6  # mm2 -> m2
                 
                 heat_flux_watts = h * A_lateral * (T_surface_mean - T_ambient)
                 logger.log_metric("heat_flux_watts", heat_flux_watts, "W")
@@ -788,6 +843,8 @@ class CalculiXAdapter(ISolver):
         except Exception as e:
             logger.warning(f"  [Heat Flux] Calculation failed: {e}")
 
+        logger.info(f"   [CalculiX] Solver finished. Temp range: {t_min:.1f}K - {t_max:.1f}K ({t_min-273.15:.1f}C - {t_max-273.15:.1f}C)")
+        
         return {
             'temperature': T_array,
             'node_coords': parsed_coords,
@@ -795,11 +852,9 @@ class CalculiXAdapter(ISolver):
             'max_temp': t_max,
             'elements': elements,
             'time_series_stats': time_series_stats,
-            'time_series': time_series,
+            'heat_flux_watts': heat_flux_watts if 'heat_flux_watts' in locals() else 0.0,
             'converged': converged,
-            'convergence_threshold': dT_threshold,
-            'convergence_steps': 3,
-            'final_dT': dT_history[-1] if len(dT_history) > 0 else None,
-            'heat_flux_watts': heat_flux_watts
+            'convergence_step': convergence_step,
+            'time_series': time_series,
+            'convergence_threshold': dT_threshold
         }
-

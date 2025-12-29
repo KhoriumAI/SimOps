@@ -1,0 +1,23 @@
+SIMOPS AUTOMATED PIPELINE - FAILURE REPORT
+==================================================
+Job Name: Cube
+Input:    cad_files\Cube.step
+Time:     2025-12-28T15:52:47.563397
+==================================================
+
+GEOMETRY ANALYSIS:
+Geometry Analysis:
+  Diagonal: 86.60 mm
+  Min Dim:  50.00 mm
+  Est. Wall:16.67 mm
+  Too Small:False
+  Warnings: 0
+
+STRATEGY FAILURES:
+- MedFi_Robust: unsupported operand type(s) for -: 'NoneType' and 'float'
+- LowFi_Emergency: unsupported operand type(s) for -: 'NoneType' and 'float'
+
+SUGGESTIONS:
+1. Check input CAD for validity (self-intersections, gaps).
+2. Scale up model if units are incorrect (e.g. meters vs mm).
+3. Try manual cleanup in CAD software.

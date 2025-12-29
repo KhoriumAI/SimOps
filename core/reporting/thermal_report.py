@@ -50,13 +50,13 @@ class ThermalPDFReportGenerator:
         
         # Key Metrics Table
         c.setFillColorRGB(0, 0, 0)
-        y_start = self.height - 7 * cm
+        y_start = self.height - 4.8 * cm # Compressed header
         c.setFont("Helvetica-Bold", 14)
         c.drawString(2 * cm, y_start + 0.5 * cm, "Thermal Metrics")
         
         # Format metrics
-        max_temp = data.get('max_temp_k', 0.0)
-        min_temp = data.get('min_temp_k', 0.0)
+        max_temp = data.get('max_temp_k') or 0.0
+        min_temp = data.get('min_temp_k') or 0.0
         delta_t = max_temp - min_temp
         
         metrics = [
@@ -70,115 +70,101 @@ class ThermalPDFReportGenerator:
             ("Nodes", f"{data.get('num_nodes', 0):,}"),
         ]
         
-        c.setFont("Helvetica", 11)
-        row_height = 0.8 * cm
+        c.setFont("Helvetica", 10)
+        row_height = 0.5 * cm  # Hyper-compressed
         for i, (label, value) in enumerate(metrics):
             y = y_start - (i * row_height)
-            # Label
-            c.setFont("Helvetica-Bold", 11)
+            c.setFont("Helvetica-Bold", 9)
             c.drawString(2.5 * cm, y, label + ":")
-            # Value
-            c.setFont("Helvetica", 11)
+            c.setFont("Helvetica", 9)
             c.drawString(8 * cm, y, str(value))
-            
-            # Draw line
             c.setStrokeColorRGB(0.9, 0.9, 0.9)
-            c.line(2 * cm, y - 0.2 * cm, 12 * cm, y - 0.2 * cm)
+            c.line(2 * cm, y - 0.1 * cm, 12 * cm, y - 0.1 * cm)
 
-        # Physics Validation Section
-        y_validation = y - 1.5 * cm
-        c.setFont("Helvetica-Bold", 14)
+        # Physics Validation
+        y_validation = y - 0.7 * cm
+        c.setFont("Helvetica-Bold", 12) # Smaller header
         c.setFillColorRGB(0, 0, 0)
-        c.drawString(2 * cm, y_validation + 0.5 * cm, "Physics Validation")
+        c.drawString(2 * cm, y_validation + 0.4 * cm, "Validation") # Shortened title
         
         checks = []
-        # Temperature range check
-        temp_ok = min_temp > 0 and max_temp < 1000  # Reasonable range
-        temp_status = "✓ PASS" if temp_ok else "✗ FAIL"
+        temp_ok = min_temp > 0 and max_temp < 1000 and min_temp != 0.0 and max_temp != 0.0
+        temp_status = "PASS" if temp_ok else "FAIL"
         temp_color = (0.2, 0.8, 0.2) if temp_ok else (0.8, 0.2, 0.2)
-        checks.append(("Temperature Range", f"{temp_status} ({min_temp:.1f}K - {max_temp:.1f}K)", temp_color))
+        checks.append(("Range", f"{temp_status} ({min_temp:.0f}K-{max_temp:.0f}K)", temp_color))
         
-        # Gradient check (no unrealistic jumps)
-        gradient_ok = delta_t < 500  # Less than 500K range
-        grad_status = "✓ PASS" if gradient_ok else "⚠ WARNING"
+        gradient_ok = delta_t < 500 and delta_t > 0
+        grad_status = "PASS" if gradient_ok else "WARN"
         grad_color = (0.2, 0.8, 0.2) if gradient_ok else (0.9, 0.6, 0.0)
-        checks.append(("Temperature Gradient", f"{grad_status} (ΔT = {delta_t:.1f}K)", grad_color))
+        checks.append(("Gradient", f"{grad_status} (dT={delta_t:.0f}K)", grad_color))
         
-        c.setFont("Helvetica", 10)
+        c.setFont("Helvetica", 9)
         for i, (label, status, color) in enumerate(checks):
-            y_check = y_validation - (i * 0.6 * cm)
+            y_check = y_validation - (i * 0.45 * cm)
             c.setFillColorRGB(0, 0, 0)
             c.drawString(2.5 * cm, y_check, label + ":")
             c.setFillColorRGB(*color)
             c.drawString(6 * cm, y_check, status)
         
-        # Material Properties
-        y_material = y_validation - (len(checks) * 0.6 * cm) - 1.0 * cm
-        c.setFont("Helvetica-Bold", 12)
+        # Material
+        y_material = y_validation - (len(checks) * 0.45 * cm) - 0.5 * cm
+        c.setFont("Helvetica-Bold", 12) # Smaller header
         c.setFillColorRGB(0, 0, 0)
-        c.drawString(2 * cm, y_material + 0.5 * cm, "Material: Al6061-T6")
+        c.drawString(2 * cm, y_material + 0.4 * cm, "Material: Al6061")
         
         c.setFont("Helvetica", 9)
-        mat_props = [
-            "Thermal Conductivity: 167 W/(m·K)",
-            "Specific Heat: 896 J/(kg·K)",
-            "Density: 2700 kg/m³"
-        ]
+        mat_props = ["k: 167 W/mK", "Cp: 896 J/kgK", "Rho: 2700 kg/m3"] # Shortened
         for i, prop in enumerate(mat_props):
-            c.drawString(2.5 * cm, y_material - (i * 0.5 * cm), prop)
+            c.drawString(2.5 * cm, y_material - (i * 0.4 * cm), prop)
 
-        # Images
-        y_img_start = y_material - (len(mat_props) * 0.5 * cm) - 1.0 * cm
-        
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColorRGB(0, 0, 0)
-        c.drawString(2 * cm, y_img_start + 1.0 * cm, "Temperature Distribution")
+        # Images Section
+        y_img_start_text = y_material - (len(mat_props) * 0.4 * cm) - 0.3 * cm
         
         valid_images = [img for img in image_paths if Path(img).exists()]
+        available_height = y_img_start_text - 2 * cm # Margin bottom
         
         if valid_images:
-            # Page 1: Main (Isometric) view
-            first_img = valid_images[0]
+            # Page 1: Primary Image (Thermal Map / 4-Panel)
+            # Use all available remaining height (with 2cm bottom margin)
+            available_height = y_img_start_text - 2.5 * cm 
+            
+            # Constraint: Don't make it taller than 13cm or it looks weird
+            img1_h = min(13 * cm, available_height)
+            
+            y_img1 = y_img_start_text - img1_h - 0.2*cm
             try:
-                # 17x12 cm image
-                c.drawImage(first_img, 2 * cm, 2 * cm, width=17*cm, height=12*cm, preserveAspectRatio=True)
+                c.drawImage(valid_images[0], 2 * cm, y_img1, width=17*cm, height=img1_h, preserveAspectRatio=True)
             except Exception as e:
-                logger.error(f"Failed to draw thermal image: {e}")
-                
-            # Page 2: Multiple views grid
+                logger.error(f"Failed to draw main image: {e}")
+            
+            # Page 2+: Secondary Images (Transient Graph, etc.)
             if len(valid_images) > 1:
                 c.showPage()
                 
-                # Grid config
-                margin = 2 * cm
-                w = (self.width - 2 * margin - 1 * cm) / 2
-                h = w * 0.75
-                
-                positions = [
-                    (margin, self.height - margin - h),
-                    (margin + w + 1*cm, self.height - margin - h),
-                    (margin, self.height - margin - 2*h - 1*cm),
-                    (margin + w + 1*cm, self.height - margin - 2*h - 1*cm),
-                ]
-                
                 c.setFont("Helvetica-Bold", 14)
-                c.drawString(margin, self.height - margin + 0.5*cm, "Additional Views")
+                c.drawString(2 * cm, self.height - 3 * cm, "Transient Response & Additional Views")
                 
-                remaining_images = valid_images[1:]
-                for i, img_path in enumerate(remaining_images[:4]):
-                    if i < len(positions):
-                        x, y = positions[i]
-                        try:
-                            name = Path(img_path).stem
-                            parts = name.split('_')
-                            title = parts[-1].capitalize() if parts else "View"
-                            
-                            c.setFont("Helvetica-Bold", 10)
-                            c.drawString(x, y + h + 0.1*cm, title)
-                            
-                            c.drawImage(img_path, x, y, width=w, height=h, preserveAspectRatio=True)
-                        except Exception as e:
-                            logger.error(f"Failed to draw grid image {img_path}: {e}")
+                current_y = self.height - 5 * cm
+                
+                for i, img_path in enumerate(valid_images[1:]):
+                    # Check for space (assume 9cm per image)
+                    if current_y < 10 * cm:
+                        c.showPage()
+                        current_y = self.height - 3 * cm
+                    
+                    try:
+                        # Draw Image centered
+                        c.drawImage(img_path, 2 * cm, current_y - 9*cm, width=17*cm, height=9*cm, preserveAspectRatio=True)
+                        
+                        # Label
+                        name = Path(img_path).stem
+                        c.setFont("Helvetica", 10)
+                        c.drawString(2 * cm, current_y + 0.2*cm, name)
+                        
+                        current_y -= 10.5 * cm
+                    except Exception as e:
+                        logger.error(f"Failed to draw secondary image {img_path}: {e}")
+
 
         c.save()
         logger.info(f"Generated Thermal PDF report: {output_file}")

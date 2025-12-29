@@ -1,0 +1,12 @@
+{
+  "physics": {
+    "type": "thermal",
+    "material": "Aluminum 6061",
+    "initial_temp_c": 25.0,
+    "ambient_temp_c": 25.0,
+    "convection_coeff": 5.0,
+    "heat_load_watts": 0.1,
+    "transient": false,
+    "unit_scaling": 1.0
+  }
+}

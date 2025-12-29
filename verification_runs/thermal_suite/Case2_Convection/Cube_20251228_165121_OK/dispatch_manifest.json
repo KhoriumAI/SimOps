@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-28T16:51:22.000556",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cube.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_MedFi_Robust.msh",
+    "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_thermal.vtk",
+    "png_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_temperature.png",
+    "pdf_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_report.pdf",
+    "transient_png": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_transient.png",
+    "animation_gif": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case2_Convection\\Cube_anim.gif",
+    "min_temp_K": 373.15,
+    "max_temp_K": 439.662,
+    "num_elements": 1352,
+    "solve_time_s": 0.10066580772399902,
+    "total_time_s": 1.790313959121704,
+    "completed_at": "2025-12-28T16:51:21",
+    "success": true
+  }
+}

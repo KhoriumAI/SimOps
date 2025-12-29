@@ -1,0 +1,22 @@
+{
+  "dispatched_at": "2025-12-28T16:19:47.793714",
+  "original_result": {
+    "job_name": "Cube",
+    "input_file": "C:\\Users\\markm\\Downloads\\SimOps\\cad_files\\Cube.step",
+    "strategy": "MedFi_Robust",
+    "attempts": 1,
+    "mesh_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case3_Transient\\Cube_MedFi_Robust.msh",
+    "vtk_file": "C:\\Users\\markm\\Downloads\\SimOps\\verification_runs\\thermal_suite\\Case3_Transient\\Cube_thermal.vtk",
+    "png_file": null,
+    "pdf_file": null,
+    "transient_png": null,
+    "animation_gif": null,
+    "min_temp_K": 296.493,
+    "max_temp_K": 373.15,
+    "num_elements": 1352,
+    "solve_time_s": 0.15822649002075195,
+    "total_time_s": 0.6166870594024658,
+    "completed_at": "2025-12-28T16:19:47",
+    "success": true
+  }
+}

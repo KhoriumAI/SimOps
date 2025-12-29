@@ -1,6 +1,6 @@
 {
   "job_name": "L_bracket",
-  "input_file": "cad_files/L_bracket.step",
+  "input_file": "cad_files\\L_bracket.step",
   "strategy": "MedFi_Robust",
   "attempts": 1,
   "mesh_file": "verification_runs\\thermal\\L_bracket_thermal\\L_bracket_MedFi_Robust.msh",
@@ -12,8 +12,8 @@
   "min_temp_K": 46.15,
   "max_temp_K": 300.0,
   "num_elements": 689,
-  "solve_time_s": 0.42934656143188477,
-  "total_time_s": 3.4467930793762207,
-  "completed_at": "2025-12-27T18:35:47",
+  "solve_time_s": 0.6874127388000488,
+  "total_time_s": 5.335547924041748,
+  "completed_at": "2025-12-28T12:41:40",
   "success": true
 }

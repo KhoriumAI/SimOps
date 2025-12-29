@@ -62,19 +62,19 @@ class PDFReportGenerator:
         title_style = ParagraphStyle(
             'SimOpsTitle',
             parent=styles['Heading1'],
-            fontSize=24,
+            fontSize=22, # Reduced
             textColor=self.colors['primary'],
-            spaceAfter=30,
+            spaceAfter=10, # Reduced
             alignment=1  # Center
         )
         
         heading_style = ParagraphStyle(
             'SimOpsHeading',
             parent=styles['Heading2'],
-            fontSize=16,
+            fontSize=14, # Reduced
             textColor=self.colors['dark'],
-            spaceBefore=20,
-            spaceAfter=12,
+            spaceBefore=10, # Reduced
+            spaceAfter=5, # Reduced
             borderWidth=0,
             borderColor=self.colors['secondary']
         )
@@ -83,9 +83,8 @@ class PDFReportGenerator:
         
         # 1. Header
         story.append(Paragraph("SimOps Thermal Analysis", title_style))
-        story.append(Paragraph(f"<b>Job:</b> {job_name}", normal_style))
-        story.append(Paragraph(f"<b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal_style))
-        story.append(Spacer(1, 20))
+        story.append(Paragraph(f"<b>Job:</b> {job_name} | <b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal_style))
+        story.append(Spacer(1, 10)) # Reduced
         
         # 2. Executive Summary / Grade
         # Determine grade (simple logic for now)
@@ -107,13 +106,13 @@ class PDFReportGenerator:
         grade_style = ParagraphStyle(
             'GradeParams',
             parent=styles['Normal'],
-            fontSize=14,
+            fontSize=12,
             textColor=grade_color,
             alignment=1,
-            spaceAfter=20
+            spaceAfter=10 # Reduced
         )
         story.append(Paragraph(f"<b>SIMULATION STATUS: {grade}</b>", grade_style))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 5)) # Reduced
 
         # 3. Key Metrics Table
         metrics_data = [
@@ -132,37 +131,46 @@ class PDFReportGenerator:
             ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('FONTSIZE', (0, 0), (-1, 0), 10), # Reduced
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8), # Reduced
             ('BACKGROUND', (0, 1), (-1, -1), self.colors['light']),
-            ('GRID', (0, 0), (-1, -1), 1, self.colors['secondary']),
+            ('GRID', (0, 0), (-1, -1), 0.5, self.colors['secondary']),
             ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9), # Reduced
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, self.colors['light']])
         ]))
         story.append(t)
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 10)) # Reduced
         
         # 4. Visualizations
         story.append(Paragraph("Thermal Distribution Maps", heading_style))
         
-        for img_path in image_paths:
+        for i, img_path in enumerate(image_paths):
             if os.path.exists(img_path):
                 # Scale image to fit page width
                 img = Image(img_path)
                 aspect = img.imageHeight / float(img.imageWidth)
-                display_width = 6.5 * inch
+                display_width = 7.0 * inch # Slightly wider to use margin
                 display_height = display_width * aspect
                 
-                # If too tall, scale down
-                if display_height > 9 * inch:
-                    display_height = 9 * inch
-                    display_width = display_height / aspect
-                    
+                # Max height constraint for first page (leave room for footer)
+                # Available space is roughly 10 inches total logic - headers (3) = 7 inches
+                if i == 0 and display_height > 6.0 * inch:
+                     display_height = 6.0 * inch 
+                     display_width = display_height / aspect
+
                 img.drawWidth = display_width
                 img.drawHeight = display_height
+                
+                # Center the image
+                img.hAlign = 'CENTER'
                 story.append(img)
-                story.append(Spacer(1, 20))
+                story.append(Spacer(1, 10))
+                
+                # Force Page Break after FIRST image if there are more
+                if i == 0 and len(image_paths) > 1:
+                    story.append(PageBreak())
+                    story.append(Paragraph("Supplementary Views & Transient Analysis", heading_style))
             else:
                 story.append(Paragraph(f"<i>Image missing: {Path(img_path).name}</i>", normal_style))
 
