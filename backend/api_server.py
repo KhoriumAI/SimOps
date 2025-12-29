@@ -340,6 +340,10 @@ def register_routes(app):
         if request.path.startswith('/api/') and os.environ.get('FLASK_DEBUG'):
             print(f"[API] {request.method} {request.path}")
 
+    @app.route('/', methods=['GET'])
+    def index():
+        return "<h1>Khorium MeshGen Backend</h1><p>Status: Running</p><p>API: /api/health</p>"
+
     @app.route('/api/health', methods=['GET'])
     def health_check():
         return jsonify({"status": "healthy", "service": "mesh-generation-api", "version": "2.0"})
