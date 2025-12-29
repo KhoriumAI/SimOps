@@ -47,7 +47,7 @@ import tempfile
 # Strategies and GPU mesher are now imported lazily in generate_mesh()
 # ==============================================================================
 
-        vprint("[INIT] Ready.", flush=True)
+vprint("[INIT] Ready.", flush=True)
 # ==============================================================================
 
 def get_node_to_element_map(types, tags, nodes):
