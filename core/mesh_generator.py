@@ -11,6 +11,8 @@ import os
 import math
 import time
 import json
+import threading
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from abc import ABC, abstractmethod
@@ -314,30 +316,19 @@ class BaseMeshGenerator(ABC):
             return False
 
         ext = os.path.splitext(filename)[1].lower()
-        if ext not in ['.step', '.stp', '.iges', '.igs']:
+        if ext not in ['.step', '.stp', '.iges', '.igs', '.stl', '.obj', '.ply', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
             self.log_message(f"ERROR: Unsupported file format: {ext}", level="ERROR")
             return False
 
         return True
 
-    def initialize_gmsh(self, thread_count=None):
+    def initialize_gmsh(self, thread_count=None, verbosity=None):
         """
         Initialize Gmsh with configurable multi-threading
         
         Args:
             thread_count: Number of threads for Gmsh operations
-                         - None: Use ALL cores (WARNING: risky on Windows with 32+ threads!)
-                         - 1: Single-threaded (safest, but slow - ~4.5x slower than optimal)
-                         - 4-8: OPTIMAL for Windows (stable + 3-5x speedup over single-thread)
-                         - 16+: UNSTABLE on Windows (access violations likely in HXT algorithm)
-        
-        CRITICAL: Windows has Gmsh threading bugs with 16+ threads in HXT (Algorithm3D=10).
-        Recommended: Use 6 threads for best stability/performance balance.
-        
-        Performance data (typical):
-        - 1 thread: baseline (stable but slow)
-        - 6 threads: 4.5x faster, stable
-        - 32 threads: 8x faster, frequent crashes
+            verbosity: Optional verbosity level (1-5). If None, uses default (2).
         """
         if not self.gmsh_initialized:
             import multiprocessing
@@ -347,12 +338,17 @@ class BaseMeshGenerator(ABC):
             
             # Determine thread count
             if thread_count is None:
-                # Scenario B: Single worker, use all cores (Speed Demon)
+                # Scenario B: Single worker, use reasonable core count
+                import multiprocessing
+                import platform
                 num_cores = multiprocessing.cpu_count()
-                thread_count = num_cores
-            else:
-                # Scenario A: Multiple workers, use specified count
-                num_cores = thread_count
+                
+                # CRITICAL: Windows has instability with 16+ threads in HXT
+                if platform.system() == "Windows":
+                    # Cap at 8 threads for balance of speed/stability on high-core CPUs
+                    thread_count = min(num_cores, 8)
+                else:
+                    thread_count = num_cores
             
             # Configure threading
             gmsh.option.setNumber("General.NumThreads", thread_count)
@@ -360,11 +356,23 @@ class BaseMeshGenerator(ABC):
             gmsh.option.setNumber("Mesh.MaxNumThreads2D", thread_count)
             gmsh.option.setNumber("Mesh.MaxNumThreads3D", thread_count)
             
-            # Reduce terminal spam to prevent pipe buffer issues
-            gmsh.option.setNumber("General.Terminal", 1)  # Errors only
+            # Default verbosity (quiet)
+            v_level = verbosity if verbosity is not None else 2
+            t_level = 1 if v_level <= 2 else 1 # Terminal 1 shows errors
+            
+            # Reduce terminal spam and entity tracking to prevent pipe buffer issues
+            gmsh.option.setNumber("General.Terminal", t_level)
+            gmsh.option.setNumber("General.Verbosity", v_level) 
             
             self.gmsh_initialized = True
-            self.log_message(f"Gmsh initialized with {thread_count} threads")
+            self.log_message(f"Gmsh initialized with {thread_count} threads (Verbosity: {v_level})")
+
+    def elevate_verbosity(self, level=4):
+        """Increase Gmsh verbosity for detailed progress reporting"""
+        if self.gmsh_initialized:
+            self.log_message(f"[Verbosity] Elevating Gmsh verbosity to level {level} for detailed progress...")
+            gmsh.option.setNumber("General.Terminal", 1)
+            gmsh.option.setNumber("General.Verbosity", level)
 
     def finalize_gmsh(self):
         """Finalize Gmsh"""
@@ -411,16 +419,63 @@ class BaseMeshGenerator(ABC):
             gmsh.option.setNumber("Geometry.OCCMakeSolids", 0)   # Don't force solid creation
             
             # Import based on file type
+            import time
+            t0 = time.time()
             ext = os.path.splitext(filename)[1].lower()
-            if ext in ['.step', '.stp']:
+            if ext in ['.step', '.stp', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
                 gmsh.model.occ.importShapes(filename)
+                self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
+                gmsh.model.occ.synchronize()
+                self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
             elif ext in ['.iges', '.igs']:
                 gmsh.model.occ.importShapes(filename)
+                self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
+                gmsh.model.occ.synchronize()
+                self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
+            elif ext in ['.stl', '.obj', '.ply']:
+                self.log_message(f"Loading surface mesh: {filename}")
+                gmsh.merge(filename)
+                
+                # Create a volume for 3D meshing from the surface
+                self.log_message("Constructing volume from surface mesh...")
+                
+                # 1. Classify surfaces (split by angle > 40 degrees)
+                gmsh.model.mesh.classifySurfaces(math.pi * 40 / 180, True, True)
+                
+                # 2. Create discrete geometry entities
+                gmsh.model.mesh.createGeometry()
+                
+                # 3. Create Volume from Surface Loop
+                surfaces = gmsh.model.getEntities(2)
+                if surfaces:
+                    # Collect all surface tags
+                    s_tags = [s[1] for s in surfaces]
+                    
+                    # Create surface loop
+                    l_tag = gmsh.model.geo.addSurfaceLoop(s_tags)
+                    
+                    # Create volume
+                    gmsh.model.geo.addVolume([l_tag])
+                    gmsh.model.geo.synchronize()
+                    
+                    self.log_message(f"[OK] Created volume from {len(surfaces)} surfaces")
+                else:
+                    self.log_message("[!] No surfaces found in mesh file", level="WARNING")
             else:
                 raise Exception(f"Unsupported format: {ext}")
 
-            gmsh.model.occ.synchronize()
-            self.log_message("[OK] CAD file imported successfully")
+            self.log_message("[OK] File imported successfully")
+
+            # PROACTIVE ISOLATION: If we are in isolation mode, remove all other volumes NOW.
+            # This prevents the expensive _extract_geometry_info from analyzing 150+ unwanted volumes.
+            if hasattr(self, 'target_volume_tag') and self.target_volume_tag is not None:
+                self.log_message(f"[Surgical] Isolating volume {self.target_volume_tag} - removing all other entities...")
+                all_vols = gmsh.model.getEntities(3)
+                to_remove = [(3, tag) for _, tag in all_vols if tag != self.target_volume_tag]
+                if to_remove:
+                    gmsh.model.occ.remove(to_remove, recursive=True)
+                    gmsh.model.occ.synchronize()
+                    self.log_message(f"[Surgical] Removed {len(to_remove)} other volumes")
 
             # NEW: Log detailed entity counts immediately after import
             v_count = len(gmsh.model.getEntities(3))
@@ -460,10 +515,22 @@ class BaseMeshGenerator(ABC):
 
     def _extract_geometry_info(self):
         """Extract and store geometry information"""
+        self.log_message("[Geometry] Extracting geometry information...")
+        self.log_message("[Geometry] Getting volumes...")
         volumes = gmsh.model.getEntities(dim=3)
+        self.log_message(f"[Geometry] Found {len(volumes)} volumes")
+        
+        self.log_message("[Geometry] Getting surfaces...")
         surfaces = gmsh.model.getEntities(dim=2)
+        self.log_message(f"[Geometry] Found {len(surfaces)} surfaces")
+        
+        self.log_message("[Geometry] Getting curves...")
         curves = gmsh.model.getEntities(dim=1)
+        self.log_message(f"[Geometry] Found {len(curves)} curves")
+        
+        self.log_message("[Geometry] Getting points...")
         points = gmsh.model.getEntities(dim=0)
+        self.log_message(f"[Geometry] Found {len(points)} points")
 
         self.geometry_info = {
             'num_volumes': len(volumes),
@@ -479,26 +546,35 @@ class BaseMeshGenerator(ABC):
         self.log_message(f"  - Points: {len(points)}")
 
         # Individual volume analysis
-        total_mass = 0
-        valid_volumes = 0
-        for i, (dim, tag) in enumerate(volumes):
-            try:
-                mass = gmsh.model.occ.getMass(dim, tag)
-                if mass > 1e-12:
-                    valid_volumes += 1
-                total_mass += mass
-                bbox = gmsh.model.getBoundingBox(dim, tag)
-                # Only log details for the first 30 volumes or if explicitly debugging
-                if i < 30:
-                    self.log_message(f"    V{tag}: mass={mass:.6f}, bbox=[{bbox[0]:.2f}, {bbox[1]:.2f}, {bbox[2]:.2f}] to [{bbox[3]:.2f}, {bbox[4]:.2f}, {bbox[5]:.2f}]")
-            except:
-                pass
-        
-        if len(volumes) > 30:
-            self.log_message(f"    ... (and {len(volumes)-30} more volumes)")
+        # PERFORMANCE: Skip expensive getMass calculation for large assemblies (>50 volumes)
+        # Each getMass call on complex geometry (threads, small features) can take 1-5 seconds
+        # For 151 volumes, this would hang for 3-10 minutes with no output
+        if len(volumes) > 50:
+            self.log_message(f"  - Skipping per-volume mass calculation (assembly has {len(volumes)} volumes)")
+            self.log_message(f"  - (getMass is expensive for complex geometry - will calculate total volume only)")
+            total_mass = 0
+            valid_volumes = len(volumes)  # Assume all are valid
+        else:
+            total_mass = 0
+            valid_volumes = 0
+            for i, (dim, tag) in enumerate(volumes):
+                try:
+                    mass = gmsh.model.occ.getMass(dim, tag)
+                    if mass > 1e-12:
+                        valid_volumes += 1
+                    total_mass += mass
+                    bbox = gmsh.model.getBoundingBox(dim, tag)
+                    # Only log details for the first 30 volumes or if explicitly debugging
+                    if i < 30:
+                        self.log_message(f"    V{tag}: mass={mass:.6f}, bbox=[{bbox[0]:.2f}, {bbox[1]:.2f}, {bbox[2]:.2f}] to [{bbox[3]:.2f}, {bbox[4]:.2f}, {bbox[5]:.2f}]")
+                except:
+                    pass
             
-        self.log_message(f"  - Valid Volumes (Mass > 0): {valid_volumes}")
-        self.log_message(f"  - Total Model Mass: {total_mass:.6f}")
+            if len(volumes) > 30:
+                self.log_message(f"    ... (and {len(volumes)-30} more volumes)")
+                
+            self.log_message(f"  - Valid Volumes (Mass > 0): {valid_volumes}")
+            self.log_message(f"  - Total Model Mass: {total_mass:.6f}")
 
         if not volumes:
             self.log_message("[!] No volumes detected - attempting shell-to-solid repair...")
@@ -514,11 +590,15 @@ class BaseMeshGenerator(ABC):
         # Calculate total volume for mesh sizing
         try:
             total_volume = 0.0
-            for v_dim, v_tag in volumes:
-                # getMass returns volume for 3D entities
-                total_volume += gmsh.model.occ.getMass(v_dim, v_tag)
+            if len(volumes) > 50:
+                self.log_message("  - Skipping total volume calculation (looping getMass is slow for large assemblies)")
+                total_volume = 0.0
+            else:
+                for v_dim, v_tag in volumes:
+                    # getMass returns volume for 3D entities
+                    total_volume += gmsh.model.occ.getMass(v_dim, v_tag)
             self.geometry_info['volume'] = total_volume
-            self.log_message(f"[OK] Calculated geometry volume: {total_volume:.2f} mm³")
+            self.log_message(f"[OK] Calculated/Estimated geometry volume: {total_volume:.2f} mm³")
             
             # Debug: Show bounding box dimensions for unit diagnosis
             bb = self.geometry_info.get('bounding_box', {})
@@ -533,14 +613,28 @@ class BaseMeshGenerator(ABC):
 
     def _calculate_bounding_box(self, volumes) -> Dict[str, List[float]]:
         """Calculate overall bounding box"""
+        # PERFORMANCE: Use Gmsh's internal calculation for the whole model
+        # instead of looping over volumes. This is much faster and more accurate for assemblies.
+        try:
+            bb = gmsh.model.getBoundingBox(-1, -1)
+            # If box is valid (not empty)
+            if bb[3] >= bb[0]:
+                return {'min': [bb[0], bb[1], bb[2]], 'max': [bb[3], bb[4], bb[5]]}
+        except:
+            pass
+
+        # Fallback to loop if global call fails or returns empty
         b_min = [float('inf')] * 3
         b_max = [float('-inf')] * 3
 
         for v_dim, v_tag in volumes:
-            bb = gmsh.model.getBoundingBox(v_dim, v_tag)
-            for i in range(3):
-                b_min[i] = min(b_min[i], bb[i])
-                b_max[i] = max(b_max[i], bb[i+3])
+            try:
+                bb = gmsh.model.getBoundingBox(v_dim, v_tag)
+                for i in range(3):
+                    b_min[i] = min(b_min[i], bb[i])
+                    b_max[i] = max(b_max[i], bb[i+3])
+            except:
+                pass
 
         return {'min': b_min, 'max': b_max}
 
@@ -566,6 +660,9 @@ class BaseMeshGenerator(ABC):
         CRITICAL FIX: Gmsh enters "Exclusive Mode" when ANY Physical Group exists.
         If you define surface groups but forget volume groups, all tets generate
         but silently disappear during export. This prevents that.
+        
+        SURGICAL ISOLATION MODE: If target_volume_tag is set, assign a unique
+        physical group name so individual volumes can be preserved after merging.
         """
         volumes = gmsh.model.getEntities(dim=3)
         
@@ -578,11 +675,21 @@ class BaseMeshGenerator(ABC):
         has_volume_groups = any(dim == 3 for dim, _ in existing_groups)
         
         if not has_volume_groups:
-            # Assign all volumes to a single Physical Group
-            vol_tags = [v[1] for v in volumes]
-            p_vol = gmsh.model.addPhysicalGroup(3, vol_tags)
-            gmsh.model.setPhysicalName(3, p_vol, "Volume")
-            self.log_message(f"[OK] Assigned {len(vol_tags)} volume(s) to Physical Group 'Volume'")
+            # SURGICAL ISOLATION: Assign unique per-volume physical groups
+            if hasattr(self, 'target_volume_tag') and self.target_volume_tag is not None:
+                # In isolation mode, there should only be 1 volume
+                # Assign it a unique name based on the original tag
+                vol_tags = [v[1] for v in volumes]
+                p_vol = gmsh.model.addPhysicalGroup(3, vol_tags)
+                unique_name = f"Volume_{self.target_volume_tag}"
+                gmsh.model.setPhysicalName(3, p_vol, unique_name)
+                self.log_message(f"[OK] Assigned isolated volume to Physical Group '{unique_name}'")
+            else:
+                # Normal mode: assign all volumes to a single Physical Group
+                vol_tags = [v[1] for v in volumes]
+                p_vol = gmsh.model.addPhysicalGroup(3, vol_tags)
+                gmsh.model.setPhysicalName(3, p_vol, "Volume")
+                self.log_message(f"[OK] Assigned {len(vol_tags)} volume(s) to Physical Group 'Volume'")
         else:
             self.log_message(f"[OK] Volume Physical Groups already exist")
 
@@ -676,6 +783,14 @@ class BaseMeshGenerator(ABC):
         try:
             curves = gmsh.model.getEntities(dim=1)
             surfaces = gmsh.model.getEntities(dim=2)
+
+            # PERFORMANCE: Skip curve analysis for large/complex assemblies
+            # Iterating through 2000+ curves and calling getBoundingBox/sqrt on each
+            # can take significant time without providing critical info for assemblies.
+            if len(curves) > 500:
+                self.log_message(f"[Geometry] Skipping detailed curve analysis ({len(curves)} curves)")
+                self.geometry_info['has_small_features'] = False
+                return
 
             # Analyze curve lengths
             curve_lengths = []
@@ -791,6 +906,139 @@ class BaseMeshGenerator(ABC):
         except Exception as e:
             self.log_message(f"[!] Could not apply geometry-aware settings: {e}")
 
+    def check_1d_complexity(self) -> Dict[str, Any]:
+        """
+        Perform a fast 1D complexity check (Canary Strategy).
+        Checks edge counts against volume and diagonal.
+        
+        Returns:
+            Dict with 'toxic' boolean and reason.
+        """
+        self.log_message("Running 1D Complexity Canary...")
+        
+        curves = gmsh.model.getEntities(1)
+        volumes = gmsh.model.getEntities(3)
+        edge_count = len(curves)
+        diag = self.geometry_info.get('diagonal', 1.0)
+        
+        # 1D TOXICITY HEURISTIC:
+        # If a small part has a massive number of edges, it's likely "dirty"
+        # or has excessive detail (e.g. threads, logos) that will stall meshing.
+        # 
+        # UPDATED THRESHOLDS (2024-12-28):
+        # - Scale "extreme" count by diagonal. 
+        # - 2000 edges for 2mm is bad, but 2000 edges for 200mm is fine.
+        # - Exempt parts with <= 3 volumes from strict "extreme" block.
+        is_toxic = False
+        reason = ""
+        
+        num_vols = len(volumes)
+        
+        # Calculate size-aware threshold: 
+        # Base limit: 5000 edges
+        # Scale with diagonal: add 100 edges per mm of diagonal
+        # Example: 10mm -> 6000 edges, 200mm -> 25000 edges
+        size_aware_limit = 5000 + (diag * 100)
+        
+        # Absolute overrides:
+        # 1. Very small parts with moderate edge counts
+        if diag < 10.0 and edge_count > 2000:
+            is_toxic = True
+            reason = f"Toxic 1D (small/complex): {edge_count} edges for diagonal {diag:.2f}mm"
+            
+        # 2. Extreme edge counts regardless of size
+        elif edge_count > size_aware_limit:
+            # But only if NOT a simple assembly (allow complicated single parts or small assemblies)
+            if num_vols > 3 or edge_count > 50000:
+                is_toxic = True
+                reason = f"Toxic 1D: Extreme edge count ({edge_count}) exceeds size-aware limit ({size_aware_limit:.0f})"
+        
+        # 3. Surgical mode override (even more lenient)
+        if self.target_volume_tag is not None:
+             if edge_count < 10000:
+                 is_toxic = False
+             elif edge_count > 100000:
+                 is_toxic = True
+                 reason = f"Toxic 1D (isolated): Absolute limit exceeded ({edge_count} edges)"
+            
+        if is_toxic:
+            self.log_message(f"[!] {reason}")
+        else:
+            self.log_message(f"[OK] 1D Complexity passed ({edge_count} edges)")
+            
+        return {"is_toxic": is_toxic, "reason": reason, "edge_count": edge_count}
+
+    def generate_2d_canary(self, timeout: float = 5.0) -> bool:
+        """
+        Attempt a 2D surface mesh with a strict timeout (Threaded Canary).
+        If 2D meshing stalls, it's a precursor to 3D meshing stalls.
+        """
+        self.log_message(f"Starting 2D Surface Canary (Timeout: {timeout}s)...")
+        
+        success_container = [False]
+        
+        def mesh_task():
+            try:
+                gmsh.model.mesh.generate(2)
+                success_container[0] = True
+            except:
+                pass
+
+        t = threading.Thread(target=mesh_task)
+        t.start()
+        t.join(timeout)
+        
+        if t.is_alive():
+            self.log_message(f"[!] 2D Canary TIMED OUT after {timeout}s - Potential geometric hang.")
+            # Note: We can't easily kill the thread while using the C-api, 
+            # but we can at least signal failure and stop higher-level processing.
+            return False
+            
+        if not success_container[0]:
+            self.log_message("[!] 2D Canary FAILED.")
+            return False
+            
+        self.log_message("[OK] 2D Canary passed.")
+        return True
+
+    def create_bounding_box_mesh(self, output_file: str) -> bool:
+        """
+        Create a simplified bounding box mesh for this part.
+        Used as a robust fallback for "toxic" or failing geometry.
+        """
+        self.log_message("Generating Bounding Box B-Rep Fallback...")
+        
+        try:
+            bb = self.geometry_info.get('bounding_box')
+            if not bb:
+                # Re-calculate if missing
+                volumes = gmsh.model.getEntities(3)
+                bb = self._calculate_bounding_box(volumes)
+                
+            p_min = bb['min']
+            p_max = bb['max']
+            dx = p_max[0] - p_min[0]
+            dy = p_max[1] - p_min[1]
+            dz = p_max[2] - p_min[2]
+            
+            # Re-init Gmsh for a clean model
+            gmsh.model.add("BBox_Fallback")
+            box_tag = gmsh.model.occ.addBox(p_min[0], p_min[1], p_min[2], dx, dy, dz)
+            gmsh.model.occ.synchronize()
+            
+            # Simple coarse mesh
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", max(dx, dy, dz) / 5.0)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max(dx, dy, dz) / 2.0)
+            gmsh.model.mesh.generate(3)
+            
+            gmsh.write(output_file)
+            self.log_message(f"[OK] Bounding box mesh saved to {output_file}")
+            return True
+            
+        except Exception as e:
+            self.log_message(f"[X] Bounding Box fallback failed: {e}")
+            return False
+
     def calculate_initial_mesh_parameters(self) -> Dict[str, float]:
         """Calculate initial mesh parameters based on geometry"""
         diagonal = self.geometry_info.get('diagonal', 1.0)
@@ -835,8 +1083,8 @@ class BaseMeshGenerator(ABC):
 
         # Support both old (cl_min/cl_max) and new (min_size_mm/max_size_mm) parameter names
         # Priority: explicit cl_min/cl_max > min_size_mm/max_size_mm > defaults
-        cl_min = params.get('cl_min') or params.get('min_size_mm', 1.0)
-        cl_max = params.get('cl_max') or params.get('max_size_mm', 10.0)
+        cl_min = params.get('cl_min') or params.get('min_size_mm') or 1.0
+        cl_max = params.get('cl_max') or params.get('max_size_mm') or 10.0
 
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", cl_min)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", cl_max)

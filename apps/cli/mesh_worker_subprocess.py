@@ -16,43 +16,38 @@ import json
 from pathlib import Path
 from typing import Dict
 import time
+import multiprocessing
 
 # Add project root to path FIRST
 # From apps/cli/, go up 2 levels to MeshPackageLean/
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+# Check verbosity early
+IS_VERBOSE = os.environ.get("MESH_VERBOSE", "1") == "1"
+
+# Silence sub-workers to avoid console spam in parallel mode
+if multiprocessing.current_process().name != 'MainProcess':
+    IS_VERBOSE = False
+
+def vprint(*args, **kwargs):
+    if IS_VERBOSE:
+        print(*args, **kwargs)
+
 # ==============================================================================
-# HEAVY IMPORTS - Done at module load to reduce per-call delay
+# HEAVY IMPORTS - Moved to lazy loading in generate_mesh()
 # ==============================================================================
-print("[INIT] Loading NumPy...", flush=True)
+vprint("[INIT] Loading NumPy...", flush=True)
 import numpy as np
 
-print("[INIT] Loading Gmsh...", flush=True)
+vprint("[INIT] Loading Gmsh...", flush=True)
 import gmsh
 
-print("[INIT] Loading strategies...", flush=True)
-from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
-from strategies.hex_dominant_strategy import (
-    HighFidelityDiscretization,
-    ConvexDecomposition
-)
-from strategies.conformal_hex_glue import generate_conformal_hex_mesh
-from strategies.polyhedral_strategy import PolyhedralMeshGenerator
-from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_openfoam_available, check_any_openfoam_available
-from core.config import Config
 import tempfile
+# Strategies and GPU mesher are now imported lazily in generate_mesh()
+# ==============================================================================
 
-# Pre-load GPU mesher if available (this is the main delay)
-print("[INIT] Loading GPU mesher...", flush=True)
-try:
-    from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
-    print(f"[INIT] GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
-except ImportError as e:
-    GPU_AVAILABLE = False
-    print(f"[INIT] GPU mesher not available: {e}", flush=True)
-
-print("[INIT] Ready.", flush=True)
+vprint("[INIT] Ready.", flush=True)
 # ==============================================================================
 
 def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
@@ -72,6 +67,7 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
             temp_stl = hq_stl_path
         else:
             print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...")
+            from strategies.hex_dominant_strategy import HighFidelityDiscretization
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
             
@@ -546,9 +542,19 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
             except:
                 pass
 
+            # Calculate derived metrics (Skewness & AR)
             per_element_skewness = {t: 1.0 - float(per_element_quality.get(t, 0.5)) for t in all_tags}
             per_element_aspect_ratio = {t: 1.0/float(per_element_quality.get(t, 0.5)) if per_element_quality.get(t, 0.5) > 0 else 100.0 for t in all_tags}
             
+            # Helper to calculate stats safely
+            def get_stats(vals):
+                if not vals: return 0.0, 0.0, 0.0
+                v = list(vals.values())
+                return float(min(v)), float(max(v)), float(np.mean(v))
+
+            skew_min, skew_max, skew_avg = get_stats(per_element_skewness)
+            ar_min, ar_max, ar_avg = get_stats(per_element_aspect_ratio)
+
             quality_metrics = {
                 'sicn_min': float(min(sicn_vals)),
                 'sicn_max': float(max(sicn_vals)),
@@ -556,6 +562,12 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
                 'gamma_min': float(min(gamma_vals)),
                 'gamma_max': float(max(gamma_vals)),
                 'gamma_avg': float(np.mean(gamma_vals)),
+                'skewness_min': skew_min,
+                'skewness_max': skew_max,
+                'skewness_avg': skew_avg,
+                'aspect_ratio_min': ar_min,
+                'aspect_ratio_max': ar_max,
+                'aspect_ratio_avg': ar_avg
             }
             
             print(f"[GPU Mesher] Quality - SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}, max={quality_metrics['sicn_max']:.3f}")
@@ -1118,17 +1130,36 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         Dict with success status and results
     """
     try:
+        from core.config import Config
+        
         # Check mesh strategy - more specific checks first
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
+        # =====================================================================
+        # ASSEMBLY DETECTION: Auto-detect multi-volume assemblies
+        # =====================================================================
+        # For tet-based strategies, check if this is an assembly (>3 volumes)
+        # If so, use the optimized assembly pipeline (fail-fast with boxing)
+        is_tet_strategy = any(k in mesh_strategy for k in ['Tet', 'tet', 'Delaunay', 'Exhaustive', '']) or mesh_strategy == ''
+        
+        # [REMOVED] Redundant early assembly check load
+        # Generators (Exhaustive/Assembly) now handle their own detection internally
+        # to avoid loading the CAD file multiple times.
+        
+        # =====================================================================
+        # Continue with standard mesh strategy dispatch
+        # =====================================================================
+        
         if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
+            from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_any_openfoam_available
             # Try OpenFOAM (cfMesh or snappy) first
             if check_any_openfoam_available():
                 print("[DEBUG] OpenFOAM available - using robust hex pipeline")
                 return generate_openfoam_hex_wrapper(cad_file, output_dir, quality_params)
             else:
                 print("[DEBUG] OpenFOAM not available - falling back to experimental CoACD pipeline")
+                from strategies.conformal_hex_glue import generate_conformal_hex_mesh
                 return generate_conformal_hex_test(cad_file, output_dir, quality_params)
         
         # Regular Hex Dominant (subdivision approach)
@@ -1137,6 +1168,13 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
         if 'GPU Delaunay' in mesh_strategy:
+            vprint("[INIT] Loading GPU mesher...", flush=True)
+            try:
+                from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
+                vprint(f"[INIT] GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
+            except Exception as e:
+                return {'success': False, 'error': f'GPU Mesher load failed: {e}'}
+                
             print("[DEBUG] GPU Delaunay strategy detected - using GPU Fill & Filter pipeline")
             return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
             
@@ -1218,6 +1256,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 config.defer_quality = False  # Default to full quality analysis
             print(f"[DEBUG] defer_quality = {config.defer_quality}")
 
+        from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
         generator = ExhaustiveMeshGenerator(config)
 
         # Determine output folders (organized structure)
@@ -1370,6 +1409,19 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                     print(f"[DEBUG] 10th percentile: {sorted_q[idx_10]:.3f}")
                 else:
                     print("[DEBUG WARNING] No element qualities extracted!")
+                
+                # Calculate aggregate Skewness/AR if missing
+                if 'skewness_min' not in quality_metrics and per_element_skewness:
+                    vals = list(per_element_skewness.values())
+                    quality_metrics['skewness_min'] = float(min(vals))
+                    quality_metrics['skewness_max'] = float(max(vals))
+                    quality_metrics['skewness_avg'] = float(np.mean(vals))
+                    
+                if 'aspect_ratio_min' not in quality_metrics and per_element_aspect_ratio:
+                    vals = list(per_element_aspect_ratio.values())
+                    quality_metrics['aspect_ratio_min'] = float(min(vals))
+                    quality_metrics['aspect_ratio_max'] = float(max(vals))
+                    quality_metrics['aspect_ratio_avg'] = float(np.mean(vals))
                 
                 gmsh_reload.finalize()
             except Exception as e:

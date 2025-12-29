@@ -97,6 +97,14 @@ class ModernMeshGenGUI(QMainWindow):
         self.animation_timer.timeout.connect(self.update_animation)
         self.animation_timer.setInterval(400)  # Update every 400ms
 
+        # Initialize worker but don't start
+        self.worker = MeshWorker()
+        
+        # CLEANUP: Kill any zombie processes from previous crashes
+        orphans = self.worker.cleanup_orphans()
+        if orphans > 0:
+            print(f"[GUI] Cleaned up {orphans} orphan processes on startup")
+
         self.worker.signals.log.connect(self.add_log)
         self.worker.signals.progress.connect(self.update_progress)
         self.worker.signals.phase_complete.connect(self.mark_phase_complete)
@@ -534,8 +542,8 @@ class ModernMeshGenGUI(QMainWindow):
         element_order_label = QLabel("Element Type:")
         element_order_label.setStyleSheet("color: black; font-size: 11px; font-weight: bold;")
         self.element_order = NoScrollComboBox()
-        self.element_order.addItems(["Tet10 (Quadratic)", "Tet4 (Linear)"])
-        self.element_order.setCurrentIndex(0)  # Default to Tet10
+        self.element_order.addItems(["Tet4 (Linear)", "Tet10 (Quadratic)"])
+        self.element_order.setCurrentIndex(0)  # Default to Tet4
         self.element_order.setStyleSheet("color: black; font-size: 11px;")
         self.element_order.setToolTip(
             "Tet10: 10-node quadratic tetrahedra (higher accuracy, more nodes)\n"
@@ -565,6 +573,17 @@ class ModernMeshGenGUI(QMainWindow):
         )
         self.aggressive_healing.setChecked(False)  # Default off for speed
         quality_layout.addWidget(self.aggressive_healing)
+        
+        # CAD Preview Verbose Logging checkbox
+        self.verbose_preview = QCheckBox("Show CAD Preview Logs")
+        self.verbose_preview.setStyleSheet("color: black; font-size: 11px;")
+        self.verbose_preview.setToolTip(
+            "Show detailed tessellation logs when loading CAD files for preview.\n"
+            "Disable for cleaner console output."
+        )
+        self.verbose_preview.setChecked(True)  # Default ON
+        self.verbose_preview.stateChanged.connect(self.on_verbose_preview_changed)
+        quality_layout.addWidget(self.verbose_preview)
 
         # === EXHAUSTIVE STRATEGY CONTROLS (initially hidden) ===
         self.exhaustive_controls = QWidget()
@@ -1588,8 +1607,7 @@ class ModernMeshGenGUI(QMainWindow):
                 'max_size': self.max_size.value() if hasattr(self, 'max_size') else 100,
                 'curvature_adaptive': self.curvature_adaptive.isChecked() if hasattr(self, 'curvature_adaptive') else False,
                 'defer_quality': self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
-                'element_order': self.element_order.currentText() if hasattr(self, 'element_order') else 'Tet10 (Quadratic)',
-                'element_order': self.element_order.currentText() if hasattr(self, 'element_order') else 'Tet10 (Quadratic)',
+                'element_order': self.element_order.currentText() if hasattr(self, 'element_order') else 'Tet4 (Linear)',
                 'strategy_order': [],
             }
             
@@ -1926,6 +1944,13 @@ class ModernMeshGenGUI(QMainWindow):
             if not is_gpu:
                 self.fast_mode.setChecked(False)
     
+    def on_verbose_preview_changed(self, state):
+        """Toggle verbose CAD preview logging"""
+        import apps.desktop.gui_app.vtk_viewer as vtk_viewer_module
+        vtk_viewer_module.VERBOSE_PREVIEW = (state == 2)  # 2 = Qt.Checked
+        status = "enabled" if state == 2 else "disabled"
+        self.add_log(f"[Settings] CAD preview logging {status}")
+    
     def on_score_threshold_changed(self, value):
         """Update score threshold label"""
         if hasattr(self, 'threshold_value_label'):
@@ -1948,45 +1973,67 @@ class ModernMeshGenGUI(QMainWindow):
 
 
     def load_cad_file(self):
-        # Kill any running mesh generation workers before loading new CAD
-        if self.worker and self.worker.is_running:
-            self.add_log("Stopping previous mesh generation...")
-            self.worker.stop()
-            self.add_log("[OK] Previous mesh generation stopped")
-
-        # Reset UI state (progress bars, completed stages, etc.)
-        self.reset_progress_bars()
-
-        # Clear cached iteration data
-        self.iteration_meshes = []
-        self.current_iteration = 0
-
         # Use cad_files folder as default
         default_dir = str(Path(__file__).parent / "cad_files")
         if not Path(default_dir).exists():
             default_dir = str(Path.home())
 
+        # Define comprehensive filters
+        filters = (
+            "All Compatible Files (*.step *.stp *.x_t *.x_b *.sldprt *.sldasm *.prt *.stl *.obj *.ply *.msh *.vtu *.vtk);;"
+            "CAD Files (*.step *.stp *.x_t *.x_b);;"
+            "SolidWorks Files (*.sldprt *.sldasm *.prt);;"
+            "Surface Meshes (*.stl *.obj *.ply);;"
+            "Volumetric Meshes (*.msh *.vtu *.vtk);;"
+            "All Files (*)"
+        )
+
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "Select CAD or Mesh File", default_dir,
-            "CAD Files (*.step *.stp *.stl);;Mesh Files (*.msh);;All Files (*)"
+            self, "Select CAD or Mesh File", default_dir, filters
         )
 
         if filepath:
+            # Kill running workers ONLY if it's a NEW file
+            # If user selects same file, let previous generation (if any) continue
+            is_new_file = filepath != self.cad_file
+            if is_new_file and self.worker and self.worker.is_running:
+                self.add_log(f"New file selected ({Path(filepath).name}). Stopping previous mesh generation...")
+                self.worker.stop(force=True) # Use force for new file loads
+                self.add_log("[OK] Previous mesh generation stopped")
+
+            # Only reset UI state if we are NOT currently meshing
+            # This prevents the progress bars from being wiped when the CAD preview finishes
+            if not self.worker.is_running:
+                self.reset_progress_bars()
+                # Clear cached iteration data
+                self.iteration_meshes = []
+                self.current_iteration = 0
+
             file_ext = Path(filepath).suffix.lower()
 
-            # Check if it's a mesh file (MSH, STL, VTU)
-            if file_ext in ['.msh', '.stl', '.vtu']:
+            # Check if it's a mesh file (MSH, STL, VTU, etc.)
+            if file_ext in ['.msh', '.stl', '.vtu', '.vtk', '.ply', '.obj']:
                 # Load mesh directly
-                self.cad_file = None  # No CAD file
+                
+                # For surface meshes (STL/OBJ/PLY), treat as CAD file to allow remeshing
+                if file_ext in ['.stl', '.obj', '.ply']:
+                    self.cad_file = filepath
+                    self.generate_btn.setEnabled(True)
+                else:
+                    self.cad_file = None
+                    self.generate_btn.setEnabled(False)
+                    
                 self.file_label.setText(f"{Path(filepath).name}")
-                self.generate_btn.setEnabled(False)  # Can't generate from mesh
                 self.add_log(f"Loaded mesh: {filepath}")
 
                 # Clear iterations
                 self.viewer.clear_iterations()
 
                 # Load the mesh file directly through the viewer
-                self.viewer.load_mesh_file(filepath)
+                try:
+                    self.viewer.load_mesh_file(filepath)
+                except Exception as e:
+                    self.add_log(f"Error loading mesh display: {e}")
                 
                 # Show post-processing UI sections (quality visualization and cross-section)
                 if hasattr(self, 'crosssection_group'):
@@ -2005,14 +2052,17 @@ class ModernMeshGenGUI(QMainWindow):
             # Clear any existing AI iteration meshes
             self.viewer.clear_iterations()
 
-            # Load CAD and get geometry info (ASYNC now)
-            self.add_log(f"[DEBUG] Calling viewer.load_step_file({filepath})")
-            self.viewer.load_step_file(filepath)
-            self.add_log(f"[DEBUG] Async load started - waiting for preview...")
-            # Logic continues in on_cad_loaded callback
+            # Load CAD and get geometry info
+            self.add_log(f"Processing CAD preview for {Path(filepath).name}...")
+            geom_info = self.viewer.load_step_file(filepath)
+            self.on_cad_loaded(geom_info)
 
     def on_cad_loaded(self, geom_info: dict):
         """Callback when VTK viewer finishes Stage 1 (preview) loading"""
+        if not geom_info:
+            self.add_log("[!] CAD preview failed - geometry invalid or empty")
+            return
+
         self.add_log(f"[DEBUG] CAD preview ready. Info: {geom_info}")
         self.current_geom_info = geom_info
         
@@ -2177,6 +2227,7 @@ class ModernMeshGenGUI(QMainWindow):
             "element_order": 2 if hasattr(self, 'element_order') and "Tet10" in self.element_order.currentText() else 1,
             "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
             "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
+            "verbose_preview": self.verbose_preview.isChecked() if hasattr(self, 'verbose_preview') else False,  # Logging toggle
         }
 
         # Check for pre-generated high-quality STL from Stage 3 background task
@@ -2224,11 +2275,11 @@ class ModernMeshGenGUI(QMainWindow):
         self.worker.start(self.cad_file, quality_params)
 
     def stop_mesh_generation(self):
-        """Stop the currently running mesh generation"""
+        """Stop the currently running mesh generation (forceful)"""
         if self.worker and self.worker.is_running:
-            self.add_log("\n[!] Stopping mesh generation...")
-            self.worker.stop()
-            self.add_log("[OK] Mesh generation stopped by user")
+            self.add_log("\n[!] Stopping mesh generation (forceful)...")
+            self.worker.stop(force=True)
+            self.add_log("[OK] Mesh generation killed by user")
 
             # Re-enable generate button, disable stop button
             self.generate_btn.setEnabled(True)
@@ -2400,6 +2451,28 @@ class ModernMeshGenGUI(QMainWindow):
         if not hasattr(self, '_last_cad_pct') or pct >= self._last_cad_pct + 10 or pct < self._last_cad_pct:
             self.add_log(f"[CAD] {operation}: {pct}%")
             self._last_cad_pct = pct
+
+    def closeEvent(self, event):
+        """Handle application closure with proper cleanup"""
+        print("[GUI] Closing application - cleaning up processes...")
+        
+        # Stop mesh worker and its children
+        if hasattr(self, 'worker') and self.worker:
+            if self.worker.is_running:
+                print("[GUI] Stopping active mesh worker...")
+                self.worker.stop(force=True)
+        
+        # Stop preview worker
+        if hasattr(self, 'viewer') and hasattr(self.viewer, 'preview_worker'):
+            if self.viewer.preview_worker and self.viewer.preview_worker.isRunning():
+                print("[GUI] Stopping preview worker...")
+                try:
+                    self.viewer.preview_worker.terminate()
+                    self.viewer.preview_worker.wait(1000)
+                except:
+                    pass
+
+        event.accept()
 
     def update_progress(self, phase: str, percentage: int):
         """Update progress bars and track master progress"""

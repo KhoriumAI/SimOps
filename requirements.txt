@@ -1,34 +1,91 @@
-# Core mesh generation
+# Khorium Mesh Package Requirements
+# Python Version: 3.11
+#
+# NOTE: This file contains dependencies for multiple components:
+#   - Local Development: Mesh generation, GUIs, and development tools
+#   - AWS Backend: Flask API server (deployed separately on AWS)
+#   - Optional: Streamlit web app, GPU acceleration
+
+# ============================================================================
+# LOCAL DEVELOPMENT REQUIREMENTS
+# ============================================================================
+
+# --- Core Mesh Generation ---
 gmsh>=4.11.0
 numpy>=1.24.0
 scipy>=1.10.0
 
-# GUI
-PyQt5>=5.15.0
-vtk>=9.2.0
-pyvista>=0.40.0
+# --- GUI Applications & Visualization ---
+PyQt5>=5.15.0          # Desktop GUI (main.py)
+PyQt6>=6.4.0           # Montage GUI (montage_gui.py)
+vtk>=9.2.0             # 3D visualization backend
+pyvista>=0.40.0        # High-level VTK wrapper
+qtrangeslider>=0.3.0   # Custom slider widget
 
-# CAD file support (optional but recommended for STEP file preview)
-pythonocc-core>=7.7.0
+# --- CAD File Support & Mesh I/O ---
+pythonocc-core>=7.7.0  # STEP/IGES CAD file loading
+meshio>=5.3.4          # Mesh format conversion (ANSYS export)
+trimesh>=3.22.0        # Mesh processing utilities
+coacd>=1.0.0           # Convex decomposition for hex meshing
+pymesh2>=0.3.0         # Mesh repair and generation
+tetgen>=0.6.0          # Alternative tetrahedral mesher
 
-# GPU acceleration (optional - requires NVIDIA GPU + CUDA)
-cupy-cuda12x>=12.0.0  # Use cupy-cuda11x for CUDA 11
+# --- Utilities ---
+psutil>=5.9.0          # System resource monitoring
+requests>=2.31.0       # HTTP requests
+python-dotenv>=1.0.0   # Environment variable management
+func_timeout>=4.3.5    # Timeout wrapper for robust parallel meshing
 
-# Utilities
-requests>=2.28.0
-psutil>=5.9.0
-email-validator>=2.0.0  # Email validation for auth
+# --- AI Integration (Optional) ---
+anthropic>=0.8.0       # AI Chat for GUI (optional feature)
 
-# Advanced features (optional)
-pymesh2>=0.3.0  # Mesh repair and generation
-tetgen>=0.6.0   # Alternative tetrahedral mesher
+# --- Development & Testing ---
+pytest>=7.4.0          # Testing framework
+black>=23.7.0          # Code formatting
 
-# Development tools (optional)
-pytest>=7.2.0
-black>=23.0.0
-trimesh>=3.20.0
-coacd>=1.0.0
+# ============================================================================
+# AWS BACKEND REQUIREMENTS (Not needed for local mesh generation)
+# ============================================================================
 
-# External Dependencies (System Level)
+# --- Web Framework & API ---
+flask>=3.0.0
+flask-cors>=4.0.0
+flask-jwt-extended>=4.5.3
+flask-socketio>=5.3.6
+werkzeug>=3.0.0
+gunicorn>=21.2.0       # Production WSGI server
+eventlet>=0.33.3       # Async support for SocketIO
+
+# --- Database & ORM ---
+sqlalchemy>=2.0.0
+Flask-SQLAlchemy>=3.1.1
+psycopg2-binary>=2.9.9  # PostgreSQL adapter
+marshmallow>=3.20.1     # Serialization/validation
+
+# --- Authentication ---
+bcrypt>=4.0.1
+email-validator>=2.0.0
+
+# --- Task Queue & Caching ---
+celery>=5.3.4          # Distributed task queue
+redis>=5.0.1           # Message broker & result backend
+
+# --- Cloud Storage ---
+boto3>=1.28.0          # AWS S3 integration
+
+# ============================================================================
+# OPTIONAL COMPONENTS
+# ============================================================================
+
+# --- GPU Acceleration (requires NVIDIA GPU + CUDA 12) ---
+# cupy-cuda12x>=12.0.0  # Uncomment if using CUDA
+
+# --- Streamlit Web App (Optional) ---
+# streamlit>=1.28.0
+# plotly>=5.17.0
+
+# ============================================================================
+# EXTERNAL SYSTEM DEPENDENCIES (Not Python packages)
+# ============================================================================
 # - OpenFOAM v2006+ (via WSL2 on Windows) for Hex-Dominant Meshing
 # - WSL2 for Windows users

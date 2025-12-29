@@ -12,6 +12,7 @@ import subprocess
 import threading
 import tempfile
 import re
+import psutil  # For process tree termination
 from pathlib import Path
 from multiprocessing import cpu_count
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
@@ -261,6 +262,12 @@ class MeshWorker:
             if quality_params and "worker_count" in quality_params:
                 env["MESH_MAX_WORKERS"] = str(quality_params["worker_count"])
                 self.signals.log.emit(f"[DEBUG] Set MESH_MAX_WORKERS={quality_params['worker_count']}")
+            
+            # Pass verbosity flag to subprocess
+            if quality_params and "verbose_preview" in quality_params:
+                env["MESH_VERBOSE"] = "1" if quality_params["verbose_preview"] else "0"
+                if quality_params["verbose_preview"]:
+                    self.signals.log.emit("[DEBUG] Verbose logging enabled for background process")
                 
             self.signals.log.emit(f"[DEBUG] PYTHONPATH set to: {env['PYTHONPATH']}")
 
@@ -290,29 +297,88 @@ class MeshWorker:
             self.signals.finished.emit(False, {"error": str(e)})
         finally:
             self.is_running = False
-            # Clean up temp config file
-            if self.temp_config_file and os.path.exists(self.temp_config_file):
+            # Cleanup is now handled by the stop method, which is called on completion or explicit stop.
+            # We only need to ensure self.is_running is false here.
+
+    def stop(self, force=False):
+        """Stop the mesh generation process and all child processes"""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        
+        if self.process:
+            try:
+                # Use psutil to kill entire process tree
+                parent = psutil.Process(self.process.pid)
+                children = parent.children(recursive=True)
+                
+                # Kill children first (assembly workers, gmsh, etc.)
+                for child in children:
+                    try:
+                        child.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # Kill parent (mesh_worker_subprocess.py)
                 try:
-                    os.remove(self.temp_config_file)
+                    parent.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                
+                # Wait briefly for cleanup
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                # Fallback to standard termination
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=1)
                 except:
                     pass
-
-    def stop(self):
-        """Stop the running mesh generation subprocess"""
-        if self.process and self.process.poll() is None:
-            # Process is still running
+        
+        # Clean up temp config file
+        if self.temp_config_file and os.path.exists(self.temp_config_file):
             try:
-                # Try graceful termination first
-                self.process.terminate()
+                os.remove(self.temp_config_file)
+            except:
+                pass
+    
+    @staticmethod
+    def cleanup_orphans():
+        """Kill orphaned mesh worker processes from previous sessions"""
+        killed_count = 0
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
-                    self.process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    # Force kill if still running after 3 seconds
-                    self.process.kill()
-                    self.process.wait()
-            except Exception as e:
-                pass  # Best effort
-        self.is_running = False
+                    cmdline = proc.info.get('cmdline', [])
+                    if cmdline and 'mesh_worker_subprocess.py' in ' '.join(cmdline):
+                        # This is an orphaned worker - kill it and all children
+                        parent = psutil.Process(proc.info['pid'])
+                        children = parent.children(recursive=True)
+                        
+                        for child in children:
+                            try:
+                                child.kill()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        
+                        try:
+                            parent.kill()
+                            killed_count += 1
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception as e:
+            print(f"[CLEANUP] Error during orphan cleanup: {e}")
+        
+        if killed_count > 0:
+            print(f"[CLEANUP] Killed {killed_count} orphaned worker process(es)")
+        return killed_count
 
 
 class QualityAnalysisWorker(QThread):

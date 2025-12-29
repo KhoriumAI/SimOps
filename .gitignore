@@ -86,3 +86,27 @@ test_*.py
 reproduce_*.py
 fix_*.py
 *_working.py
+!scripts/test_core_meshing.py
+
+# Large Binary Artifacts (Manual Exclusions)
+*.cgns
+*.bdf
+*.brep
+*_soup.stl
+fused_*.stl
+dirty_*.stl
+temp_*.stl
+temp_stls/
+robust_mesh*.msh
+final_assembly_*.msh
+final_assembly_*.vtk
+shell_connectivity_mesh.vtk
+voxel_mesh.vtk
+
+# Job Logs
+jobs_log/*.log*
+*.log.processing
+
+# Working copies and backups
+*_working.py
+*.backup_*

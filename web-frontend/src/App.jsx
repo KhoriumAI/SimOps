@@ -5,6 +5,7 @@ import FileUpload from './components/FileUpload'
 import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
+import BlockingModal from './components/BlockingModal'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File } from 'lucide-react'
 
 // API base URL - uses proxy in development, full URL in production
@@ -26,14 +27,14 @@ function App() {
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [meshProgress, setMeshProgress] = useState({
-    strategy: 0, '1d': 0, '2d': 0, '3d': 0, 
+    strategy: 0, '1d': 0, '2d': 0, '3d': 0,
     optimize: 0, netgen: 0, order2: 0, quality: 0
   })
   const [consoleOpen, setConsoleOpen] = useState(true)
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
-  
+
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
 
@@ -70,10 +71,10 @@ function App() {
       try {
         const response = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
         if (!response.ok) return
-        
+
         const data = await response.json()
         setProjectStatus(data)
-        
+
         // Only update logs from server if there are actual generation logs
         // This preserves client-side logs (CAD preview info) when not processing
         const serverLogs = data.latest_result?.logs || []
@@ -97,7 +98,7 @@ function App() {
         if (data.status === 'completed') {
           // Always fetch final mesh when completed (replaces preview)
           if (!meshData || meshData.isPreview) {
-          fetchMeshData(currentProject)
+            fetchMeshData(currentProject)
           }
           // Save mesh duration
           if (meshStartTime) {
@@ -131,48 +132,48 @@ function App() {
   const parseProgressFromLogs = (logs) => {
     const logsText = logs.join('\n').toLowerCase()
     const progress = { ...meshProgress }
-    
+
     // Strategy progress (parallel race)
     if (logsText.includes('exhaustive mesh generation') || logsText.includes('parallel race')) {
       progress.strategy = Math.min(100, progress.strategy + 5)
     }
     if (logsText.includes('winner')) progress.strategy = 100
-    
+
     // 1D meshing
     if (logsText.includes('1d mesh') || logsText.includes('meshing 1d')) {
       progress['1d'] = logsText.includes('done') ? 100 : 50
     }
-    
+
     // 2D meshing
     if (logsText.includes('2d mesh') || logsText.includes('meshing 2d') || logsText.includes('surface mesh')) {
       progress['2d'] = logsText.includes('done') ? 100 : 50
     }
-    
+
     // 3D meshing
     if (logsText.includes('3d mesh') || logsText.includes('meshing 3d') || logsText.includes('volume mesh') || logsText.includes('tetrahedr')) {
       progress['3d'] = logsText.includes('done') || logsText.includes('complete') ? 100 : 50
     }
-    
+
     // Optimization
     if (logsText.includes('optim')) {
       progress.optimize = logsText.includes('done') || logsText.includes('complete') ? 100 : 50
     }
-    
+
     // Netgen
     if (logsText.includes('netgen')) {
       progress.netgen = logsText.includes('done') ? 100 : 50
     }
-    
+
     // Order 2 / High order
     if (logsText.includes('order 2') || logsText.includes('high order') || logsText.includes('second order')) {
       progress.order2 = logsText.includes('done') ? 100 : 50
     }
-    
+
     // Quality check
     if (logsText.includes('quality') || logsText.includes('sicn')) {
       progress.quality = logsText.includes('done') || logsText.includes('report') ? 100 : 50
     }
-    
+
     setMeshProgress(progress)
   }
 
@@ -180,8 +181,8 @@ function App() {
     try {
       const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
       if (response.ok) {
-      const data = await response.json()
-      setMeshData(data)
+        const data = await response.json()
+        setMeshData(data)
       }
     } catch (error) {
       console.error('Failed to fetch mesh data:', error)
@@ -193,7 +194,7 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${projectId}/preview`)
       if (response.ok) {
         const data = await response.json()
-        
+
         // Check if the backend returned an error
         if (data.error) {
           console.warn('CAD preview error:', data.error)
@@ -207,18 +208,18 @@ function App() {
           setMeshData({ vertices: [], colors: [], numVertices: 0, numTriangles: 0, isPreview: true })
           return
         }
-        
+
         setMeshData(data)
-        
+
         // Extract geometry info for display
         if (data.geometry) {
           setGeometryInfo(data.geometry)
-          
+
           // Update logs with CAD geometry info
           const geo = data.geometry
           const volume = geo.total_volume > 0 ? geo.total_volume.toFixed(6) : 'N/A'
           const bboxStr = geo.bbox ? `${geo.bbox[0].toFixed(1)} x ${geo.bbox[1].toFixed(1)} x ${geo.bbox[2].toFixed(1)}` : 'N/A'
-          
+
           setLogs(prev => [
             ...prev,
             `[INFO] Loaded CAD: ${filename}`,
@@ -265,11 +266,17 @@ function App() {
         setUploadProgress(prev => Math.min(prev + 10, 90))
       }, 200)
 
+      // Upload with 30-minute timeout for large files
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 1800000) // 30 minutes
+
       const response = await authFetch(`${API_BASE}/upload`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        signal: controller.signal
       })
 
+      clearTimeout(timeoutId)
       clearInterval(progressInterval)
 
       if (!response.ok) {
@@ -286,7 +293,7 @@ function App() {
       setProjectStatus(data)
       setLogs([`[INFO] Uploaded ${file.name}`, `[INFO] Loading CAD preview...`])
       setIsPolling(false)
-      
+
       // Fetch CAD preview to show geometry before meshing
       await fetchCadPreview(data.project_id, file.name)
       setIsUploading(false)
@@ -295,7 +302,12 @@ function App() {
       console.error('Upload failed:', error)
       setIsUploading(false)
       setUploadProgress(0)
-      alert('Failed to upload file')
+
+      if (error.name === 'AbortError') {
+        alert('Upload timed out. File may be too large or server is taking too long to respond. Please try again.')
+      } else {
+        alert('Failed to upload file')
+      }
     }
   }
 
@@ -303,16 +315,23 @@ function App() {
     if (!currentProject) return
 
     try {
+      // Mesh generation with 30-minute timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 1800000) // 30 minutes
+
       const response = await authFetch(`${API_BASE}/projects/${currentProject}/generate`, {
         method: 'POST',
-        body: { 
+        body: {
           quality_preset: qualityPreset,
           target_elements: targetElements,
           max_element_size: maxElementSize,
           mesh_strategy: meshStrategy,
           curvature_adaptive: curvatureAdaptive
-        }
+        },
+        signal: controller.signal
       })
+
+      clearTimeout(timeoutId)
 
       if (response.ok) {
         setIsPolling(true)
@@ -339,7 +358,7 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${currentProject}/download`)
       if (response.ok) {
         const contentType = response.headers.get('content-type')
-        
+
         // Check if response is JSON (S3 presigned URL) or binary (local file)
         if (contentType && contentType.includes('application/json')) {
           // S3 presigned URL response
@@ -398,43 +417,41 @@ function App() {
             <img src="/img/Khorium_logo.jpg" alt="Khorium" className="h-6 w-auto" />
             <span className="font-semibold text-sm">MeshGen</span>
           </div>
-          
+
           {/* Mode Toggle */}
           <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
             <button
               onClick={() => setMode('single')}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                mode === 'single'
-                  ? 'bg-white text-blue-600 shadow-sm'
-                  : 'text-gray-600 hover:text-gray-800'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${mode === 'single'
+                ? 'bg-white text-blue-600 shadow-sm'
+                : 'text-gray-600 hover:text-gray-800'
+                }`}
             >
               <File className="w-3.5 h-3.5" />
               Single
             </button>
             <button
               onClick={() => setMode('batch')}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                mode === 'batch'
-                  ? 'bg-white text-blue-600 shadow-sm'
-                  : 'text-gray-600 hover:text-gray-800'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${mode === 'batch'
+                ? 'bg-white text-blue-600 shadow-sm'
+                : 'text-gray-600 hover:text-gray-800'
+                }`}
             >
               <Layers className="w-3.5 h-3.5" />
               Batch
             </button>
           </div>
         </div>
-        
+
         {/* Center toolbar */}
         <div className="flex items-center gap-3">
           {/* Real-time Timer */}
           {(isGenerating || lastMeshDuration) && (
             <div className="flex items-center gap-2">
               {isGenerating ? (
-                <MeshTimerCompact 
-                  isRunning={isGenerating} 
-                  startTime={meshStartTime} 
+                <MeshTimerCompact
+                  isRunning={isGenerating}
+                  startTime={meshStartTime}
                   status={projectStatus?.status}
                 />
               ) : lastMeshDuration ? (
@@ -445,7 +462,7 @@ function App() {
               ) : null}
             </div>
           )}
-          
+
           {canDownload && (
             <button
               onClick={handleDownload}
@@ -456,7 +473,7 @@ function App() {
             </button>
           )}
         </div>
-        
+
         {/* Right side - user */}
         <div className="flex items-center gap-2 text-xs text-gray-600">
           <User className="w-3.5 h-3.5" />
@@ -475,10 +492,10 @@ function App() {
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Responsive Sidebar */}
         <div className={`${mode === 'batch' ? 'w-80 xl:w-96 min-w-[280px]' : 'w-56 min-w-[200px]'} max-w-[40vw] border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300 flex-shrink-0`}>
-          
+
           {/* Batch Mode */}
           {mode === 'batch' ? (
-            <BatchMode 
+            <BatchMode
               onBatchComplete={(batch) => {
                 console.log('Batch completed:', batch)
                 setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
@@ -520,141 +537,141 @@ function App() {
               }}
             />
           ) : (
-          /* Single File Mode */
-          <div className="p-3 space-y-3">
-            {/* File Upload - Compact */}
-            <FileUpload onFileUpload={handleFileUpload} />
+            /* Single File Mode */
+            <div className="p-3 space-y-3">
+              {/* File Upload - Compact */}
+              <FileUpload onFileUpload={handleFileUpload} />
 
-            {/* Mesh Settings - Collapsible style */}
-            <div className="bg-white rounded-lg border border-gray-200 text-sm">
-              <div className="px-3 py-2 bg-gray-100 font-medium text-gray-700 border-b border-gray-200">
-                Mesh Settings
-              </div>
-              <div className="p-3 space-y-2.5">
-                <div>
-                  <label className="text-gray-500 text-[10px] uppercase mb-1 block">Preset</label>
-                  <select
-                    value={qualityPreset}
-                    onChange={(e) => setQualityPreset(e.target.value)}
-                    className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    disabled={isGenerating}
-                  >
-                    {qualityPresets.map(p => <option key={p} value={p}>{p}</option>)}
-                  </select>
+              {/* Mesh Settings - Collapsible style */}
+              <div className="bg-white rounded-lg border border-gray-200 text-sm">
+                <div className="px-3 py-2 bg-gray-100 font-medium text-gray-700 border-b border-gray-200">
+                  Mesh Settings
                 </div>
-                
-                <div className="grid grid-cols-2 gap-2">
+                <div className="p-3 space-y-2.5">
                   <div>
-                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
-                    <input
-                      type="number"
-                      value={targetElements}
-                      onChange={(e) => setTargetElements(parseInt(e.target.value) || 2000)}
+                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Preset</label>
+                    <select
+                      value={qualityPreset}
+                      onChange={(e) => setQualityPreset(e.target.value)}
                       className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                       disabled={isGenerating}
-                    />
+                    >
+                      {qualityPresets.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
                   </div>
-                  <div>
-                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Max Size</label>
-                    <div className="relative">
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
                       <input
                         type="number"
-                        step="0.1"
-                        value={maxElementSize}
-                        onChange={(e) => setMaxElementSize(parseFloat(e.target.value) || 3.0)}
-                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        value={targetElements}
+                        onChange={(e) => setTargetElements(parseInt(e.target.value) || 2000)}
+                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                         disabled={isGenerating}
                       />
-                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                     </div>
-                  </div>
-                </div>
-                
-                <div>
-                  <label className="text-gray-500 text-[10px] uppercase mb-1 block">Strategy</label>
-                  <select
-                    value={meshStrategy}
-                    onChange={(e) => setMeshStrategy(e.target.value)}
-                    className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    disabled={isGenerating}
-                  >
-                    {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-                
-                <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                  <input
-                    type="checkbox"
-                    checked={curvatureAdaptive}
-                    onChange={(e) => setCurvatureAdaptive(e.target.checked)}
-                    className="accent-blue-500"
-                    disabled={isGenerating}
-                  />
-                  Curvature-Adaptive
-                </label>
-              </div>
-            </div>
-
-            {/* Generate Button */}
-            {currentProject && (
-              <div className="space-y-2">
-              <button
-                onClick={handleGenerateMesh}
-                disabled={!canGenerate || isGenerating}
-                  className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${canGenerate && !isGenerating
-                    ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  }`}
-              >
-                {isGenerating ? 'Generating...' : 'Generate Mesh'}
-              </button>
-
-                {isGenerating && (
-                        <button
-                    onClick={() => setIsPolling(false)}
-                    className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500 hover:bg-red-600 text-white transition-colors flex items-center justify-center gap-1"
-                  >
-                    <Square className="w-3 h-3 fill-current" />
-                    Stop
-                        </button>
-                )}
-              </div>
-            )}
-
-            {/* Progress - Only when generating */}
-            {isGenerating && (
-              <div className="bg-white rounded border border-gray-200 p-2 text-xs">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium text-gray-700">Progress</span>
-                  <MeshTimer 
-                    isRunning={isGenerating} 
-                    startTime={meshStartTime} 
-                    status={projectStatus?.status}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  {[
-                    { key: 'strategy', label: 'Strategy' },
-                    { key: '1d', label: '1D' },
-                    { key: '2d', label: '2D' },
-                    { key: '3d', label: '3D' },
-                    { key: 'optimize', label: 'Optimize' },
-                    { key: 'quality', label: 'Quality' }
-                  ].map(({ key, label }) => (
-                    <div key={key} className="flex items-center gap-2">
-                      <span className="w-14 text-gray-500">{label}</span>
-                      <div className="flex-1 bg-gray-200 rounded-full h-1.5">
-                        <div
-                          className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
-                          style={{ width: `${meshProgress[key]}%` }}
+                    <div>
+                      <label className="text-gray-500 text-[10px] uppercase mb-1 block">Max Size</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={maxElementSize}
+                          onChange={(e) => setMaxElementSize(parseFloat(e.target.value) || 3.0)}
+                          className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          disabled={isGenerating}
                         />
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
                     </div>
-                  ))}
+                  </div>
+
+                  <div>
+                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Strategy</label>
+                    <select
+                      value={meshStrategy}
+                      onChange={(e) => setMeshStrategy(e.target.value)}
+                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      disabled={isGenerating}
+                    >
+                      {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
+                    <input
+                      type="checkbox"
+                      checked={curvatureAdaptive}
+                      onChange={(e) => setCurvatureAdaptive(e.target.checked)}
+                      className="accent-blue-500"
+                      disabled={isGenerating}
+                    />
+                    Curvature-Adaptive
+                  </label>
                 </div>
               </div>
-            )}
-          </div>
+
+              {/* Generate Button */}
+              {currentProject && (
+                <div className="space-y-2">
+                  <button
+                    onClick={handleGenerateMesh}
+                    disabled={!canGenerate || isGenerating}
+                    className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${canGenerate && !isGenerating
+                      ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      }`}
+                  >
+                    {isGenerating ? 'Generating...' : 'Generate Mesh'}
+                  </button>
+
+                  {isGenerating && (
+                    <button
+                      onClick={() => setIsPolling(false)}
+                      className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500 hover:bg-red-600 text-white transition-colors flex items-center justify-center gap-1"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                      Stop
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Progress - Only when generating */}
+              {isGenerating && (
+                <div className="bg-white rounded border border-gray-200 p-2 text-xs">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium text-gray-700">Progress</span>
+                    <MeshTimer
+                      isRunning={isGenerating}
+                      startTime={meshStartTime}
+                      status={projectStatus?.status}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    {[
+                      { key: 'strategy', label: 'Strategy' },
+                      { key: '1d', label: '1D' },
+                      { key: '2d', label: '2D' },
+                      { key: '3d', label: '3D' },
+                      { key: 'optimize', label: 'Optimize' },
+                      { key: 'quality', label: 'Quality' }
+                    ].map(({ key, label }) => (
+                      <div key={key} className="flex items-center gap-2">
+                        <span className="w-14 text-gray-500">{label}</span>
+                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                          <div
+                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                            style={{ width: `${meshProgress[key]}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -672,19 +689,19 @@ function App() {
               loadingProgress={isUploading ? uploadProgress : undefined}
               loadingMessage={
                 isLoadingPreview ? 'Loading CAD Preview...' :
-                isUploading ? 'Uploading & Processing CAD file...' : 
-                (projectStatus?.status === 'processing' ? 'Generating Mesh...' : undefined)
+                  isUploading ? 'Uploading & Processing CAD file...' :
+                    (projectStatus?.status === 'processing' ? 'Generating Mesh...' : undefined)
               }
             />
           </div>
-          
+
           {/* Console at bottom of center area - Collapsible */}
           <div className={`border-t border-gray-600 bg-gray-900 flex flex-col transition-all duration-300 ${consoleOpen ? 'h-56' : 'h-8'}`}>
             {/* Console Header - Always visible */}
-            <div 
+            <div
               className="h-8 flex items-center justify-between px-3 bg-gray-800 cursor-pointer hover:bg-gray-700 transition-colors flex-shrink-0"
             >
-              <div 
+              <div
                 className="flex items-center gap-2 text-gray-300 text-xs flex-1"
                 onClick={() => setConsoleOpen(!consoleOpen)}
               >
@@ -693,7 +710,7 @@ function App() {
                 <span className="text-gray-500">({logs.length} messages)</span>
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
-              <button 
+              <button
                 onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(logs.join('\n')); }}
                 className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
                 title="Copy logs"
@@ -702,7 +719,7 @@ function App() {
                 Copy
               </button>
             </div>
-            
+
             {/* Console Content - Only when open */}
             {consoleOpen && (
               <div className="flex-1 overflow-hidden">
@@ -712,6 +729,18 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Blocking Modal - Prevents user interaction during critical operations */}
+      <BlockingModal
+        isOpen={isUploading || isGenerating}
+        title={isUploading ? 'Uploading File...' : 'Generating Mesh...'}
+        message={
+          isUploading
+            ? 'Processing your CAD file. This may take a few minutes for large files.'
+            : 'Meshing geometry. This can take up to 2 minutes for complex models.'
+        }
+        subMessage="⚠️ Please do not refresh or close this page. The process is running on the server."
+      />
     </div>
   )
 }

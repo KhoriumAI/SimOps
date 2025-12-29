@@ -28,6 +28,12 @@ import sys
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import subprocess
+import concurrent.futures
+import glob
+
+# Project Structure Constants
+PROJECT_ROOT = str(Path(__file__).parent.parent)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -98,7 +104,7 @@ def run_strategy_wrapper(args):
             # Load the file
             if not generator.load_cad_file(input_file):
                 return (strategy_name, False, {}, "Failed to load CAD file")
-                
+
             # Find the strategy method
             method_name = f"_try_{strategy_name}"
             method = getattr(generator, method_name, None)
@@ -140,12 +146,13 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
     - Edge sizing for sharp features
     """
 
-    def __init__(self, config: Optional[Config] = None, stop_event=None):
+    def __init__(self, config: Optional[Config] = None, stop_event=None, target_volume_tag: Optional[int] = None):
         super().__init__(config)
         self.strategies_attempted = []
         self.all_attempts = []  # Store ALL attempts, even failed ones
         self.geometry_cleanup = GeometryCleanup()
         self.stop_event = stop_event
+        self.target_volume_tag = target_volume_tag
 
     def check_stop(self) -> bool:
         """Check if we should stop early"""
@@ -253,31 +260,77 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message(f"Starting parallel pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
         self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
+        # --- EARLY CANARY CHECKS ---
+        # Run canaries once BEFORE spawning workers to avoid redundant checks
+        self.log_message("\n[CANARY] Running pre-flight geometry checks...")
+        
+        # Define assembly threshold (assembly-aware canary)
+        num_vols = self.geometry_info.get('num_volumes', 0)
+        diag = self.geometry_info.get('diagonal', 1.0)
+        
+        # DEFINITION: 
+        # is_assembly: True if it's a true multi-part assembly (> 3 volumes)
+        # is_large_part: True if > 20mm, which deserves a meshing attempt even if complex
+        is_assembly = num_vols > 3
+        is_large_part = diag > 20.0
+        
+        complexity = self.check_1d_complexity()
+        if complexity['is_toxic']:
+            # ORCHESTRATOR-LEVEL OVERRIDE:
+            # We only fail-fast (bbox) if it's a small complex part or a massive assembly.
+            # If it's a large part (> 20mm) or has few volumes (<= 3), we try to mesh it anyway
+            # UNLESS it's truly pathological (> 100k edges).
+            
+            should_fail_fast = True
+            
+            if is_large_part or num_vols <= 3:
+                # Lenient for large/simple-assembly parts
+                if complexity['edge_count'] < 100000:
+                    should_fail_fast = False
+                    self.log_message(f"[CANARY] Overriding 1D toxicity for large/simple part (Diag: {diag:.2f}mm, Vols: {num_vols}). Attempting meshing...")
+            
+            if should_fail_fast:
+                self.log_message(f"[!] Geometry failed early 1D canary: {complexity['reason']}")
+                self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
+                return self.create_bounding_box_mesh(output_file)
+        
+        # 2D Surface Canary - ONLY for single parts (<= 3 volumes)
+        # For assemblies, meshing ALL surfaces at once is slow and redundant
+        if num_vols <= 3:
+            # For complex but large parts, increase 2D timeout
+            canary_timeout = 10.0 if complexity['edge_count'] > 5000 else 5.0
+            if not self.generate_2d_canary(timeout=canary_timeout):
+                self.log_message("[!] Geometry failed 2D canary (surface mesh timeout after 5.0s)")
+                self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
+                return self.create_bounding_box_mesh(output_file)
+            self.log_message("[OK] Canary checks passed - geometry is meshable")
+        else:
+            self.log_message("[CANARY] Assembly detected - skipping global 2D surface canary (isolated parts will be checked individually)")
+            self.log_message("[OK] Orchestrator-level canary passed")
+        
+        # --- SURGICAL ISOLATION TRIGGER ---
+        num_vols = self.geometry_info.get('num_volumes', 0)
+        use_surgical = num_vols > 3
+        if use_surgical:
+            self.log_message(f"\n[SURGICAL] Assembly detected ({num_vols} volumes). Initializing Surgical Amputation Loop...")
+            self.log_message(f"[SURGICAL] Bypassing {num_workers}-worker parallel race (surgical uses 6 dedicated workers)")
+            return self._run_surgical_isolation_loop(input_file, output_file)
+
         best_mesh_path = None
         best_score = float('inf')
         best_strategy = None
         
         # OPTIMIZATION: Use sequential execution when only 1 worker or 1 strategy
+        # or it's a single part (<= 3 volumes) for cleaner verbose output
         # This avoids spawning unnecessary subprocess and the [INIT] overhead
-        use_sequential = (num_workers == 1) or (len(strategy_names) == 1)
+        use_sequential = (num_workers == 1) or (len(strategy_names) == 1) or (num_vols <= 3)
         
         if use_sequential:
             self.log_message(f"Using SEQUENTIAL mode (1 worker or 1 strategy - no subprocess overhead)")
             
-            # CRITICAL: Use optimal thread count for stability + performance
-            # 6 threads provides ~4.5x speedup with excellent stability on Windows
-            # (32 threads causes access violations, 1 thread is too slow)
-            OPTIMAL_THREAD_COUNT = 6
-            
-            # Reinitialize Gmsh with controlled threading
-            self.log_message(f"[Performance] Reinitializing Gmsh with {OPTIMAL_THREAD_COUNT} threads for optimal speed/stability balance")
-            self.finalize_gmsh()
-            self.initialize_gmsh(thread_count=OPTIMAL_THREAD_COUNT)
-            
-            # CRITICAL: Reload the CAD file since we finalized Gmsh
-            if not self.load_cad_file(input_file):
-                self.log_message("[ERROR] Failed to reload CAD file after Gmsh reinitialization", level="ERROR")
-                return False
+            # Elevate verbosity for single parts (<= 3 volumes) as requested
+            if num_vols <= 3:
+                self.elevate_verbosity(level=4)
             
 
             for strategy_name in strategy_names:
@@ -633,9 +686,6 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             # But inside the worker, we are in _try_... methods which don't take args.
             
             # We need to access the input file.
-            # BaseMeshGenerator.load_cad_file stores self.model_loaded but not the filename?
-            # Let's check BaseMeshGenerator.
-            
             # Actually, we can just use the loaded model in Gmsh to export an STL for resurfacing.
             temp_input_stl = str(Path(self.temp_dir) / "temp_input_for_resurface.stl")
             gmsh.write(temp_input_stl)
@@ -1285,6 +1335,122 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         self.log_message(f"\nFinal mesh saved to: {output_file}")
         self.log_message("=" * 60)
+
+    def _run_surgical_isolation_loop(self, input_file: str, output_file: str) -> bool:
+        """
+        Run the Surgical Amputation loop: Mesh each volume in isolation.
+        Uses the proven subprocess pattern from surgical_orchestrator.py.
+        """
+        self.log_message("\n" + "=" * 60)
+        self.log_message("EXECUTING SURGICAL ISOLATION LOOP")
+        self.log_message("Targeting each volume individually for robust assembly meshing.")
+        self.log_message("=" * 60)
+        
+        temp_dir = os.path.join(os.path.dirname(output_file), "temp_surgical")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        volumes = gmsh.model.getEntities(3)
+        vol_tags = [v[1] for v in volumes]
+        self.log_message(f"Volumes to process: {len(vol_tags)}")
+        
+        worker_script = os.path.join(PROJECT_ROOT, "core", "isolation_worker_script.py")
+        
+        # Proven pattern: Direct subprocess spawning with ThreadPoolExecutor for I/O coordination
+        def spawn_worker(tag):
+            worker_msh = os.path.join(temp_dir, f"vol_{tag}.msh")
+            
+            # Skip if already done
+            if os.path.exists(worker_msh):
+                return tag, True, "cached"
+            
+            cmd = [
+                sys.executable,
+                worker_script,
+                "--input", input_file,
+                "--output", worker_msh,
+                "--tag", str(tag)
+            ]
+            
+            try:
+                # 300s per volume (5 minutes max)
+                # Use subprocess.run but log progress on completion (keeps logs cleaner)
+                result = subprocess.run(
+                    cmd,
+                    timeout=300,
+                    capture_output=True,
+                    text=True,
+                    cwd=PROJECT_ROOT
+                )
+                
+                if result.returncode == 0 and os.path.exists(worker_msh):
+                    return tag, True, "meshed"
+                else:
+                    # Log failure reason (last 500 chars of output)
+                    output_tail = (result.stdout + result.stderr)[-500:] if (result.stdout or result.stderr) else ""
+                    return tag, False, f"exit_{result.returncode}: {output_tail}"
+                    
+            except subprocess.TimeoutExpired:
+                return tag, False, "timeout"
+            except Exception as e:
+                return tag, False, f"exception: {str(e)}"
+        
+        # Run workers in parallel batches
+        max_workers = min(len(vol_tags), 6)  # Windows stability cap
+        self.log_message(f"Starting {max_workers} parallel workers...")
+        
+        completed = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(spawn_worker, tag): tag for tag in vol_tags}
+            
+            for future in concurrent.futures.as_completed(futures):
+                tag = futures[future]
+                try:
+                    vol_tag, success, reason = future.result()
+                    completed.append((vol_tag, success))
+                    
+                    status = "[OK]" if success else "[FAIL]"
+                    self.log_message(f"  {status} Volume {vol_tag}: {reason}")
+                    
+                except Exception as exc:
+                    self.log_message(f"  [ERROR] Volume {tag} raised: {exc}")
+                    completed.append((tag, False))
+        
+        # Summary
+        success_count = sum(1 for _, s in completed if s)
+        self.log_message(f"\nIsolation Complete: {success_count}/{len(vol_tags)} successful")
+        
+        # Final Merge - PRESERVE INDIVIDUAL PHYSICAL GROUPS
+        # CRITICAL: When merging .msh files, gmsh.merge() adds MESH ELEMENTS, not geometric volumes.
+        # Each individual .msh file already has physical groups assigned ("Volume_N").
+        # We need to merge them while preserving their individual identities.
+        self.log_message("Merging all isolated meshes...")
+        gmsh.initialize()
+        gmsh.model.add("Surgical_Assembly")
+        
+        msh_files = sorted(glob.glob(os.path.join(temp_dir, "vol_*.msh")))
+        self.log_message(f"Found {len(msh_files)} mesh files to merge")
+        
+        # Merge all mesh files - this preserves their physical groups
+        for msh_file in msh_files:
+            try:
+                gmsh.merge(msh_file)
+            except Exception as e:
+                self.log_message(f"  [!] Failed to merge {os.path.basename(msh_file)}: {e}")
+        
+        # Verify physical groups were preserved
+        phys_groups = gmsh.model.getPhysicalGroups(3)
+        if phys_groups:
+            self.log_message(f"[OK] Merged mesh contains {len(phys_groups)} physical volume groups")
+        else:
+            self.log_message("[WARNING] No physical groups found after merge! Mesh may not export correctly.")
+        
+        # Write the merged mesh
+        gmsh.option.setNumber("Mesh.SaveAll", 1)  # Ensure all elements are saved
+        gmsh.write(output_file)
+        gmsh.finalize()
+        
+        self.log_message(f"[OK] Final mesh saved: {output_file}")
+        return True
 
     def _generate_failure_report(self):
         """Generate report when everything failed"""
