@@ -1311,6 +1311,9 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             # For now, create a simple quality mapping based on aggregate metrics
             # In future: extract this directly from gmsh before finalization
             per_element_quality = {}
+            per_element_gamma = {}
+            per_element_skewness = {}
+            per_element_aspect_ratio = {}
             quality_metrics = {}
             
             #Try to get quality metrics from best attempt
