@@ -94,15 +94,27 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
             
-            success = discretizer.convert_step_to_stl(
+            # Now returns (success, volume_centroids) tuple
+            result = discretizer.convert_step_to_stl(
                 cad_file, temp_stl,
                 deviation=0.01,
                 min_size=0.5,
                 max_size=10.0
             )
             
+            # Handle both old (bool) and new (tuple) return types for compatibility
+            if isinstance(result, tuple):
+                success, volume_centroids = result
+            else:
+                success = result
+                volume_centroids = []
+            
             if not success:
                 return {'success': False, 'message': 'Failed to convert STEP to STL'}
+            
+            print(f"[OpenFOAM-HEX] Extracted {len(volume_centroids)} volume centroids from CAD")
+
+
 
         
         # Step 2: Get cell size from quality params
@@ -115,8 +127,22 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
         
         # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
-        result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
+        print("[OpenFOAM-HEX] Step 2: Running cfMesh / snappyHexMesh...")
+        
+        # Extract SnappyHexMesh specific params
+        mesh_scope = quality_params.get('snappy_mode', 'Internal') if quality_params else 'Internal'
+        layers = quality_params.get('snappy_layers', 0) if quality_params else 0
+        
+        from strategies.openfoam_hex import generate_openfoam_hex_mesh
+        result = generate_openfoam_hex_mesh(
+            temp_stl, 
+            output_file, 
+            cell_size=cell_size, 
+            verbose=True,
+            mesh_scope=mesh_scope,
+            layers=layers,
+            volume_centroids=volume_centroids if 'volume_centroids' in dir() else []
+        )
         
         if not result['success']:
             return result
@@ -1174,7 +1200,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # Continue with standard mesh strategy dispatch
         # =====================================================================
         
-        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
+        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy or 'Direct Hex' in mesh_strategy:
             from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_any_openfoam_available
             # Try OpenFOAM (cfMesh or snappy) first
             if check_any_openfoam_available():
@@ -1491,12 +1517,44 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                     quality_metrics['skewness_min'] = float(min(vals))
                     quality_metrics['skewness_max'] = float(max(vals))
                     quality_metrics['skewness_avg'] = float(np.mean(vals))
+                    # Also populate legacy flat keys if missing
+                    if 'skewness' not in quality_metrics:
+                         quality_metrics['skewness'] = {
+                             'min': quality_metrics['skewness_min'],
+                             'max': quality_metrics['skewness_max'],
+                             'avg': quality_metrics['skewness_avg']
+                         }
                     
                 if 'aspect_ratio_min' not in quality_metrics and per_element_aspect_ratio:
                     vals = list(per_element_aspect_ratio.values())
                     quality_metrics['aspect_ratio_min'] = float(min(vals))
                     quality_metrics['aspect_ratio_max'] = float(max(vals))
                     quality_metrics['aspect_ratio_avg'] = float(np.mean(vals))
+                    # Also populate legacy flat keys if missing
+                    if 'aspect_ratio' not in quality_metrics:
+                         quality_metrics['aspect_ratio'] = {
+                             'min': quality_metrics['aspect_ratio_min'],
+                             'max': quality_metrics['aspect_ratio_max'],
+                             'avg': quality_metrics['aspect_ratio_avg']
+                         }
+
+                # CRITICAL: Populate gmsh_sicn and gmsh_gamma from per-element data if available
+                # The viewer looks for these keys to display SICN/Gamma
+                if 'gmsh_sicn' not in quality_metrics and per_element_quality:
+                    vals = list(per_element_quality.values())
+                    quality_metrics['gmsh_sicn'] = {
+                        'min': float(min(vals)),
+                        'max': float(max(vals)),
+                        'avg': float(np.mean(vals))
+                    }
+                    
+                if 'gmsh_gamma' not in quality_metrics and per_element_gamma:
+                    vals = list(per_element_gamma.values())
+                    quality_metrics['gmsh_gamma'] = {
+                        'min': float(min(vals)),
+                        'max': float(max(vals)),
+                        'avg': float(np.mean(vals))
+                    }
                 
                 gmsh_reload.finalize()
             except Exception as e:

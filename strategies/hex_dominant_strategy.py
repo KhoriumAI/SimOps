@@ -22,7 +22,7 @@ class HighFidelityDiscretization:
     def convert_step_to_stl(self, step_path: str, output_stl_path: str, 
                            deviation: float = 0.01, 
                            min_size: float = 0.1,
-                           max_size: float = 10.0) -> bool:
+                           max_size: float = 10.0) -> tuple:
         """
         Convert STEP file to high-resolution STL using Gmsh.
         
@@ -34,9 +34,12 @@ class HighFidelityDiscretization:
             max_size: Maximum mesh element size
             
         Returns:
-            True if successful, False otherwise
+            Tuple of (success: bool, volume_centroids: list)
+            volume_centroids is a list of (x,y,z) tuples, one per volume in the CAD
         """
         self.log(f"Converting {step_path} to STL...")
+        
+        volume_centroids = []
         
         try:
             # Initialize Gmsh if not already running
@@ -47,6 +50,22 @@ class HighFidelityDiscretization:
             
             # Load STEP file
             gmsh.merge(step_path)
+            
+            # CRITICAL: Extract volume centroids BEFORE tessellation
+            # This is the only place we have access to the CAD volume info
+            try:
+                volumes = gmsh.model.occ.getEntities(3)  # dim=3 for volumes
+                self.log(f"Found {len(volumes)} volumes in CAD model")
+                
+                for dim, tag in volumes:
+                    try:
+                        cx, cy, cz = gmsh.model.occ.getCenterOfMass(dim, tag)
+                        volume_centroids.append((cx, cy, cz))
+                        self.log(f"  Volume {tag}: centroid at ({cx:.2f}, {cy:.2f}, {cz:.2f})")
+                    except Exception as e:
+                        self.log(f"  Volume {tag}: Failed to get centroid - {e}")
+            except Exception as e:
+                self.log(f"Warning: Could not extract volume centroids: {e}")
             
             # Set high-fidelity meshing options
             # 1. MeshSizeFromCurvature: Refine mesh on curved surfaces
@@ -72,11 +91,11 @@ class HighFidelityDiscretization:
             # Don't finalize if we want to reuse gmsh, but for now let's assume standalone usage or careful management
             # gmsh.finalize() 
             
-            return True
+            return (True, volume_centroids)
             
         except Exception as e:
             self.log(f"Error converting STEP to STL: {e}")
-            return False
+            return (False, [])
 
     def verify_watertightness(self, stl_path: str) -> Tuple[bool, dict]:
         """

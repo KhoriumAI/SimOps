@@ -316,7 +316,7 @@ class BaseMeshGenerator(ABC):
             return False
 
         ext = os.path.splitext(filename)[1].lower()
-        if ext not in ['.step', '.stp', '.iges', '.igs', '.stl', '.obj', '.ply', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
+        if ext not in ['.step', '.stp', '.iges', '.igs', '.stl', '.obj', '.ply', '.x_t', '.x_b']:
             self.log_message(f"ERROR: Unsupported file format: {ext}", level="ERROR")
             return False
 
@@ -422,7 +422,7 @@ class BaseMeshGenerator(ABC):
             import time
             t0 = time.time()
             ext = os.path.splitext(filename)[1].lower()
-            if ext in ['.step', '.stp', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
+            if ext in ['.step', '.stp', '.x_t', '.x_b']:
                 gmsh.model.occ.importShapes(filename)
                 self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
                 gmsh.model.occ.synchronize()

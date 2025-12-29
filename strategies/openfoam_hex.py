@@ -72,16 +72,20 @@ def get_stl_bounds(stl_path: str):
     try:
         import trimesh
         mesh = trimesh.load(stl_path)
-        return mesh.bounds
-    except ImportError:
+        if mesh.bounds is not None:
+            return mesh.bounds
+        else:
+             print("[OpenFOAM] WARNING: trimesh returned None for bounds (empty mesh?). Using default.")
+             return [[-100, -100, -100], [100, 100, 100]]
+    except Exception as e:
         # Simple fallback parser for ASCII/Binary STL
         # This is risky, but we only need approx bounds for background mesh
         # For robustness, we assume user has trimesh (it's in requirements)
-        print("[OpenFOAM] WARNING: trimesh not found, using default bounds")
+        print(f"[OpenFOAM] WARNING: Failed to get bounds via trimesh: {e}. Using default bounds")
         return [[-100, -100, -100], [100, 100, 100]]
 
 
-def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) -> None:
+def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0, mesh_scope: str = 'Internal', layers: int = 0, volume_centroids: list = None) -> None:
     """
     Create OpenFOAM case directory structure for snappyHexMesh.
     
@@ -89,6 +93,7 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
         case_dir: Path to case directory
         stl_path: Path to input STL file
         cell_size: Target cell size in mm
+        volume_centroids: List of (x,y,z) tuples from CAD extraction (preferred over STL splitting)
     """
     # Create directory structure
     (case_dir / "constant" / "triSurface").mkdir(parents=True, exist_ok=True)
@@ -110,15 +115,90 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     min_pt = min_b - margin
     max_pt = max_b + margin
     
-    # Identify a point inside the mesh (approximation)
-    # For a convex object, centroid is usually safe.
-    # For concave, this can fail. Using center of bbox is a 50/50 gamble.
-    # Ideally ray cast. 
-    # Fallback: assume origin (0,0,0) or center if provided.
-    # Note: STL is in mm, but blockMesh converts to meters (0.001).
-    # We must scale this point to match the background mesh units (Meters).
-    location_in_mesh = center * 0.001 
+    # Identify a point inside or outside the mesh
+    # 1. Use trimesh to find a robust interior point if possible
+    location_in_mesh = center # Default fallback
     
+    if mesh_scope == 'External':
+        # For external flow (wind tunnel), we want a point IN THE AIR
+        # Our blockMesh is bounds + 50% margin
+        # So a point at min_b - margin * 0.25 is definitely outside the object but inside the blockMesh
+        # (min_pt is min_b - margin, so this is inside the domain)
+        location_in_mesh = min_b - (margin * 0.25)
+        print(f"[OpenFOAM] Configured for EXTERNAL meshing. Location being meshed: {location_in_mesh}")
+        all_locations = [location_in_mesh]  # External mode only needs one point
+    else:
+        # Internal meshing (standard)
+        # PREFERRED: Use CAD-provided volume centroids if available
+        if volume_centroids and len(volume_centroids) > 0:
+            print(f"[OpenFOAM] Using {len(volume_centroids)} CAD-extracted volume centroids as seed points")
+            all_locations = [list(c) for c in volume_centroids]  # Convert tuples to lists
+            location_in_mesh = all_locations[0]
+        else:
+            # FALLBACK: Try to split STL into bodies (less reliable for non-manifold meshes)
+            try:
+                import trimesh
+                import numpy as np
+                mesh = trimesh.load(stl_path)
+                
+                # --- MULTI-REGION SUPPORT ---
+                # Split mesh into connected components to handle disjoint assemblies
+                # trimesh.graph.split returns a list of mesh objects
+                bodies = trimesh.graph.split(mesh)
+                
+                locations = []
+                
+                print(f"[OpenFOAM] Detected {len(bodies)} connected bodies in input mesh.")
+                
+                for i, body in enumerate(bodies):
+                    # ROBUST INTERNAL POINT ALGORITHM (Per Body)
+                    found_point = False
+                    # fallback to body centroid
+                    candidate_point = body.centroid 
+                    
+                    if hasattr(body, 'faces') and len(body.faces) > 0:
+                        # Get a sample of faces (up to 20 to be safe)
+                        indices = np.linspace(0, len(body.faces)-1, min(20, len(body.faces))).astype(int)
+                        origins = body.triangles_center[indices]
+                        normals = body.face_normals[indices]
+                        
+                        # Try a few epsilon distances
+                        # Scale epsilon by body size to be robust
+                        body_extents = body.bounds[1] - body.bounds[0]
+                        avg_scale = np.mean(body_extents)
+                        
+                        for eps_factor in [1e-4, 1e-3, 0.01, 0.1]:
+                            eps = avg_scale * eps_factor
+                            candidates = origins - normals * eps
+                            
+                            try:
+                                # Check if point is inside THIS specific body
+                                contains = body.contains(candidates)
+                                if np.any(contains):
+                                    candidate_point = candidates[np.where(contains)[0][0]]
+                                    print(f"[OpenFOAM] Body {i}: Found robust interior point (eps={eps:.4f})")
+                                    found_point = True
+                                    break
+                            except:
+                                continue
+                            if found_point: break
+                    
+                    if not found_point:
+                        print(f"[OpenFOAM] Body {i}: Robust search failed. Using centroid.")
+                    
+                    locations.append(candidate_point)
+                    print(f"[OpenFOAM] Body {i} Location: {candidate_point}")
+
+                # If we found multiple locations, we use them all.
+                # If only one body, we just use the one location.
+                location_in_mesh = locations[0] if locations else center
+                all_locations = locations if locations else [center]
+
+            except Exception as e:
+                print(f"[OpenFOAM] WARNING: trimesh interior detection failed: {e}. Falling back to bbox center.")
+                location_in_mesh = center
+                all_locations = [center]
+
     # Generate blockMeshDict
     # Calculate number of cells based on cell_size * 2 (coarser background)
     n_cells = ((max_pt - min_pt) / (cell_size * 2.0)).astype(int)
@@ -132,7 +212,7 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     object      blockMeshDict;
 }}
 
-convertToMeters 0.001; // STL is likely in mm
+convertToMeters 1.0; // Keep everything in mm to match Gmsh STL output
 
 vertices
 (
@@ -173,6 +253,49 @@ boundary
 '''
     (case_dir / "system" / "blockMeshDict").write_text(block_mesh_dict)
 
+    # Layer controls
+    add_layers_bool = "true" if layers > 0 else "false"
+    
+    layer_config = ""
+    if layers > 0:
+        layer_config = f'''
+    relativeSizes true;
+    layers
+    {{
+        {stl_filename}
+        {{
+            nSurfaceLayers {int(layers)};
+        }}
+    }}
+    expansionRatio 1.2;
+    finalLayerThickness 0.3;
+    minThickness 0.1;
+    nGrow 0;
+    featureAngle 60;
+    slipFeatureAngle 30;
+    nRelaxIter 3;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals 3;
+    nSmoothThickness 10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle 90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter 50;
+        '''
+
+    # COMPUTE LOCATION CLAUSE (PRE-BUILD STRING)
+    # OpenFOAM 13 uses insidePoints/outsidePoints instead of locationInMesh/locationsInMesh
+    if mesh_scope != 'External' and len(all_locations) > 1:
+        # Multi-region: insidePoints (list of points)
+        location_lines = []
+        for loc in all_locations:
+            location_lines.append(f"        ({loc[0]} {loc[1]} {loc[2]})")
+        location_clause = "insidePoints\n    (\n" + "\n".join(location_lines) + "\n    );"
+    else:
+        # Single region: insidePoint (single point)
+        location_clause = f"insidePoint ({location_in_mesh[0]} {location_in_mesh[1]} {location_in_mesh[2]});"
+
     # Generate snappyHexMeshDict
     snappy_dict = f'''FoamFile
 {{
@@ -184,14 +307,14 @@ boundary
 
 castellatedMesh true;
 snap            true;
-addLayers       false;
+addLayers       {add_layers_bool};
 
 geometry
 {{
     {stl_filename}
     {{
         type triSurfaceMesh;
-        name {stl_filename};
+        file "{stl_filename}";
     }}
 }};
 
@@ -222,7 +345,7 @@ castellatedMeshControls
     {{
     }}
 
-    locationInMesh ({location_in_mesh[0]} {location_in_mesh[1]} {location_in_mesh[2]});
+    {location_clause}
     
     allowFreeStandingZoneFaces true;
 }}
@@ -241,6 +364,7 @@ snapControls
 
 addLayersControls
 {{
+    {layer_config}
 }}
 
 meshQualityControls
@@ -463,7 +587,10 @@ def generate_openfoam_hex_mesh(
     stl_path: str,
     output_path: str,
     cell_size: float = 2.0,
-    verbose: bool = True
+    verbose: bool = True,
+    mesh_scope: str = 'Internal',
+    layers: int = 0,
+    volume_centroids: list = None
 ) -> Dict:
     """
     Generate hex-dominant mesh using OpenFOAM (cfMesh or snappyHexMesh).
@@ -497,7 +624,7 @@ def generate_openfoam_hex_mesh(
             if not run_cartesian_mesh(case_dir, verbose):
                 return {'success': False, 'error': 'cartesianMesh failed'}
         else:
-            create_snappy_case(case_dir, stl_path, cell_size)
+            create_snappy_case(case_dir, stl_path, cell_size, mesh_scope=mesh_scope, layers=layers, volume_centroids=volume_centroids or [])
             if not run_snappy_hex_mesh(case_dir, verbose):
                 return {'success': False, 'error': 'snappyHexMesh failed'}
         
@@ -637,11 +764,27 @@ def convert_to_vtk(case_dir: Path, verbose: bool = True) -> Optional[Path]:
                  print(f"  - {f.relative_to(case_dir)} ({f.stat().st_size} bytes)")
         
         if vtk_files:
-            # Sort by size descending (largest is likely the internal mesh)
-            vtk_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+            # Sort with prioritization:
+            # 1. Prefer files NOT in 'boundary' folder
+            # 2. Prefer files with 'internal' in name
+            # 3. Largest size
+            
+            def sort_key(p):
+                is_boundary = 'boundary' in p.parts
+                is_internal = 'internal' in p.name.lower()
+                size = p.stat().st_size
+                
+                # Tuple comparison: False < True, so:
+                # (is_boundary=False) comes before (is_boundary=True) -> 0 vs 1. We want 0 first.
+                # (is_internal=True) comes before (is_internal=False). We want 1 first.
+                # Size descending.
+                
+                return (is_boundary, not is_internal, -size)
+
+            vtk_files.sort(key=sort_key)
             chosen = vtk_files[0]
             if verbose:
-                print(f"[OpenFOAM] Selected largest file: {chosen.name}")
+                print(f"[OpenFOAM] Selected priority file: {chosen.name} (Boundary: {'boundary' in chosen.parts})")
             return chosen
             
         return None

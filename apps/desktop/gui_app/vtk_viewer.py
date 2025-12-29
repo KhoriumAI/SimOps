@@ -696,9 +696,9 @@ class VTK3DViewer(QFrame):
         """)
         self.info_label.setText("<b>3D Preview</b><br>No model loaded")
         self.info_label.setWordWrap(True)
-        self.info_label.setFixedWidth(450)
-        self.info_label.setMinimumHeight(80)
-        self.info_label.setMaximumHeight(300)
+        self.info_label.setFixedWidth(400)
+        self.info_label.setMinimumHeight(120)
+        self.info_label.setMaximumHeight(600)
         self.info_label.move(10, 10)
         self.info_label.show()
 
@@ -2855,8 +2855,97 @@ except Exception as e:
             file_ext = Path(filepath).suffix.lower()
             
             # Handle STL/VTU files differently - they are surface meshes, not volumetric
-            if file_ext in ['.stl', '.vtu', '.vtk', '.ply', '.obj']:
-                return self._load_surface_mesh_file(filepath, file_ext)
+            is_surface_format = file_ext in ['.stl', '.ply', '.obj']
+            is_vtk_format = file_ext in ['.vtu', '.vtk', '.vtp']
+            
+            if is_surface_format:
+                return self._load_surface_mesh_file(filepath, file_ext, result)
+            
+            if is_vtk_format:
+                # Try to load as volume first using PyVista
+                print(f"[DEBUG] Loading VTK/VTU file: {filepath}")
+                import pyvista as pv
+                try:
+                    mesh = pv.read(filepath)
+                    # Check dimensionality
+                    is_volumetric = False
+                    if isinstance(mesh, pv.UnstructuredGrid):
+                        # Check for 3D cells (tet=10, hex=12 in VTK)
+                        # Simple check: cell types
+                        cell_types = mesh.celltypes
+                        # 10=Tetra, 11=Voxel, 12=Hexa, 13=Wedge, 14=Pyramid
+                        if any(t in cell_types for t in [10, 11, 12, 13, 14]):
+                            is_volumetric = True
+                            print(f"[DEBUG] Detected volumetric VTK mesh with {mesh.n_cells} cells")
+                    
+                    if is_volumetric:
+                         # Load as volume mesh
+                         # Populate internal structures manually since _parse_msh_file is for .msh
+                         # We reuse logic similar to _load_surface_mesh_file but KEEP the volume grid
+                         self.current_volumetric_grid = mesh
+                         
+                         # Extract surface for outer display
+                         vtk_poly = mesh.extract_surface()
+                         
+                         # Store surface poly data
+                         self.current_poly_data = vtk_poly
+                         
+                         # Visualization Update
+                         # Generate smooth normals for surface
+                         normals_gen = vtk.vtkPolyDataNormals()
+                         normals_gen.SetInputData(vtk_poly)
+                         normals_gen.ComputePointNormalsOn()
+                         normals_gen.SplittingOn()
+                         normals_gen.SetFeatureAngle(60.0)
+                         normals_gen.Update()
+                         smooth_poly_data = normals_gen.GetOutput()
+                         self.current_poly_data = smooth_poly_data
+                         
+                         # Reset view
+                         mapper = vtk.vtkPolyDataMapper()
+                         mapper.SetInputData(smooth_poly_data)
+                         
+                         self.current_actor = vtk.vtkActor()
+                         self.current_actor.SetMapper(mapper)
+                         # Default light blue
+                         self.current_actor.GetProperty().SetColor(0.8, 0.85, 0.9)
+                         # Explicitly enable edges for volume mesh visualization
+                         self.current_actor.GetProperty().EdgeVisibilityOn()
+                         self.current_actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)
+                         self.current_actor.GetProperty().SetLineWidth(0.5)
+                         
+                         self.renderer.AddActor(self.current_actor)
+                         self.renderer.ResetCamera()
+                         self.vtk_widget.GetRenderWindow().Render()
+                         
+                         # Calculate quality for loaded volume mesh
+                         self.info_label.setText("Calculating quality...")
+                         QApplication.processEvents()
+                         
+                         q_result = self._calculate_mesh_quality(filepath)
+                         if q_result:
+                             # Apply quality coloring
+                             self.update_info_label(q_result)
+                             
+                             # Extract per-element quality for visualization
+                             if q_result.get('per_element_quality'):
+                                 # We need to map this to surface cells
+                                 # This is complex for unstructured grids without ID mapping
+                                 # For now, just show the metrics in the box
+                                 pass
+                         else:
+                             self.info_label.setText(f"Loaded Volume Mesh\n{mesh.n_cells} volumetric cells")
+                         
+                         return
+                         
+                    else:
+                        # It's a surface mesh stored in VTU/VTK
+                        print("[DEBUG] VTK file contains only surface elements - treating as surface mesh")
+                        return self._load_surface_mesh_file(filepath, file_ext, result)
+                        
+                except Exception as e:
+                    print(f"[DEBUG] Error inspecting VTK file: {e}")
+                    # Fallthrough to standard logic if simple load fails
             
             print(f"[DEBUG] Parsing .msh file...")
             nodes, elements = self._parse_msh_file(filepath)
@@ -3340,27 +3429,35 @@ except Exception as e:
                 metrics = result['quality_metrics']
                 info_lines.append("<br><b>Quality Metrics (avg):</b><br>")
 
+                # Helper to safely extract metric value
+                def get_metric(flat_key, nested_key, sub_key='avg'):
+                    if flat_key in metrics:
+                        return metrics[flat_key]
+                    if nested_key in metrics and isinstance(metrics[nested_key], dict):
+                        return metrics[nested_key].get(sub_key)
+                    return None
+
                 # SICN (primary gmsh metric) - use AVERAGE not min
-                if 'sicn_avg' in metrics:
-                    sicn = metrics['sicn_avg']
+                sicn = get_metric('sicn_avg', 'gmsh_sicn')
+                if sicn is not None:
                     sicn_color = "#198754" if sicn >= 0.7 else "#ffc107" if sicn >= 0.5 else "#dc3545"
                     info_lines.append(f"<span style='color: {sicn_color};'>SICN: {sicn:.3f}</span> ")
 
                 # Gamma - use AVERAGE not min
-                if 'gamma_avg' in metrics:
-                    gamma = metrics['gamma_avg']
+                gamma = get_metric('gamma_avg', 'gmsh_gamma')
+                if gamma is not None:
                     gamma_color = "#198754" if gamma >= 0.6 else "#ffc107" if gamma >= 0.4 else "#dc3545"
                     info_lines.append(f"<span style='color: {gamma_color};'>γ: {gamma:.3f}</span><br>")
 
                 # Skewness - use AVERAGE not max
-                if 'skewness_avg' in metrics:
-                    skew = metrics['skewness_avg']
+                skew = get_metric('skewness_avg', 'skewness')
+                if skew is not None:
                     skew_color = "#198754" if skew <= 0.3 else "#ffc107" if skew <= 0.5 else "#dc3545"
                     info_lines.append(f"<span style='color: {skew_color};'>Skew: {skew:.3f}</span> ")
 
                 # Aspect Ratio - use AVERAGE not max
-                if 'aspect_ratio_avg' in metrics:
-                    ar = metrics['aspect_ratio_avg']
+                ar = get_metric('aspect_ratio_avg', 'aspect_ratio')
+                if ar is not None:
                     ar_color = "#198754" if ar <= 2.0 else "#ffc107" if ar <= 3.0 else "#dc3545"
                     info_lines.append(f"<span style='color: {ar_color};'>AR: {ar:.2f}</span>")
 
@@ -3403,7 +3500,7 @@ except Exception as e:
                     self.current_quality_data = result
             
             # Convert to VTK PolyData
-            vtk_poly = poly_data.cast_to_unstructured_grid().extract_surface()
+            vtk_poly = mesh.cast_to_unstructured_grid().extract_surface()
             print(f"[DEBUG] Surface extracted: {vtk_poly.GetNumberOfPoints()} pts, {vtk_poly.GetNumberOfCells()} cells")
             
             # Store for cross-section and other operations
@@ -3450,6 +3547,28 @@ except Exception as e:
             # Apply quality coloring if available
             if result and result.get('per_element_quality'):
                 try:
+                    # Helper function for HSL to RGB conversion
+                    def hsl_to_rgb(h, s, l):
+                        """Convert HSL to RGB (0-255)"""
+                        def hue_to_rgb(p, q, t):
+                            if t < 0: t += 1
+                            if t > 1: t -= 1
+                            if t < 1/6: return p + (q - p) * 6 * t
+                            if t < 1/2: return q
+                            if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+                            return p
+                        
+                        if s == 0:
+                            r = g = b = l
+                        else:
+                            q = l * (1 + s) if l < 0.5 else l + s - l * s
+                            p = 2 * l - q
+                            r = hue_to_rgb(p, q, h + 1/3)
+                            g = hue_to_rgb(p, q, h)
+                            b = hue_to_rgb(p, q, h - 1/3)
+                        
+                        return int(r * 255), int(g * 255), int(b * 255)
+
                     per_elem_quality = result['per_element_quality']
                     colors = vtk.vtkUnsignedCharArray()
                     colors.SetNumberOfComponents(3)
@@ -3586,20 +3705,28 @@ except Exception as e:
                 elem_types, elem_tags, _ = gmsh.model.mesh.getElements(dim)
                 for elem_type, tags in zip(elem_types, elem_tags):
                     try:
-                        # Only compute for triangles (2, 9) or tets (4, 11) for now
-                        if elem_type in [2, 4, 9, 11]:
-                            sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
-                            gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
-                            
-                            for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
-                                tag_int = int(tag)
-                                per_element_quality[tag_int] = float(sicn)
-                                per_element_gamma[tag_int] = float(gamma)
-                                per_element_skewness[tag_int] = 1.0 - float(sicn)
-                                per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
-                                if dim == 3 or (dim == 2 and not any(e == 4 for e in elem_types)):
-                                    # Use volume quality if available, otherwise surface
-                                    all_qualities.append(sicn)
+                        # Compute for triangles (2, 9), tets (4, 11), hexes (5, 12), prisms (6, 13), pyramids (7, 14)
+                        if elem_type in [2, 4, 5, 6, 7, 9, 11, 12, 13, 14]:
+                            try:
+                                sicn_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "minSICN")
+                                gamma_vals = gmsh.model.mesh.getElementQualities(tags.tolist(), "gamma")
+                                
+                                for tag, sicn, gamma in zip(tags, sicn_vals, gamma_vals):
+                                    tag_int = int(tag)
+                                    per_element_quality[tag_int] = float(sicn)
+                                    per_element_gamma[tag_int] = float(gamma)
+                                    per_element_skewness[tag_int] = 1.0 - float(sicn)
+                                    per_element_aspect_ratio[tag_int] = 1.0 / float(sicn) if sicn > 0 else 100.0
+                                    
+                                    # Use volume quality if available (Types: 4=Tet, 5=Hex, 6=Prism, 7=Pyramid, 11-14=HighOrder)
+                                    is_volume = elem_type in [4, 5, 6, 7, 11, 12, 13, 14]
+                                    if is_volume or (dim == 3):
+                                        all_qualities.append(sicn)
+                                    elif dim == 2 and not any(e in [4, 5, 6, 7, 11, 12, 13, 14] for e in elem_types):
+                                        # Only use surface quality if no volume elements exist
+                                        all_qualities.append(sicn)
+                            except:
+                                pass # Skip invalid types
                     except Exception as e:
                         print(f"[DEBUG] Error computing qualities for type {elem_type}: {e}")
             

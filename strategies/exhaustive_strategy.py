@@ -309,8 +309,10 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             self.log_message("[OK] Orchestrator-level canary passed")
         
         # --- SURGICAL ISOLATION TRIGGER ---
+        # User explicitly requested forced surgical isolation for all assemblies.
         num_vols = self.geometry_info.get('num_volumes', 0)
         use_surgical = num_vols > 3
+        
         if use_surgical:
             self.log_message(f"\n[SURGICAL] Assembly detected ({num_vols} volumes). Initializing Surgical Amputation Loop...")
             self.log_message(f"[SURGICAL] Bypassing {num_workers}-worker parallel race (surgical uses 6 dedicated workers)")
@@ -1348,6 +1350,14 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("=" * 60)
         
         temp_dir = os.path.join(os.path.dirname(output_file), "temp_surgical")
+        # CACHE FIX: Always wipe temp dir to prevent stale node IDs from previous runs
+        if os.path.exists(temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                self.log_message(f"[WARNING] Could not clear temp dir: {e}")
+        
         os.makedirs(temp_dir, exist_ok=True)
         
         volumes = gmsh.model.getEntities(3)
@@ -1424,29 +1434,116 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # CRITICAL: When merging .msh files, gmsh.merge() adds MESH ELEMENTS, not geometric volumes.
         # Each individual .msh file already has physical groups assigned ("Volume_N").
         # We need to merge them while preserving their individual identities.
-        self.log_message("Merging all isolated meshes...")
-        gmsh.initialize()
-        gmsh.model.add("Surgical_Assembly")
+        self.log_message("Merging all isolated meshes (ID-Shifted)...")
+        # --- ROBUST ASSEMBLY ALGORITHM ---
+        # 1. Load each part in a temporary model
+        # 2. Extract nodes/elements and SHIFT their IDs
+        # 3. Rebuild in a clean Master model
         
+        # Initialize storage
+        all_nodes = []     # List of dicts
+        all_elements = []  # List of dicts
+        
+        # Get list of mesh files
         msh_files = sorted(glob.glob(os.path.join(temp_dir, "vol_*.msh")))
         self.log_message(f"Found {len(msh_files)} mesh files to merge")
         
-        # Merge all mesh files - this preserves their physical groups
-        for msh_file in msh_files:
-            try:
-                gmsh.merge(msh_file)
-            except Exception as e:
-                self.log_message(f"  [!] Failed to merge {os.path.basename(msh_file)}: {e}")
+        node_offset = 0
+        element_offset = 0
         
-        # Verify physical groups were preserved
-        phys_groups = gmsh.model.getPhysicalGroups(3)
-        if phys_groups:
-            self.log_message(f"[OK] Merged mesh contains {len(phys_groups)} physical volume groups")
-        else:
-            self.log_message("[WARNING] No physical groups found after merge! Mesh may not export correctly.")
+        created_entities = set() # Track physical groups to create
         
+        for i, msh_path in enumerate(msh_files):
+            # 1. Clear everything (wipes all models)
+            gmsh.clear()
+            
+            # 2. Create Temp Loader
+            gmsh.model.add("TempLoader")
+            gmsh.merge(msh_path)
+            
+            # 3. Get Volume Entities
+            vol_tags = gmsh.model.getEntities(3)
+            if not vol_tags:
+                self.log_message(f"  [WARNING] No volumes in {os.path.basename(msh_path)}")
+                continue
+                
+            # 3. Extract & Shift
+            for dim, tag in vol_tags:
+                # Use the volume tag as the unique ID (Assuming distinct tags from isolation)
+                # If tags collide (e.g. all are 1), we would need to offset them too.
+                # In our isolation script, we forced 'tag' to match 'args.tag', so they should be unique.
+                new_tag = tag 
+                
+                # --- NODES ---
+                node_tags, coords, parametric = gmsh.model.mesh.getNodes(dim, tag, includeBoundary=True)
+                shifted_node_tags = [t + node_offset for t in node_tags]
+                
+                all_nodes.append({
+                    "dim": dim,
+                    "tag": new_tag,
+                    "node_tags": shifted_node_tags,
+                    "coords": coords,
+                    "parametric": parametric
+                })
+                
+                # --- ELEMENTS ---
+                elem_types, elem_tags_list, elem_node_tags_list = gmsh.model.mesh.getElements(dim, tag)
+                
+                for e_type, e_tags, e_nodes in zip(elem_types, elem_tags_list, elem_node_tags_list):
+                    shifted_elem_tags = [t + element_offset for t in e_tags]
+                    shifted_elem_nodes = [t + node_offset for t in e_nodes]
+                    
+                    all_elements.append({
+                        "dim": dim,
+                        "tag": new_tag,
+                        "type": e_type,
+                        "elem_tags": shifted_elem_tags,
+                        "node_tags": shifted_elem_nodes
+                    })
+            
+            # Update Offsets
+            # We must use getMaxNodeTag because detailed counts are hard to track perfectly
+            max_n = gmsh.model.mesh.getMaxNodeTag()
+            max_e = gmsh.model.mesh.getMaxElementTag()
+            
+            node_offset += max_n
+            element_offset += max_e
+            
+            if i % 5 == 0:
+                self.log_message(f"  Processed {i+1}/{len(msh_files)} parts...")
+
+        # --- RECONSTRUCTION ---
+        self.log_message(f"Rebuilding Master Assembly from {len(all_nodes)} components...")
+        
+        # We must re-create the MasterAssembly model because gmsh.clear() wiped it
+        gmsh.model.add("MasterAssembly")
+        gmsh.model.setCurrent("MasterAssembly")
+        
+        # 1. Create Discrete Entities
+        for item in all_nodes:
+            if item["tag"] not in created_entities:
+                gmsh.model.addDiscreteEntity(item["dim"], item["tag"])
+                created_entities.add(item["tag"])
+        
+        # 2. Add Nodes
+        for item in all_nodes:
+            gmsh.model.mesh.addNodes(item["dim"], item["tag"], item["node_tags"], item["coords"], item["parametric"])
+            
+        # 3. Add Elements
+        for item in all_elements:
+            gmsh.model.mesh.addElements(item["dim"], item["tag"], [item["type"]], [item["elem_tags"]], [item["node_tags"]])
+            
+        # 4. Create Physical Groups
+        for tag in created_entities:
+            p_tag = gmsh.model.addPhysicalGroup(3, [tag])
+            gmsh.model.setPhysicalName(3, p_tag, f"Volume_{tag}")
+        
+        self.log_message(f"[OK] Assembly rebuilt with {len(created_entities)} unique volumes")
+
         # Write the merged mesh
-        gmsh.option.setNumber("Mesh.SaveAll", 1)  # Ensure all elements are saved
+        # Force MSH 2.2 for viewer compatibility (Fixes 'Nodes: 0' header issues)
+        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+        gmsh.option.setNumber("Mesh.Binary", 1)
         gmsh.write(output_file)
         gmsh.finalize()
         

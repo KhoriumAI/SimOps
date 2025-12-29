@@ -474,6 +474,7 @@ class ModernMeshGenGUI(QMainWindow):
             # Exhaustive merged into Delaunay
             "Hex Dominant (Subdivision)",
             "Hex Dominant Testing",
+            "Direct Hex (snappy)",
             "Polyhedral (Dual)"
         ])
         self.mesh_strategy.setCurrentIndex(0)  # Default to Delaunay
@@ -584,6 +585,64 @@ class ModernMeshGenGUI(QMainWindow):
         self.verbose_preview.setChecked(True)  # Default ON
         self.verbose_preview.stateChanged.connect(self.on_verbose_preview_changed)
         quality_layout.addWidget(self.verbose_preview)
+
+        # === SNAPPY HEX MESH CONTROLS (initially hidden) ===
+        self.snappy_controls = QWidget()
+        snappy_layout = QVBoxLayout(self.snappy_controls)
+        snappy_layout.setContentsMargins(0, 5, 0, 5)
+        snappy_layout.setSpacing(8)
+        
+        # Mesh Scope (Internal vs External)
+        scope_layout = QHBoxLayout()
+        scope_label = QLabel("Mesh Scope:")
+        scope_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        scope_layout.addWidget(scope_label)
+        
+        self.snappy_mode = NoScrollComboBox()
+        self.snappy_mode.addItems(["Internal (Object)", "External (Enclosure)"])
+        self.snappy_mode.setCurrentIndex(0) # Default Internal
+        self.snappy_mode.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #0d6efd;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+        """)
+        self.snappy_mode.setToolTip(
+            "Internal: Mesh inside the object surface (standard)\n"
+            "External: Mesh the air SURROUNDING the object (for wind tunnel/CFD)"
+        )
+        scope_layout.addWidget(self.snappy_mode, 1)
+        snappy_layout.addLayout(scope_layout)
+        
+        # Boundary Layers
+        layers_layout = QHBoxLayout()
+        layers_label = QLabel("Boundary Layers:")
+        layers_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        layers_layout.addWidget(layers_label)
+        
+        self.snappy_layers = QSpinBox()
+        self.snappy_layers.setRange(0, 20)
+        self.snappy_layers.setValue(0)
+        self.snappy_layers.setSuffix(" layers")
+        self.snappy_layers.setStyleSheet("""
+            QSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.snappy_layers.setToolTip("Number of prism layers to generate near walls (improves CFD accuracy)")
+        layers_layout.addWidget(self.snappy_layers, 1)
+        snappy_layout.addLayout(layers_layout)
+        
+        self.snappy_controls.setVisible(False)
+        quality_layout.addWidget(self.snappy_controls)
 
         # === EXHAUSTIVE STRATEGY CONTROLS (initially hidden) ===
         self.exhaustive_controls = QWidget()
@@ -1943,6 +2002,11 @@ class ModernMeshGenGUI(QMainWindow):
             # Auto-uncheck if hidden
             if not is_gpu:
                 self.fast_mode.setChecked(False)
+
+        # SnappyHexMesh visibility
+        if hasattr(self, 'snappy_controls'):
+            is_snappy = "Direct Hex (snappy)" in text
+            self.snappy_controls.setVisible(is_snappy)
     
     def on_verbose_preview_changed(self, state):
         """Toggle verbose CAD preview logging"""
@@ -1980,9 +2044,8 @@ class ModernMeshGenGUI(QMainWindow):
 
         # Define comprehensive filters
         filters = (
-            "All Compatible Files (*.step *.stp *.x_t *.x_b *.sldprt *.sldasm *.prt *.stl *.obj *.ply *.msh *.vtu *.vtk);;"
+            "All Compatible Files (*.step *.stp *.x_t *.x_b *.stl *.obj *.ply *.msh *.vtu *.vtk);;"
             "CAD Files (*.step *.stp *.x_t *.x_b);;"
-            "SolidWorks Files (*.sldprt *.sldasm *.prt);;"
             "Surface Meshes (*.stl *.obj *.ply);;"
             "Volumetric Meshes (*.msh *.vtu *.vtk);;"
             "All Files (*)"
@@ -2228,6 +2291,8 @@ class ModernMeshGenGUI(QMainWindow):
             "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
             "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
             "verbose_preview": self.verbose_preview.isChecked() if hasattr(self, 'verbose_preview') else False,  # Logging toggle
+            "snappy_mode": "External" if hasattr(self, 'snappy_mode') and "External" in self.snappy_mode.currentText() else "Internal",
+            "snappy_layers": self.snappy_layers.value() if hasattr(self, 'snappy_layers') else 0,
         }
 
         # Check for pre-generated high-quality STL from Stage 3 background task
