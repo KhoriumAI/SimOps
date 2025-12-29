@@ -28,8 +28,11 @@ from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
 from slicing import generate_slice_mesh, parse_msh_for_slicing
-import meshio
 import numpy as np
+try:
+    import meshio
+except ImportError:
+    meshio = None
 
 
 def create_app(config_class=None):

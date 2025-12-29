@@ -6,7 +6,7 @@ import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
 import BlockingModal from './components/BlockingModal'
-import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File } from 'lucide-react'
+import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3 } from 'lucide-react'
 
 // API base URL - uses proxy in development, full URL in production
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -41,6 +41,13 @@ function App() {
 
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
+
+  // Visualization toggles (shared with MeshViewer)
+  const [showAxes, setShowAxes] = useState(true)
+  const [showWireframe, setShowWireframe] = useState(false)
+  const [showQuality, setShowQuality] = useState(false)
+  const [qualityMetric, setQualityMetric] = useState('sicn')
+  const [showHistogram, setShowHistogram] = useState(false)
 
   const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
   const [meshStrategies, setMeshStrategies] = useState([
@@ -667,6 +674,70 @@ function App() {
                 </div>
               </div>
 
+              {/* Visualization Settings */}
+              <div className="bg-white rounded-lg border border-gray-200 text-sm overflow-hidden">
+                <div className="px-3 py-2 bg-gray-100 font-medium text-gray-700 border-b border-gray-200 flex items-center justify-between">
+                  <span>Visualization</span>
+                  {showHistogram && <BarChart3 className="w-3.5 h-3.5 text-blue-600 animate-pulse" />}
+                </div>
+                <div className="p-3 space-y-3">
+                  <div className="flex flex-col gap-2">
+                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={showAxes}
+                        onChange={(e) => setShowAxes(e.target.checked)}
+                        className="accent-blue-500 w-3.5 h-3.5"
+                      />
+                      Show Axes
+                    </label>
+                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={showWireframe}
+                        onChange={(e) => setShowWireframe(e.target.checked)}
+                        className="accent-blue-500 w-3.5 h-3.5"
+                      />
+                      Wireframe
+                    </label>
+                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={showQuality}
+                        onChange={(e) => setShowQuality(e.target.checked)}
+                        className="accent-blue-500 w-3.5 h-3.5"
+                      />
+                      Quality Coloring
+                    </label>
+                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={showHistogram}
+                        onChange={(e) => setShowHistogram(e.target.checked)}
+                        className="accent-blue-500 w-3.5 h-3.5"
+                      />
+                      Quality Histogram
+                    </label>
+                  </div>
+
+                  {showQuality && (
+                    <div className="pt-2 border-t border-gray-100">
+                      <label className="text-gray-400 text-[10px] uppercase mb-1 block">Metric</label>
+                      <select
+                        value={qualityMetric}
+                        onChange={(e) => setQualityMetric(e.target.value)}
+                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value="sicn">SICN (Ideal=1)</option>
+                        <option value="gamma">Gamma (Ideal=1)</option>
+                        <option value="skewness">Skewness</option>
+                        <option value="aspectRatio">Aspect Ratio</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Generate Button */}
               {currentProject && (
                 <div className="space-y-2">
@@ -736,7 +807,7 @@ function App() {
           <div className="flex-1 relative min-h-0">
             <MeshViewer
               meshData={meshData}
-              projectId={currentProject?.id}
+              projectId={currentProject}
               geometryInfo={geometryInfo}
               filename={projectStatus?.filename}
               qualityMetrics={meshData?.qualityMetrics || projectStatus?.latest_result?.quality_metrics}
@@ -748,6 +819,17 @@ function App() {
                   isUploading ? 'Uploading & Processing CAD file...' :
                     (projectStatus?.status === 'processing' ? 'Generating Mesh...' : undefined)
               }
+              // Visualization props
+              showAxes={showAxes}
+              setShowAxes={setShowAxes}
+              showWireframe={showWireframe}
+              setShowWireframe={setShowWireframe}
+              showQuality={showQuality}
+              setShowQuality={setShowQuality}
+              qualityMetric={qualityMetric}
+              setQualityMetric={setQualityMetric}
+              showHistogram={showHistogram}
+              setShowHistogram={setShowHistogram}
             />
           </div>
 

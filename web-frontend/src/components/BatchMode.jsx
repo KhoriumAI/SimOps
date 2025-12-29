@@ -3,7 +3,7 @@ import { useAuth } from '../contexts/AuthContext'
 import BatchUpload from './BatchUpload'
 import BatchDashboard from './BatchDashboard'
 import { useBatchPolling } from '../hooks/useWebSocket'
-import { 
+import {
   Plus, List, Settings, ToggleLeft, ToggleRight,
   Loader2, RefreshCw, ChevronDown
 } from 'lucide-react'
@@ -22,13 +22,13 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
  */
 export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const { authFetch } = useAuth()
-  
+
   // Helper to add log
   const addLog = (message) => {
     console.log('[Batch]', message)
     onLog?.(message)
   }
-  
+
   // State
   const [currentBatchId, setCurrentBatchId] = useState(null)
   const [batches, setBatches] = useState([])
@@ -37,7 +37,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const [isUploading, setIsUploading] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  
+
   // Settings
   const [batchName, setBatchName] = useState('')
   const [meshIndependence, setMeshIndependence] = useState(false)
@@ -45,7 +45,13 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [meshStrategies, setMeshStrategies] = useState(['Tet (Fast)', 'Tetrahedral (Delaunay)'])
-  
+
+  // New settings for parity with App.jsx
+  const [maxElementSize, setMaxElementSize] = useState(3.0)
+  const [minElementSize, setMinElementSize] = useState(0.1)
+  const [elementOrder, setElementOrder] = useState('1')
+  const [ansysMode, setAnsysMode] = useState('None')
+
   // Fetch available strategies from API
   useEffect(() => {
     const fetchStrategies = async () => {
@@ -67,7 +73,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
 
   // Polling for current batch
   const { batch, refresh, startPolling, stopPolling } = useBatchPolling(
-    currentBatchId, 
+    currentBatchId,
     authFetch,
     2000
   )
@@ -95,7 +101,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   // Start/stop polling based on batch status
   useEffect(() => {
     const finalStates = ['completed', 'failed', 'cancelled']
-    
+
     if (batch?.status === 'processing') {
       startPolling()
     } else if (finalStates.includes(batch?.status)) {
@@ -129,7 +135,11 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
           name: batchDisplayName,
           mesh_independence: meshIndependence,
           mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive
+          curvature_adaptive: curvatureAdaptive,
+          max_size_mm: maxElementSize,
+          min_size_mm: minElementSize,
+          element_order: parseInt(elementOrder),
+          ansys_mode: ansysMode
         })
       })
 
@@ -145,7 +155,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
       setIsUploading(true)
       addLog(`[BATCH] Uploading ${selectedFiles.length} files...`)
       selectedFiles.forEach(f => addLog(`   • ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`))
-      
+
       const formData = new FormData()
       selectedFiles.forEach(file => formData.append('files', file))
 
@@ -246,7 +256,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
 
     try {
       const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/download`)
-      
+
       if (!response.ok) {
         const err = await response.json()
         throw new Error(err.error || 'Failed to download')
@@ -331,7 +341,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
             <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
               <h3 className="text-xs font-medium text-gray-700">Create New Batch</h3>
             </div>
-            
+
             <div className="p-3 space-y-3">
               {/* Batch Name */}
               <div>
@@ -355,7 +365,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                   onClick={() => setMeshIndependence(!meshIndependence)}
                   className={`p-1 rounded transition-colors ${meshIndependence ? 'text-blue-600' : 'text-gray-400'}`}
                 >
-                  {meshIndependence 
+                  {meshIndependence
                     ? <ToggleRight className="w-8 h-8" />
                     : <ToggleLeft className="w-8 h-8" />
                   }
@@ -372,7 +382,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                   Advanced Settings
                   <ChevronDown className={`w-3 h-3 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
                 </button>
-                
+
                 {showSettings && (
                   <div className="mt-2 p-2 bg-gray-50 rounded space-y-2">
                     <div>
@@ -396,6 +406,55 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                       />
                       Curvature-Adaptive
                     </label>
+
+                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-gray-100">
+                      <div>
+                        <label className="text-[10px] uppercase text-gray-400 mb-1 block">Max Size</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={maxElementSize}
+                          onChange={(e) => setMaxElementSize(parseFloat(e.target.value) || 3.0)}
+                          className="w-full px-2 py-1 text-[10px] border border-gray-300 rounded"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase text-gray-400 mb-1 block">Min Size</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={minElementSize}
+                          onChange={(e) => setMinElementSize(parseFloat(e.target.value) || 0.1)}
+                          className="w-full px-2 py-1 text-[10px] border border-gray-300 rounded"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] uppercase text-gray-400 mb-1 block">Order</label>
+                        <select
+                          value={elementOrder}
+                          onChange={(e) => setElementOrder(e.target.value)}
+                          className="w-full px-2 py-1 text-[10px] border border-gray-300 rounded"
+                        >
+                          <option value="1">Linear</option>
+                          <option value="2">Quadratic</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase text-gray-400 mb-1 block">Ansys</label>
+                        <select
+                          value={ansysMode}
+                          onChange={(e) => setAnsysMode(e.target.value)}
+                          className="w-full px-2 py-1 text-[10px] border border-gray-300 rounded"
+                        >
+                          <option value="None">None</option>
+                          <option value="CFD (Fluent)">CFD</option>
+                          <option value="FEA (Mechanical)">FEA</option>
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -412,11 +471,10 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
               <button
                 onClick={createBatch}
                 disabled={selectedFiles.length === 0 || isCreating || isUploading}
-                className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
-                  selectedFiles.length > 0 && !isCreating
+                className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${selectedFiles.length > 0 && !isCreating
                     ? 'bg-blue-600 hover:bg-blue-700 text-white'
                     : 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                }`}
+                  }`}
               >
                 {isCreating || isUploading ? (
                   <>
@@ -485,12 +543,11 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                     <span className="text-xs font-medium text-gray-800 truncate">
                       {b.name || `Batch ${b.id.slice(0, 8)}`}
                     </span>
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      b.status === 'completed' ? 'bg-green-100 text-green-600' :
-                      b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
-                      b.status === 'failed' ? 'bg-red-100 text-red-600' :
-                      'bg-gray-100 text-gray-600'
-                    }`}>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${b.status === 'completed' ? 'bg-green-100 text-green-600' :
+                        b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
+                          b.status === 'failed' ? 'bg-red-100 text-red-600' :
+                            'bg-gray-100 text-gray-600'
+                      }`}>
                       {b.status}
                     </span>
                   </div>

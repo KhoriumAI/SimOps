@@ -132,12 +132,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     geo.computeBoundingBox()
 
-    // Position geometry to match main geometry (Z-base at 0)
-    const offset = new THREE.Vector3();
-    geo.boundingBox.getCenter(offset).negate();
-    offset.z = -geo.boundingBox.min.z;
-    geo.translate(offset.x, offset.y, offset.z);
-    geo.computeBoundingBox();
+    // No need to translate again, it already has geometry's positions
 
     return geo
   }, [geometry, gradientColors])
@@ -149,14 +144,14 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
       geometry.boundingBox.getSize(size)
       const maxDim = Math.max(size.x, size.y, size.z)
 
-      // The model is centered on XY, and its base is at Z=0.
-      // After rotation [-90, 0, 0], original Z becomes Y, original Y becomes -Z.
-      // So the center in viewer space is [0, height/2, 0].
+      // The model is centered on XY, and its base is at world-Y=0 (after rotation).
+      // In Three.js world space (after MeshObject group rotation):
+      // Center of object is [0, size.z/2, 0] since original Z is now world Y.
       const viewerCenter = new THREE.Vector3(0, size.z / 2, 0)
 
-      // Position camera closer for larger initial view
+      // Position camera at a good distance
       const distance = maxDim * 1.5
-      camera.position.set(distance * 0.8, distance * 0.6 + viewerCenter.y, distance * 0.8)
+      camera.position.set(distance, distance * 0.8, distance)
       camera.lookAt(viewerCenter)
       camera.updateProjectionMatrix()
     }
@@ -304,39 +299,28 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
   )
 }
 
-function QualityColorPanel({ activeMetric, onMetricChange, hasAdditionalMetrics }) {
-  const metrics = [
-    { id: 'sicn', label: 'SICN (Shape)', desc: '0=Bad, 1=Perfect' },
-    { id: 'gamma', label: 'Gamma (Radius)', desc: '0=Flat, 1=Equilateral' },
-    { id: 'skewness', label: 'Skewness', desc: '0=Ideal, 1=Degenerate' },
-    { id: 'aspectRatio', label: 'Aspect Ratio', desc: '1=Ideal, 5+=Poor' }
-  ]
-
-  return (
-    <div className="absolute top-10 right-3 bg-gray-900/95 backdrop-blur rounded p-3 z-10 text-xs text-gray-300 w-48 shadow-xl border border-gray-700">
-      <div className="font-medium text-white mb-2 text-sm">📊 Quality Metric</div>
-      <div className="space-y-1.5">
-        {metrics.map(m => (
-          <button
-            key={m.id}
-            onClick={() => onMetricChange(m.id)}
-            className={`w-full text-left px-2 py-1.5 rounded transition-colors flex flex-col ${activeMetric === m.id ? 'bg-blue-600 text-white' : 'hover:bg-gray-800 text-gray-400'}`}
-          >
-            <span className="font-medium">{m.label}</span>
-            <span className="text-[10px] opacity-60">{m.desc}</span>
-          </button>
-        ))}
-      </div>
-      {!hasAdditionalMetrics && (
-        <div className="mt-2 pt-2 border-t border-gray-800 text-[10px] text-yellow-500/80 italic">
-          Metric switching requires mesh re-generation or modern backend.
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default function MeshViewer({ meshData, projectId, geometryInfo, filename, qualityMetrics, status, isLoading, loadingProgress, loadingMessage }) {
+export default function MeshViewer({
+  meshData,
+  projectId,
+  geometryInfo,
+  filename,
+  qualityMetrics,
+  status,
+  isLoading,
+  loadingProgress,
+  loadingMessage,
+  // Props from App sidebar
+  showAxes,
+  setShowAxes,
+  showWireframe,
+  setShowWireframe,
+  showQuality,
+  setShowQuality,
+  qualityMetric,
+  setQualityMetric,
+  showHistogram,
+  setShowHistogram
+}) {
   const [clipping, setClipping] = useState({
     enabled: false,
     showQualitySlice: true,
@@ -400,12 +384,9 @@ export default function MeshViewer({ meshData, projectId, geometryInfo, filename
     return () => clearTimeout(timer)
   }, [clipping.enabled, clipping.showQualitySlice, clipping.x, clipping.y, clipping.z, clipping.xValue, clipping.yValue, clipping.zValue, projectId, meshData])
 
-  const [showQuality, setShowQuality] = useState(false)
+  // States are now props from App.jsx or kept here for local UI
   const [showControls, setShowControls] = useState(false)
   const [showPaintPanel, setShowPaintPanel] = useState(false)
-  const [showAxes, setShowAxes] = useState(true)
-  const [showWireframe, setShowWireframe] = useState(false)
-  const [showHistogram, setShowHistogram] = useState(false)
   const [showWireframePanel, setShowWireframePanel] = useState(false)
 
   // Wireframe options
@@ -416,8 +397,6 @@ export default function MeshViewer({ meshData, projectId, geometryInfo, filename
   // Paint/Color options
   const [meshColor, setMeshColor] = useState('#4a9eff')
   const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
-  const [qualityMetric, setQualityMetric] = useState('sicn')
-  const [showQualityPanel, setShowQualityPanel] = useState(false)
   const [opacity, setOpacity] = useState(1.0)
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
@@ -539,101 +518,32 @@ export default function MeshViewer({ meshData, projectId, geometryInfo, filename
 
       {meshData && (
         <>
-          {/* Compact Top Toolbar */}
-          <div className="absolute top-0 left-0 right-0 bg-gray-800/90 backdrop-blur px-3 py-1.5 z-20 flex items-center gap-4 text-xs text-gray-300">
-            {/* File info */}
-            <div className="flex items-center gap-2">
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${meshData.isPreview ? 'bg-yellow-600' : 'bg-green-600'}`}>
-                {meshData.isPreview ? 'PREVIEW' : 'MESH'}
-              </span>
-              {filename && <span className="text-white font-medium">{filename}</span>}
-              <span className="text-gray-500">|</span>
-              <span>{meshData.numTriangles?.toLocaleString()} tris</span>
-            </div>
-
-            <div className="flex-1" />
-
-            {/* View toggles */}
-            <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
-              <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} className="accent-blue-500 w-3 h-3" />
-              Axes
-            </label>
-            <div className="flex items-center gap-1">
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
-                <input type="checkbox" checked={showWireframe} onChange={(e) => setShowWireframe(e.target.checked)} className="accent-blue-500 w-3 h-3" />
-                Wireframe
-              </label>
-              {showWireframe && (
-                <button
-                  onClick={() => setShowWireframePanel(!showWireframePanel)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${showWireframePanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
-                  title="Wireframe Settings"
-                >
-                  ⚙
-                </button>
-              )}
-            </div>
-            {hasQualityData && (
-              <div className="flex items-center gap-1">
-                <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
-                  <input type="checkbox" checked={showQuality} onChange={(e) => { setShowQuality(e.target.checked); if (e.target.checked) setColorMode('quality'); else setColorMode('solid'); }} className="accent-blue-500 w-3 h-3" />
-                  Quality
-                </label>
-                {showQuality && (
-                  <button
-                    onClick={() => setShowQualityPanel(!showQualityPanel)}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${showQualityPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
-                    title="Change Quality Metric"
-                  >
-                    {qualityMetric.toUpperCase()}
-                  </button>
-                )}
-              </div>
-            )}
-            <button
-              onClick={() => setShowHistogram(!showHistogram)}
-              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showHistogram ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
-              title="Quality Histogram"
-            >
-              <BarChart3 className="w-3 h-3" />
-              Hist
-            </button>
-            <button
-              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
-              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${selectionMode ? 'bg-green-600' : 'bg-gray-600 hover:bg-gray-500'}`}
-              title="Face Selection Mode"
-            >
-              <MousePointer2 className="w-3 h-3" />
-              Select
-            </button>
+          {/* Floating Action Buttons - Bottom Left */}
+          <div className="absolute top-2 left-2 z-20 flex gap-2">
             <button
               onClick={() => setShowPaintPanel(!showPaintPanel)}
-              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showPaintPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showPaintPanel ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
             >
-              <span
-                className="w-3 h-2 rounded-sm"
-                style={{
-                  background: colorMode === 'gradient'
-                    ? `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})`
-                    : meshColor
-                }}
-              ></span>
+              <div
+                className="w-2.5 h-2.5 rounded-full border border-white/20"
+                style={{ backgroundColor: meshColor }}
+              ></div>
               Paint
             </button>
             <button
               onClick={() => setShowControls(!showControls)}
-              className={`px-2 py-0.5 rounded text-[10px] transition-colors ${showControls ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showControls ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
             >
+              <Scissors className="w-3.5 h-3.5" />
               Clip
             </button>
-
-            {showQuality && showQualityPanel && (
-              <QualityColorPanel
-                activeMetric={qualityMetric}
-                onMetricChange={(m) => { setQualityMetric(m); setShowQualityPanel(false); }}
-                hasAdditionalMetrics={!!meshData?.qualityColors}
-              />
-            )}
+            <button
+              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${selectionMode ? 'bg-green-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
+            >
+              <MousePointer2 className="w-3.5 h-3.5" />
+              Select
+            </button>
           </div>
 
           {/* Paint Panel */}
@@ -1029,6 +939,7 @@ export default function MeshViewer({ meshData, projectId, geometryInfo, filename
             <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
             <OrbitControls
               enableDamping={false}
+              dampingFactor={0}
               rotateSpeed={0.8}
               panSpeed={0.8}
               zoomSpeed={1.2}
