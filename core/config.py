@@ -28,7 +28,7 @@ class MeshParameters:
     """Default mesh generation parameters"""
     algorithm_2d: int = 6  # Frontal-Delaunay
     algorithm_3d: int = 1  # Delaunay
-    element_order: int = 2  # Quadratic elements
+    element_order: int = 1  # Linear elements (Tet4)
     high_order_optimize: int = 2
     refinement_levels: int = 3
     max_iterations: int = 5

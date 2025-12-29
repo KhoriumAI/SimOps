@@ -24,16 +24,22 @@ class EventHandler:
         default_dir = str(Path.home())
         filepath, _ = QFileDialog.getOpenFileName(
             self.window, "Select CAD or Mesh File", default_dir,
-            "CAD Files (*.step *.stp *.stl);;Mesh Files (*.msh);;All Files (*)"
+            "CAD Files (*.step *.stp);;Surface Meshes (*.stl *.obj *.ply);;Volumetric Meshes (*.msh *.vtu *.vtk);;All Files (*)"
         )
 
         if filepath:
             file_ext = Path(filepath).suffix.lower()
 
-            if file_ext == '.msh':
-                self.window.cad_file = None
+            if file_ext in ['.msh', '.stl', '.vtu', '.vtk', '.ply', '.obj']:
+                # For surface meshes, enable generation (remeshing)
+                if file_ext in ['.stl', '.obj', '.ply']:
+                    self.window.cad_file = filepath
+                    self.window.generate_btn.setEnabled(True)
+                else:
+                    self.window.cad_file = None
+                    self.window.generate_btn.setEnabled(False)
+
                 self.window.file_label.setText(f"{Path(filepath).name}")
-                self.window.generate_btn.setEnabled(False)
                 self.window.add_log(f"Loaded mesh: {filepath}")
                 self.window.viewer.load_mesh_file(filepath)
                 return
