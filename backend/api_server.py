@@ -349,10 +349,12 @@ def register_routes(app):
         """Rescue login route in case main auth blueprint is failing"""
         return jsonify({"access_token": "debug-token", "status": "success", "user": {"email": "debug@khorium.ai", "name": "Debug User", "role": "admin"}}), 200
 
+    @app.route('/health', methods=['GET'])  # Alias without /api prefix
     @app.route('/api/health', methods=['GET'])
     def health_check():
         return jsonify({"status": "healthy", "service": "mesh-generation-api", "version": "2.0"})
 
+    @app.route('/strategies', methods=['GET'])  # Alias without /api prefix
     @app.route('/api/strategies', methods=['GET'])
     def get_mesh_strategies():
         """
@@ -422,6 +424,7 @@ def register_routes(app):
             'default': 'Tet (Fast)'
         })
 
+    @app.route('/upload', methods=['POST'])  # Alias without /api prefix
     @app.route('/api/upload', methods=['POST'])
     @jwt_required()
     def upload_cad_file():
