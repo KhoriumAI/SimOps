@@ -1,0 +1,26 @@
+{
+  "file_path": "cad_files/Cylinder.step",
+  "file_name": "Cylinder.step",
+  "timestamp": "2025-12-30T09:47:18.044543",
+  "is_watertight": true,
+  "is_manifold": true,
+  "volume": 294524.31127404317,
+  "has_positive_volume": true,
+  "num_volumes": 1,
+  "num_faces": 4,
+  "num_edges": 6,
+  "bounding_box": [
+    -50.0000001,
+    -50.0000001,
+    -1e-05,
+    50.00001,
+    50.0000001,
+    50.00001
+  ],
+  "issues": [],
+  "issue_count": 0,
+  "repair_attempted": false,
+  "repair_success": false,
+  "repair_method": "",
+  "status": "HEALTHY"
+}
