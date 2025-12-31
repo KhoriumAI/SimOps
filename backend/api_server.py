@@ -536,6 +536,9 @@ def register_routes(app):
             db.session.commit()
         except Exception as e:
             db.session.rollback()
+            import traceback
+            print(f"[DATABASE ERROR] Failed to commit project/activity: {e}")
+            traceback.print_exc()
             # Try to clean up the uploaded files
             try:
                 storage.delete_file(filepath)
@@ -543,7 +546,7 @@ def register_routes(app):
                     storage.delete_file(preview_path)
             except:
                 pass
-            return jsonify({"error": "Failed to create project"}), 500
+            return jsonify({"error": f"Failed to create project: {str(e)}"}), 500
 
         return jsonify({
             "project_id": project_id,
@@ -1006,7 +1009,7 @@ try:
     
     # Fast rendering - disable perfectionism for preview speed
     # gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
-gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
+    gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
     gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)         # Disable Netgen optimizer
     gmsh.option.setNumber("Mesh.Algorithm", 1)              # Use MeshAdapt (most forgiving)
     gmsh.option.setNumber("Mesh.MaxRetries", 1)             # Don't try to re-mesh failed surfaces
@@ -1014,8 +1017,19 @@ gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimizati
     gmsh.option.setNumber("Mesh.Smoothing", 0)              # Disable smoothing for speed
     gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
     
+    # CRITICAL: Disable OCC auto-fix BEFORE opening to prevent "Could not fix wire" crashes
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-1)
+
     print(f"[PREVIEW] Loading STEP file: {step_filepath}")
-    gmsh.open(r"{step_filepath}")
+    try:
+        gmsh.open(r"{step_filepath}")
+    except Exception as e:
+        print(f"[PREVIEW] Initial open failed ({{e}}), attempting ultra-lenient fallback...")
+        gmsh.option.setNumber("Geometry.Tolerance", 1.0)
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+        gmsh.open(r"{step_filepath}")
     print("[PREVIEW] Synchronizing OCC model...")
     gmsh.model.occ.synchronize()
     print("[PREVIEW] CAD loaded successfully.")
