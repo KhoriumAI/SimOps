@@ -1098,10 +1098,7 @@ try:
     gmsh.option.setNumber("Geometry.OCCParallel", 1)
     
     # Fast rendering - disable perfectionism for preview speed
-<<<<<<< HEAD
     # gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
-=======
->>>>>>> 91b6d8f (fix/final_large_file_fix)
     gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
     gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)         # Disable Netgen optimizer
     gmsh.option.setNumber("Mesh.Algorithm", 1)              # Use MeshAdapt (most forgiving)
@@ -1110,7 +1107,6 @@ try:
     gmsh.option.setNumber("Mesh.Smoothing", 0)              # Disable smoothing for speed
     gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
     
-<<<<<<< HEAD
     # CRITICAL: Disable OCC auto-fix BEFORE opening to prevent "Could not fix wire" crashes
     gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
     gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
@@ -1124,17 +1120,6 @@ try:
         gmsh.option.setNumber("Geometry.Tolerance", 1.0)
         gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
         gmsh.open(r"{step_filepath}")
-=======
-    ext = os.path.splitext(r"{step_filepath}")[1].lower()
-    print(f"[PREVIEW] Loading CAD file ({{ext}}): {step_filepath}")
-    
-    # Use importShapes for best compatibility with various formats
-    if ext in ['.stl', '.obj', '.ply']:
-        gmsh.merge(r"{step_filepath}")
-    else:
-        gmsh.model.occ.importShapes(r"{step_filepath}")
-        
->>>>>>> 91b6d8f (fix/final_large_file_fix)
     print("[PREVIEW] Synchronizing OCC model...")
     gmsh.model.occ.synchronize()
     print("[PREVIEW] CAD loaded successfully.")
