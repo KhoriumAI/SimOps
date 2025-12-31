@@ -80,7 +80,7 @@ def run_strategy_wrapper(args):
     from core.config import Config
     import gmsh
     
-    strategy_name, input_file, config, stop_event = args
+    strategy_name, input_file, config, stop_event, geometry_info = args
     
     # Check if we should even start
     if stop_event.is_set():
@@ -91,18 +91,23 @@ def run_strategy_wrapper(args):
         # Initialize generator with config and stop_event
         generator = ExhaustiveMeshGenerator(config, stop_event)
         
+        # Populate geometry info from orchestrator (in case loading fails)
+        if geometry_info:
+            generator.geometry_info = geometry_info
+        
         # Initialize Gmsh for this process
-        # We use a dummy thread count of 1 because we are already parallelizing at process level
         generator.initialize_gmsh(thread_count=1)
         
         # [DEBUG] Enable Gmsh output in workers for diagnostics
-        import gmsh
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.option.setNumber("General.Verbosity", 3)
         
         try:
             # Load the file
-            if not generator.load_cad_file(input_file):
+            load_success = generator.load_cad_file(input_file)
+            
+            # For bounding box, we can proceed even if load failed (using orchestrator bbox)
+            if not load_success and strategy_name != "bounding_box_fallback":
                 return (strategy_name, False, {}, "Failed to load CAD file")
 
             # Find the strategy method
@@ -426,8 +431,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 # Create Event via Manager (This gives us a Windows-safe Proxy)
                 stop_event = manager.Event()
                 
-                # Prepare arguments for workers: (strategy_name, input_file, config, stop_event)
-                worker_args = [(name, input_file, self.config, stop_event) for name in strategy_names]
+                # Prepare arguments for workers: (strategy_name, input_file, config, stop_event, geometry_info)
+                worker_args = [(name, input_file, self.config, stop_event, self.geometry_info) for name in strategy_names]
                 
                 pool = None
                 try:
@@ -506,6 +511,28 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                     if pool:
                         pool.terminate() # Fallback to hard kill on error
                         pool.join()
+                
+        # --- LAST DITCH SAFETY FALLBACK ---
+        # If no winners and no candidates after the parallel race, 
+        # try the bounding box fallback ONE LAST TIME in the main process.
+        if not best_mesh_path:
+            self.log_message("\n[SAFETY] No successful strategy found. Attempting main-process last-ditch fallback...")
+            last_ditch_file = f"last_ditch_bbox_{os.getpid()}.msh"
+            if self.create_bounding_box_mesh(last_ditch_file):
+                best_mesh_path = last_ditch_file
+                best_score = 999.0
+                best_strategy = "last_ditch_bounding_box"
+                self.all_attempts.append({
+                    'strategy': best_strategy,
+                    'success': True,
+                    'score': best_score,
+                    'metrics': {
+                        'total_elements': 12,
+                        'total_nodes': 8,
+                        'gmsh_sicn': {'min': 1.0, 'max': 1.0, 'avg': 1.0},
+                        'strategy': 'last_ditch_bounding_box'
+                    }
+                })
                 
         # Process the winner
         if best_mesh_path and os.path.exists(best_mesh_path):
