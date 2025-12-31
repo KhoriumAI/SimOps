@@ -1296,7 +1296,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             print(f"[DEBUG] defer_quality = {config.defer_quality}")
 
         from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
-        generator = ExhaustiveMeshGenerator(config)
+        # (Generator is now initialized inside the isolated subprocess for crash safety)
 
         # Determine output folders (organized structure)
         mesh_folder = Path(__file__).parent / "generated_meshes"

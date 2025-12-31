@@ -1108,22 +1108,32 @@ class BaseMeshGenerator(ABC):
             
             if p_min is None: p_min, p_max = [0,0,0], [1,1,1]
 
-            # 2. Run fallback in separate process
-            p = multiprocessing.Process(target=_bounding_box_worker, args=(output_file, p_min, p_max))
-            p.start()
-            p.join(30.0) # 30s timeout for a simple box is plenty
+            # 2. Run fallback in separate process if possible
+            current_proc = multiprocessing.current_process()
+            can_spawn = not getattr(current_proc, 'daemon', False)
             
-            if p.is_alive():
-                p.terminate()
-                self.log_message("[X] Bounding Box worker timed out", level="ERROR")
-                return False
+            if can_spawn:
+                p = multiprocessing.Process(target=_bounding_box_worker, args=(output_file, p_min, p_max))
+                p.start()
+                p.join(30.0) # 30s timeout for a simple box is plenty
                 
-            if p.exitcode == 0:
-                self.log_message(f"[OK] Bounding box mesh saved to {output_file}")
-                return True
+                if p.is_alive():
+                    p.terminate()
+                    self.log_message("[X] Bounding Box worker timed out", level="ERROR")
+                    return False
+                    
+                if p.exitcode == 0:
+                    self.log_message(f"[OK] Bounding box mesh saved to {output_file}")
+                    return True
+                else:
+                    self.log_message(f"[X] Bounding Box worker failed with exit code {p.exitcode}", level="ERROR")
+                    return False
             else:
-                self.log_message(f"[X] Bounding Box worker failed with exit code {p.exitcode}", level="ERROR")
-                return False
+                # We are already in a daemonic process (likely a Pool worker)
+                # Spawning a child is forbidden, so we run directly.
+                # Since we are already isolated in a worker, a crash here is caught higher up.
+                self.log_message("[DEBUG] Running bounding box in-process (daemonic isolation active)")
+                return _bounding_box_worker(output_file, p_min, p_max)
                 
         except Exception as e:
             self.log_message(f"[X] Bounding Box fallback system failed: {e}")
