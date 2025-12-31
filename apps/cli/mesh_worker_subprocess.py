@@ -996,10 +996,24 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
         gmsh.option.setNumber("Mesh.MinimumCircleNodes", 12)
         
-        # Set HXT algorithm (fast, parallel, robust)
-        gmsh.option.setNumber("Mesh.Algorithm", 6)    # Frontal-Delaunay 2D
-        gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT (Parallel Delaunay 3D)
-        gmsh.option.setNumber("Mesh.ElementOrder", element_order)
+        # 1. First Attempt: Rapid Parallel HXT
+        try:
+            print("[HXT] Attempting fast parallel HXT (Algorithm 10)...", flush=True)
+            gmsh.option.setNumber("Mesh.Algorithm", 6)    # Frontal-Delaunay 2D
+            gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT (Parallel)
+            gmsh.option.setNumber("Mesh.ElementOrder", element_order)
+            gmsh.model.mesh.generate(3)
+        except Exception as e:
+            print(f"[HXT] Parallel HXT failed ({e}), falling back to Ultra-Stable MeshAdapt...", flush=True)
+            # 2. Second Attempt: Ultra-Stable Single-Threaded MeshAdapt
+            gmsh.model.mesh.clear()
+            gmsh.option.setNumber("General.NumThreads", 1)  # Disable OpenMP
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 0) # Disable auto-healing
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+            gmsh.option.setNumber("Mesh.Algorithm", 1)      # MeshAdapt
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)    # Delaunay
+            gmsh.option.setNumber("Mesh.ElementOrder", element_order) # Ensure element order is set for MeshAdapt too
+            gmsh.model.mesh.generate(3)
         
         # Light optimization (fast)
         gmsh.option.setNumber("Mesh.Optimize", 1)
@@ -1478,6 +1492,19 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                     sorted_q = sorted(all_qualities)
                     idx_10 = max(0, int(len(sorted_q) * 0.10))
                     quality_metrics['sicn_10_percentile'] = sorted_q[idx_10]
+                    
+                    # Fill in SICN if missing
+                    if 'sicn_min' not in quality_metrics:
+                        quality_metrics['sicn_min'] = float(min(all_qualities))
+                        quality_metrics['sicn_avg'] = float(np.mean(all_qualities))
+                        quality_metrics['sicn_max'] = float(max(all_qualities))
+                        
+                    # Fill in Gamma if missing
+                    all_gammas = list(vol_gammas.values())
+                    if all_gammas and 'gamma_min' not in quality_metrics:
+                        quality_metrics['gamma_min'] = float(min(all_gammas))
+                        quality_metrics['gamma_avg'] = float(np.mean(all_gammas))
+                        quality_metrics['gamma_max'] = float(max(all_gammas))
                     print(f"[DEBUG] Extracted quality for {len(vol_qualities)} volume elements")
                     print(f"[DEBUG] Surface quality mapped for {sum(len(t) for t in surf_tags)} elements")
                     print(f"[DEBUG] Quality range: {min(all_qualities):.3f} to {max(all_qualities):.3f}")

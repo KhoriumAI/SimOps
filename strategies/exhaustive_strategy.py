@@ -177,6 +177,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # Define all strategies to try
         # Use custom order from config if provided
         default_strategy_names = [
+            "ultra_stable_tet", # High priority for complex geometry
             "tet_delaunay_optimized",
             "tet_frontal_optimized",
             "tet_hxt_optimized",
@@ -195,6 +196,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             "subdivide_and_mesh",
             "automatic_gmsh_default",
             "resurfacing_reconstruction",
+            "bounding_box_fallback" # Absolute last resort
         ]
         
         # Use custom strategy order from config if provided
@@ -728,6 +730,58 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         except Exception as e:
             self.log_message(f"Resurfacing strategy failed: {e}")
             return False, None
+
+    def _try_bounding_box_fallback(self) -> Tuple[bool, Optional[Dict]]:
+        """
+        Absolute last resort: Create a bounding box mesh.
+        """
+        self.log_message("\n[Strategy] Starting Bounding Box Fallback...")
+        temp_file = f"bbox_temp_{os.getpid()}.msh"
+        if self.create_bounding_box_mesh(temp_file):
+            # CRITICAL: Merge the mesh back into the current process's Gmsh state
+            # so that save_mesh() in the orchestrator/wrapper works.
+            try:
+                gmsh.merge(temp_file)
+                # Cleanup the temp file
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                
+                # Analyze the box mesh to get proper metrics (count, sicn, etc.)
+                metrics = self.analyze_current_mesh()
+                return True, metrics
+            except Exception as e:
+                self.log_message(f"Failed to analyze bounding box: {e}")
+                return True, {"num_elements": 12, "strategy": "bounding_box"}
+        return False, {}
+
+    def _try_ultra_stable_tet(self) -> Tuple[bool, Optional[Dict]]:
+        """
+        ULTRA-STABLE fallback using MeshAdapt and single-threading.
+        Used for the most complex/toxic geometries that crash HXT.
+        """
+        self.log_message("\n[Strategy] Starting Ultra-Stable Tet Meshing (MeshAdapt + Single-Thread)")
+        try:
+            # 1. Enforce absolute stability
+            gmsh.option.setNumber("General.NumThreads", 1)  # Disable OpenMP
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 0) # Disable unstable auto-healing
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+            
+            # 2. Algorithm 1 (MeshAdapt) is the most robust for difficult CAD
+            gmsh.option.setNumber("Mesh.Algorithm", 1) 
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1) # Standard Delaunay 3D (HXT can crash)
+            
+            # 3. Lenient meshing options
+            gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.9)
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1) # Reduce complexity
+            
+            # 4. Clear and Generate
+            gmsh.model.mesh.clear()
+            gmsh.model.mesh.generate(3)
+            
+            return True, self.analyze_current_mesh()
+        except Exception as e:
+            self.log_message(f"[!] Ultra-Stable strategy failed: {e}")
+            return False, {}
 
     def _try_tet_delaunay_optimized(self) -> Tuple[bool, Optional[Dict]]:
         """

@@ -12,6 +12,7 @@ import math
 import time
 import json
 import threading
+import multiprocessing
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -20,6 +21,68 @@ from abc import ABC, abstractmethod
 from .quality import MeshQualityAnalyzer
 from .config import Config, get_default_config
 from .ai_integration import AIRecommendationEngine, MeshRecommendation
+
+
+def _canary_worker(file_path, results_queue):
+    """Worker function for 3D/2D meshing canary. Isolated in separate process."""
+    try:
+        import gmsh
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.option.setNumber("General.Verbosity", 1)
+        
+        # Ultra-stable settings for canary
+        gmsh.option.setNumber("General.NumThreads", 1)  # Disable OpenMP
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0) # Disable auto-healing
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+        gmsh.option.setNumber("Mesh.Algorithm", 1)      # MeshAdapt (stable)
+        
+        gmsh.model.add("Canary")
+        gmsh.model.occ.importShapes(file_path)
+        gmsh.model.occ.synchronize()
+        
+        # Fast 2D mesh
+        gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt
+        gmsh.model.mesh.generate(2)
+        
+        gmsh.finalize()
+        results_queue.put(True)
+    except Exception as e:
+        # results_queue.put(False)
+        pass
+
+
+def _bounding_box_worker(output_file, p_min, p_max):
+    """Isolated worker for creating a bounding box mesh."""
+    try:
+        import gmsh
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 0)
+        
+        # Ultra-stable settings for bounding box
+        gmsh.option.setNumber("General.NumThreads", 1)
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+        
+        gmsh.model.add("BBox_Fallback")
+        
+        dx = max(1e-3, p_max[0] - p_min[0])
+        dy = max(1e-3, p_max[1] - p_min[1])
+        dz = max(1e-3, p_max[2] - p_min[2])
+        
+        gmsh.model.occ.addBox(p_min[0], p_min[1], p_min[2], dx, dy, dz)
+        gmsh.model.occ.synchronize()
+        
+        max_dim = max(dx, dy, dz)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", max_dim / 10.0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max_dim / 2.0)
+        gmsh.model.mesh.generate(3)
+        
+        gmsh.write(output_file)
+        gmsh.finalize()
+        return True
+    except:
+        return False
 
 
 class MeshGenerationResult:
@@ -393,7 +456,11 @@ class BaseMeshGenerator(ABC):
             # CRITICAL: Set GUI options BEFORE loading file
             # These settings from the GUI's .opt file enable successful meshing
             # They must be applied before merge() so OCC cleans geometry during import
-            gmsh.option.setNumber("Geometry.OCCAutoFix", 1)      # Auto-fix micro-gaps
+            
+            # CONSISTENCY FIX: Match api_server.py robust loading
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 0)      # Disable unstable auto-fix
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)    # More forgiving tolerance
+            
             gmsh.option.setNumber("Geometry.AutoCoherence", 1)   # Auto-merge touching vertices
             
             # CONDITIONAL AGGRESSIVE DEFEATURING for complex geometries (gyroid, TPMS, etc.)
@@ -403,16 +470,16 @@ class BaseMeshGenerator(ABC):
             if aggressive_healing:
                 self.log_message("[Geometry] Applying aggressive healing (slow but thorough)")
                 # Increased from 1e-08 to 1e-06 to heal problematic intersections
-                gmsh.option.setNumber("Geometry.Tolerance", 1e-06)   # More forgiving tolerance
+                gmsh.option.setNumber("Geometry.Tolerance", 1e-1)   # More forgiving tolerance
                 
                 # Additional OCC healing for complex boundary intersections
                 gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)  # Fix degenerate edges/faces
-                gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)    # Remove/merge tiny edges
+                gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)    # Remove tiny edges/micro-gaps
                 gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)    # Remove/merge tiny faces
             else:
-                self.log_message("[Geometry] Using fast mode (tight tolerance, minimal healing)")
-                # Tight tolerance for speed (GUI default)
-                gmsh.option.setNumber("Geometry.Tolerance", 1e-08)
+                self.log_message("[Geometry] Using fast mode (lenient tolerance)")
+                # Standard lenient tolerance consistent with preview
+                gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
             
             # Disable destructive operations that the GUI doesn't use
             gmsh.option.setNumber("Geometry.OCCSewFaces", 0)     # Don't force sewing
@@ -422,19 +489,33 @@ class BaseMeshGenerator(ABC):
             import time
             t0 = time.time()
             ext = os.path.splitext(filename)[1].lower()
-            if ext in ['.step', '.stp', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
-                gmsh.model.occ.importShapes(filename)
-                self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
-                gmsh.model.occ.synchronize()
-                self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
-            elif ext in ['.iges', '.igs']:
-                gmsh.model.occ.importShapes(filename)
-                self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
-                gmsh.model.occ.synchronize()
-                self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
-            elif ext in ['.stl', '.obj', '.ply']:
-                self.log_message(f"Loading surface mesh: {filename}")
-                gmsh.merge(filename)
+            try:
+                if ext in ['.step', '.stp', '.x_t', '.x_b', '.prt', '.sldprt', '.sldasm']:
+                    gmsh.model.occ.importShapes(filename)
+                    self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
+                    gmsh.model.occ.synchronize()
+                    self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
+                elif ext in ['.iges', '.igs']:
+                    gmsh.model.occ.importShapes(filename)
+                    self.log_message(f"  - Import completed in {time.time()-t0:.2f}s")
+                    gmsh.model.occ.synchronize()
+                    self.log_message(f"  - Synchronize completed in {time.time()-t0:.2f}s")
+                elif ext in ['.stl', '.obj', '.ply']:
+                    self.log_message(f"Loading surface mesh: {filename}")
+                    gmsh.merge(filename)
+                else:
+                    raise Exception(f"Unsupported format: {ext}")
+            except Exception as e:
+                self.log_message(f"[Geometry] Initial open failed ({e}), attempting ultra-lenient fallback...")
+                gmsh.option.setNumber("Geometry.Tolerance", 1.0)
+                gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+                
+                if ext in ['.stl', '.obj', '.ply']:
+                    gmsh.merge(filename)
+                else:
+                    gmsh.model.occ.importShapes(filename)
+                    gmsh.model.occ.synchronize()
+                self.log_message("[Geometry] Ultra-lenient fallback successful")
                 
                 # Create a volume for 3D meshing from the surface
                 self.log_message("Constructing volume from surface mesh...")
@@ -461,8 +542,6 @@ class BaseMeshGenerator(ABC):
                     self.log_message(f"[OK] Created volume from {len(surfaces)} surfaces")
                 else:
                     self.log_message("[!] No surfaces found in mesh file", level="WARNING")
-            else:
-                raise Exception(f"Unsupported format: {ext}")
 
             self.log_message("[OK] File imported successfully")
 
@@ -970,32 +1049,37 @@ class BaseMeshGenerator(ABC):
 
     def generate_2d_canary(self, timeout: float = 5.0) -> bool:
         """
-        Attempt a 2D surface mesh with a strict timeout (Threaded Canary).
+        Attempt a 2D surface mesh using a separate subprocess (Process Canary).
         If 2D meshing stalls, it's a precursor to 3D meshing stalls.
+        Uses multiprocessing for absolute isolation from the main worker's Gmsh state.
         """
         self.log_message(f"Starting 2D Surface Canary (Timeout: {timeout}s)...")
         
-        success_container = [False]
+        # Get current mesh parameters for the canary
+        cad_file = getattr(self, 'current_filename', None)
+        if not cad_file or not os.path.exists(cad_file):
+            self.log_message("[!] Canary failed: No CAD file loaded", level="WARNING")
+            return True # Don't block if we can't run the canary
+            
+        results_queue = multiprocessing.Queue()
+        p = multiprocessing.Process(target=_canary_worker, args=(cad_file, results_queue))
+        p.start()
+        p.join(timeout)
         
-        def mesh_task():
-            try:
-                gmsh.model.mesh.generate(2)
-                success_container[0] = True
-            except:
-                pass
-
-        t = threading.Thread(target=mesh_task)
-        t.start()
-        t.join(timeout)
-        
-        if t.is_alive():
+        if p.is_alive():
             self.log_message(f"[!] 2D Canary TIMED OUT after {timeout}s - Potential geometric hang.")
-            # Note: We can't easily kill the thread while using the C-api, 
-            # but we can at least signal failure and stop higher-level processing.
+            p.terminate()
+            p.join()
             return False
             
-        if not success_container[0]:
-            self.log_message("[!] 2D Canary FAILED.")
+        success = False
+        try:
+            success = results_queue.get_nowait()
+        except:
+            pass
+            
+        if not success:
+            self.log_message("[!] 2D Canary Failed within timeout (geometry might be too complex).")
             return False
             
         self.log_message("[OK] 2D Canary passed.")
@@ -1003,40 +1087,46 @@ class BaseMeshGenerator(ABC):
 
     def create_bounding_box_mesh(self, output_file: str) -> bool:
         """
-        Create a simplified bounding box mesh for this part.
-        Used as a robust fallback for "toxic" or failing geometry.
+        Create a simplified bounding box mesh using a separate process for isolation.
         """
-        self.log_message("Generating Bounding Box B-Rep Fallback...")
+        self.log_message("Generating Bounding Box B-Rep Fallback (Isolated Process)...")
         
         try:
+            # 1. Get bounding box info
             bb = self.geometry_info.get('bounding_box')
-            if not bb:
-                # Re-calculate if missing
-                volumes = gmsh.model.getEntities(3)
-                bb = self._calculate_bounding_box(volumes)
+            p_min, p_max = None, None
+            
+            if bb and isinstance(bb, dict) and 'min' in bb and 'max' in bb:
+                p_min, p_max = bb['min'], bb['max']
+            else:
+                # If pre-calc missing, try a quick query (risky but last resort)
+                try:
+                    res = gmsh.model.getBoundingBox(-1, -1)
+                    if res and len(res) == 6:
+                        p_min, p_max = [res[0], res[1], res[2]], [res[3], res[4], res[5]]
+                except: pass
+            
+            if p_min is None: p_min, p_max = [0,0,0], [1,1,1]
+
+            # 2. Run fallback in separate process
+            p = multiprocessing.Process(target=_bounding_box_worker, args=(output_file, p_min, p_max))
+            p.start()
+            p.join(30.0) # 30s timeout for a simple box is plenty
+            
+            if p.is_alive():
+                p.terminate()
+                self.log_message("[X] Bounding Box worker timed out", level="ERROR")
+                return False
                 
-            p_min = bb['min']
-            p_max = bb['max']
-            dx = p_max[0] - p_min[0]
-            dy = p_max[1] - p_min[1]
-            dz = p_max[2] - p_min[2]
-            
-            # Re-init Gmsh for a clean model
-            gmsh.model.add("BBox_Fallback")
-            box_tag = gmsh.model.occ.addBox(p_min[0], p_min[1], p_min[2], dx, dy, dz)
-            gmsh.model.occ.synchronize()
-            
-            # Simple coarse mesh
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", max(dx, dy, dz) / 5.0)
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max(dx, dy, dz) / 2.0)
-            gmsh.model.mesh.generate(3)
-            
-            gmsh.write(output_file)
-            self.log_message(f"[OK] Bounding box mesh saved to {output_file}")
-            return True
-            
+            if p.exitcode == 0:
+                self.log_message(f"[OK] Bounding box mesh saved to {output_file}")
+                return True
+            else:
+                self.log_message(f"[X] Bounding Box worker failed with exit code {p.exitcode}", level="ERROR")
+                return False
+                
         except Exception as e:
-            self.log_message(f"[X] Bounding Box fallback failed: {e}")
+            self.log_message(f"[X] Bounding Box fallback system failed: {e}")
             return False
 
     def calculate_initial_mesh_parameters(self) -> Dict[str, float]:

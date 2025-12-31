@@ -1033,12 +1033,32 @@ def parse_step_file_for_preview(step_filepath: str):
     
     # Use subprocess like desktop version to avoid gmsh state issues
     # More robust meshing with fallback options for complex geometries
-    gmsh_script = f'''
+    # Use raw string and manual replacement for better reliability with braces
+    gmsh_script = r'''
 import gmsh
 import sys
 import os
+import json
 
-def try_mesh(mesh_factor, algorithm=5, tolerance=1e-3):
+def apply_robust_settings():
+    """Apply standard robust settings to Gmsh"""
+    # CRITICAL: Disable OCC auto-fix early to prevent "Could not fix wire" crashes
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+    gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-1)
+    
+    # DISABLE OpenMP for preview generation (often the source of SIGSEGV during meshing)
+    gmsh.option.setNumber("General.NumThreads", 1)
+    
+    # Fast rendering - disable perfectionism for preview speed
+    gmsh.option.setNumber("Mesh.Optimize", 0)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
+    gmsh.option.setNumber("Mesh.MaxRetries", 1)
+    gmsh.option.setNumber("Mesh.RecombineAll", 0)
+    gmsh.option.setNumber("Mesh.Smoothing", 0)
+    gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
+
+def try_mesh(mesh_factor, algorithm=1, tolerance=1e-3):
     """Try to generate mesh with given parameters"""
     gmsh.model.mesh.clear()
     
@@ -1047,166 +1067,121 @@ def try_mesh(mesh_factor, algorithm=5, tolerance=1e-3):
     bbox_size = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
     diag = (bbox_size[0]**2 + bbox_size[1]**2 + bbox_size[2]**2)**0.5
     
-    # Mesh sizing - larger factor = coarser mesh
+    # Mesh sizing
     mesh_size = diag / mesh_factor
     gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.1)
     gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size * 5)
     
-    # Algorithm: 1=MeshAdapt, 5=Delaunay, 6=Frontal-Delaunay, 7=BAMG
+    # Apply local tolerance and algorithm
     gmsh.option.setNumber("Mesh.Algorithm", algorithm)
-    
-    # Very tolerant settings for complex geometry
-    gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.9)
-    gmsh.option.setNumber("Mesh.AllowSwapAngle", 120)
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 4)
-    gmsh.option.setNumber("Mesh.MinimumCircleNodes", 3)
+    gmsh.option.setNumber("Geometry.Tolerance", tolerance)
     gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", tolerance)
     
-    # Increase tolerance for difficult geometries
-    gmsh.option.setNumber("Geometry.Tolerance", tolerance)
-    gmsh.option.setNumber("Geometry.ToleranceBoolean", tolerance * 10)
+    # Extra robustness
+    gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.9)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 4)
+    
+    # Re-enforce single-thread and no-autofix right before generation
+    gmsh.option.setNumber("General.NumThreads", 1)
+    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
     
     # Generate 2D surface mesh
     gmsh.model.mesh.generate(2)
-    # Force GMSH to skip the 'stuck' healing process
-    gmsh.option.setNumber("Geometry.OCCAutoFix", 0) 
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-3)
-    gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt is more stable for dirty CAD
-    
     return True
 
 try:
-    print(f"[PREVIEW] Initializing Gmsh for CAD: {step_filepath}")
+    step_filepath = r"__CAD_FILE__"
     gmsh.initialize()
-    # Increase verbosity for debugging
     gmsh.option.setNumber("General.Terminal", 1)
     gmsh.option.setNumber("General.Verbosity", 3)
     
-    # Aggressive OCC healing options for problematic CAD files
-    gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
-    gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)
-    gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
-    gmsh.option.setNumber("Geometry.OCCSewFaces", 1)
-    gmsh.option.setNumber("Geometry.OCCMakeSolids", 1)
-    
-    # Dirty Geometry Workaround
-    gmsh.option.setNumber("Geometry.OCCBoundsUseStl", 1)
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-3) # Millimeter tolerance
-    
-    gmsh.option.setNumber("Geometry.ToleranceBoolean", 0.5)
-    gmsh.option.setNumber("Geometry.OCCScaling", 1)
-    gmsh.option.setNumber("Geometry.OCCParallel", 1)
-    
-    # Fast rendering - disable perfectionism for preview speed
-    # gmsh.option.setNumber("Mesh.CheckAllElements", 0)       # Don't stop for invalid elements
-    gmsh.option.setNumber("Mesh.Optimize", 0)               # Disable the optimization loop
-    gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)         # Disable Netgen optimizer
-    gmsh.option.setNumber("Mesh.Algorithm", 1)              # Use MeshAdapt (most forgiving)
-    gmsh.option.setNumber("Mesh.MaxRetries", 1)             # Don't try to re-mesh failed surfaces
-    gmsh.option.setNumber("Mesh.RecombineAll", 0)
-    gmsh.option.setNumber("Mesh.Smoothing", 0)              # Disable smoothing for speed
-    gmsh.option.setNumber("Mesh.StlRemoveDuplicateTriangles", 1)
-    
-    # CRITICAL: Disable OCC auto-fix BEFORE opening to prevent "Could not fix wire" crashes
-    gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
-    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-1)
+    apply_robust_settings()
 
-    print(f"[PREVIEW] Loading STEP file: {step_filepath}")
+    print(f"[PREVIEW] Loading CAD file: {step_filepath}")
     try:
-        gmsh.open(r"{step_filepath}")
-    except Exception as e:
-        print(f"[PREVIEW] Initial open failed ({{e}}), attempting ultra-lenient fallback...")
+        # Ultra-lenient tolerance for loading
         gmsh.option.setNumber("Geometry.Tolerance", 1.0)
-        gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
-        gmsh.open(r"{step_filepath}")
-    print("[PREVIEW] Synchronizing OCC model...")
-    gmsh.model.occ.synchronize()
-    print("[PREVIEW] CAD loaded successfully.")
+        gmsh.model.occ.importShapes(step_filepath)
+        gmsh.model.occ.synchronize()
+    except Exception as e:
+        print(f"[PREVIEW] Initial open failed ({e}), attempting fallback...")
+        try:
+            gmsh.merge(step_filepath)
+            gmsh.model.occ.synchronize()
+        except Exception as e2:
+            print(f"[PREVIEW] all load attempts failed: {e2}")
     
-    # Extract CAD geometry info BEFORE meshing
-    volumes = gmsh.model.getEntities(3)  # 3D entities (volumes)
-    surfaces = gmsh.model.getEntities(2)  # 2D entities (surfaces)
-    curves = gmsh.model.getEntities(1)    # 1D entities (curves)
-    points = gmsh.model.getEntities(0)    # 0D entities (points)
+    # Check if we actually loaded anything
+    volumes = gmsh.model.getEntities(3)
+    surfaces = gmsh.model.getEntities(2)
+    if not volumes and not surfaces:
+        print("[PREVIEW] ERROR: No geometry loaded.", file=sys.stderr)
+        sys.exit(1)
     
-    # Get bounding box
+    print(f"[PREVIEW] CAD loaded. Volumes: {len(volumes)}, Surfaces: {len(surfaces)}")
+    
+    # Extract CAD info
+    curves = gmsh.model.getEntities(1)
+    points = gmsh.model.getEntities(0)
     bbox = gmsh.model.getBoundingBox(-1, -1)
     bbox_size = [bbox[3]-bbox[0], bbox[4]-bbox[1], bbox[5]-bbox[2]]
     diag = (bbox_size[0]**2 + bbox_size[1]**2 + bbox_size[2]**2)**0.5
     
-    print(f"[PREVIEW] Geometry Info:")
-    print(f"  - Volumes: {{len(volumes)}}")
-    print(f"  - Surfaces: {{len(surfaces)}}")
-    print(f"  - Curves: {{len(curves)}}")
-    print(f"  - Points: {{len(points)}}")
-    print(f"  - Bounding Box: {{bbox_size[0]:.2f}} x {{bbox_size[1]:.2f}} x {{bbox_size[2]:.2f}}")
-    print(f"  - Diagonal: {{diag:.2f}}")
-    
-    # Calculate volume if possible
+    # Calculate volume
     total_volume = 0.0
     for dim, tag in volumes:
-        try:
-            total_volume += gmsh.model.occ.getMass(dim, tag)
-        except:
-            pass
+        try: total_volume += gmsh.model.occ.getMass(dim, tag)
+        except: pass
     
-    # Try meshing with different settings (progressively coarser and more tolerant)
-    # Format: (mesh_factor, algorithm, tolerance)
-    # Algorithms: 1=MeshAdapt, 5=Delaunay, 6=Frontal-Delaunay
+    # Try meshing attempts - progress from simple to complex but always single-threaded
     mesh_attempts = [
-        (20, 6, 1e-3),   # Fine Frontal-Delaunay (more robust than pure Delaunay)
-        (15, 6, 1e-2),   # Medium Frontal-Delaunay
-        (10, 1, 1e-2),   # Coarser MeshAdapt
-        (8, 1, 1e-1),    # MeshAdapt with high tolerance
-        (5, 6, 0.5),     # Very coarse Frontal with high tolerance
-        (3, 1, 1.0),     # Ultra coarse MeshAdapt
+        (15, 1, 1e-2), (10, 1, 1e-2), (5, 1, 1e-1), (3, 1, 1.0)
     ]
     
     mesh_success = False
     for i, (mesh_factor, algo, tol) in enumerate(mesh_attempts):
         try:
-            print(f"[PREVIEW] Attempt {{i+1}}/{{len(mesh_attempts)}}: sizing=diag/{{mesh_factor}}, algo={{algo}}, tolerance={{tol}}")
+            print(f"[PREVIEW] Attempt {i+1}/{len(mesh_attempts)}: sizing=diag/{mesh_factor}, algo={algo}, tolerance={tol}")
             try_mesh(mesh_factor, algorithm=algo, tolerance=tol)
             mesh_success = True
-            print(f"MESH_OK:factor={{mesh_factor}},algo={{algo}}", file=sys.stderr)
+            print(f"MESH_OK:factor={mesh_factor},algo={algo}", file=sys.stderr)
             break
         except Exception as mesh_err:
-            print(f"RETRY:factor={{mesh_factor}},algo={{algo}} failed: {{mesh_err}}", file=sys.stderr)
+            print(f"[PREVIEW] Attempt {i+1} failed ({mesh_err})...")
             continue
     
     if not mesh_success:
-        # Last resort: try OCC native tessellation
-        print("RETRY: Trying OCC native tessellation as last resort", file=sys.stderr)
+        print(f"[PREVIEW] All meshing attempts failed. Falling back to Bounding Box...", file=sys.stderr)
         try:
             gmsh.model.mesh.clear()
-            # Use very high tolerance for OCC tessellation
-            gmsh.option.setNumber("Geometry.Tolerance", 1.0)
-            gmsh.option.setNumber("Geometry.OCCTargetMesh", 1)  # Enable OCC target meshing
-            # Try minimal surface mesh generation
-            for dim, tag in gmsh.model.getEntities(2):
-                try:
-                    gmsh.model.mesh.setTransfinite(dim, tag)
-                except:
-                    pass
+            # Restore stable settings for fallback
+            apply_robust_settings()
+            gmsh.model.add("BBox_Fallback")
+            
+            # Simple box
+            xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
+            dx, dy, dz = max(1e-3, xmax-xmin), max(1e-3, ymax-ymin), max(1e-3, zmax-zmin)
+            gmsh.model.occ.addBox(xmin, ymin, zmin, dx, dy, dz)
+            gmsh.model.occ.synchronize()
+            
+            # Mesh the box coarsely
+            diag = (dx**2 + dy**2 + dz**2)**0.5
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", diag / 10.0)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", diag / 5.0)
             gmsh.model.mesh.generate(2)
             mesh_success = True
-            print("MESH_OK:OCC_fallback", file=sys.stderr)
-        except Exception as occ_err:
-            print(f"RETRY:OCC_fallback failed: {{occ_err}}", file=sys.stderr)
-    
-    if not mesh_success:
-        raise Exception("All meshing attempts failed - geometry may be too complex")
-    
-    # Get nodes
-    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+            print("MESH_OK:strategy=bounding_box", file=sys.stderr)
+        except Exception as bbox_err:
+            print(f"[PREVIEW] Bounding Box fallback also failed: {bbox_err}", file=sys.stderr)
+            raise Exception("All meshing attempts including Bounding Box fallback failed")
     
     # Get triangles
-    vertices = []
-    nodes = {{}}
+    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+    nodes = {}
     for i, tag in enumerate(node_tags):
         nodes[int(tag)] = [node_coords[3*i], node_coords[3*i+1], node_coords[3*i+2]]
     
+    vertices = []
     elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2)
     for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
         if etype == 2:  # 3-node triangle
@@ -1219,22 +1194,15 @@ try:
                     vertices.extend(nodes[n3])
     
     gmsh.finalize()
-    
-    # Output as JSON with geometry info
-    import json
-    result = {{
+    result = {
         "vertices": vertices, 
         "count": len(vertices)//9,
-        "geometry": {{
-            "volumes": len(volumes),
-            "surfaces": len(surfaces),
-            "curves": len(curves),
-            "points": len(points),
-            "bbox": bbox_size,
-            "bbox_diagonal": diag,
+        "geometry": {
+            "volumes": len(volumes), "surfaces": len(surfaces), "curves": len(curves),
+            "points": len(points), "bbox": bbox_size, "bbox_diagonal": diag,
             "total_volume": total_volume
-        }}
-    }}
+        }
+    }
     print("MESH_DATA:" + json.dumps(result))
     
 except Exception as e:
@@ -1242,7 +1210,7 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     sys.exit(1)
-'''
+'''.replace("__CAD_FILE__", step_filepath.replace("\\", "/"))
     
     try:
         # Stream output in real-time so diagnostics appear immediately in logs

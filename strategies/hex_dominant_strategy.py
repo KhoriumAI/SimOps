@@ -45,8 +45,21 @@ class HighFidelityDiscretization:
                 
             gmsh.model.add("hex_dom_step1")
             
-            # Load STEP file
-            gmsh.merge(step_path)
+            # Robust loading options (match api_server.py)
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+            gmsh.option.setNumber("Geometry.AutoCoherence", 1)
+            
+            try:
+                gmsh.merge(step_path)
+                gmsh.model.occ.synchronize()
+            except Exception as e:
+                self.log(f"Initial open failed ({e}), attempting ultra-lenient fallback...")
+                gmsh.option.setNumber("Geometry.Tolerance", 1.0)
+                gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+                gmsh.merge(step_path)
+                gmsh.model.occ.synchronize()
+                self.log("Ultra-lenient fallback successful")
             
             # Set high-fidelity meshing options
             # 1. MeshSizeFromCurvature: Refine mesh on curved surfaces
@@ -277,11 +290,13 @@ class TopologyGlue:
             gmsh.model.add("hex_dom_step3")
             
             # Enable OCC auto-fixing and looser tolerances for boolean
+            # CONSISTENCY FIX: Match robust backend settings
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
             gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)
             gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
-            gmsh.option.setNumber("Geometry.Tolerance", 1e-4)
-            gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-4)
-            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4)
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+            gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-2)
+            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", 1e-4) # Smaller for robustness
             
             solid_tags = []
             
