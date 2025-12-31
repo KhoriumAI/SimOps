@@ -327,111 +327,19 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         best_score = float('inf')
         best_strategy = None
         
-        # OPTIMIZATION: Use sequential execution when only 1 worker or 1 strategy
-        # or it's a single part (<= 3 volumes) for cleaner verbose output
-        # This avoids spawning unnecessary subprocess and the [INIT] overhead
-        use_sequential = (num_workers == 1) or (len(strategy_names) == 1) or (num_vols <= 3)
+        # OPTIMIZATION: Sequential mode is now DISCOURAGED even for single parts
+        # because C++ level crashes (SIGSEGV/SIGABRT) in Gmsh/OCC kill the main process.
+        # We enforce process isolation for ALL strategies to ensure fallback triggers.
+        use_sequential = False 
         
         if use_sequential:
-            self.log_message(f"Using SEQUENTIAL mode (1 worker or 1 strategy - no subprocess overhead)")
-            
-            # Elevate verbosity for single parts (<= 3 volumes) as requested
-            if num_vols <= 3:
-                self.elevate_verbosity(level=3)
-            
-
-            for strategy_name in strategy_names:
-                self.log_message(f"\nTrying strategy: {strategy_name}")
-                
-                # Find the strategy method
-                method_name = f"_try_{strategy_name}"
-                method = getattr(self, method_name, None)
-                if not method:
-                    self.log_message(f"[!] Unknown strategy method: {method_name}, skipping")
-                    continue
-                
-                try:
-                    # Run the strategy directly in main process
-                    success, metrics = method()
-                    
-                    attempt_data = {
-                        'strategy': strategy_name,
-                        'success': success,
-                        'metrics': metrics
-                    }
-                    
-                    if success:
-                        score = self._calculate_quality_score(metrics)
-                        attempt_data['score'] = score
-                        self.log_message(f"  Quality Score: {score:.2f}")
-                        
-                        if self.check_quality_targets(metrics):
-                            self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} meets quality targets!")
-                            
-                            # Save mesh to temp file
-                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
-                            self.save_mesh(temp_output)
-                            
-                            best_mesh_path = temp_output
-                            best_score = score
-                            best_strategy = strategy_name
-                            self.all_attempts.append(attempt_data)
-                            break  # Exit loop - we have a winner
-                        
-                        # Check if score is below threshold
-                        if score < score_threshold:
-                            self.log_message(f"\n[!!!] WINNER FOUND: {strategy_name} score {score:.2f} < threshold {score_threshold}!")
-                            
-                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
-                            self.save_mesh(temp_output)
-                            
-                            best_mesh_path = temp_output
-                            best_score = score
-                            best_strategy = strategy_name
-                            self.all_attempts.append(attempt_data)
-                            break
-                        
-                        # Keep as candidate
-                        if score < best_score:
-                            # Save this mesh as best so far
-                            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
-                            self.save_mesh(temp_output)
-                            
-                            # Clean up previous best if exists
-                            if best_mesh_path and os.path.exists(best_mesh_path):
-                                try:
-                                    os.remove(best_mesh_path)
-                                except:
-                                    pass
-                            
-                            best_score = score
-                            best_mesh_path = temp_output
-                            best_strategy = strategy_name
-                            self.log_message(f"  New best candidate (score {score:.2f})")
-                    else:
-                        attempt_data['error'] = "Strategy returned failure"
-                        attempt_data['score'] = float('inf')
-                    
-                    self.all_attempts.append(attempt_data)
-                    
-                except Exception as e:
-                    self.log_message(f"[!] Strategy {strategy_name} failed with error: {e}")
-                    self.all_attempts.append({
-                        'strategy': strategy_name,
-                        'success': False,
-                        'error': str(e),
-                        'score': float('inf')
-                    })
+            # (Dead code path kept for potential future local-only debugging toggle)
+            pass
         else:
             # PARALLEL MODE: Use multiprocessing Pool for multiple strategies
             # CRITICAL: Use Manager to create a Windows-safe picklable Event proxy
-            # On Windows, standard multiprocessing.Event() cannot be pickled and passed to workers.
-            # The Manager creates a server process that holds the real event and gives us a proxy.
             with multiprocessing.Manager() as manager:
-                # Create Event via Manager (This gives us a Windows-safe Proxy)
                 stop_event = manager.Event()
-                
-                # Prepare arguments for workers: (strategy_name, input_file, config, stop_event, geometry_info)
                 worker_args = [(name, input_file, self.config, stop_event, self.geometry_info) for name in strategy_names]
                 
                 pool = None
@@ -439,9 +347,21 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                     pool = multiprocessing.Pool(processes=num_workers)
                     
                     # Use imap_unordered to process results as they arrive
+                    # Wrap iteration in try-except to catch worker process crashes (SIGABRT/SIGSEGV)
                     results_iter = pool.imap_unordered(run_strategy_wrapper, worker_args)
                     
-                    for strategy_name, success, metrics, result_data in results_iter:
+                    while True:
+                        try:
+                            # next(results_iter) will raise StopIteration when done
+                            res = next(results_iter)
+                            if not res: continue
+                            strategy_name, success, metrics, result_data = res
+                        except StopIteration:
+                            break
+                        except Exception as pool_err:
+                            self.log_message(f"[!] Critical worker crash detected (e.g. SIGABRT/SIGSEGV): {pool_err}")
+                            continue 
+                            
                         # If we already found a winner, we are just draining the pool
                         if stop_event.is_set():
                             continue
@@ -569,6 +489,13 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             except:
                 pass
             
+            # Finalize the result metadata
+            result.history = self.all_attempts.copy()
+            if self.all_attempts:
+                # Set latest metrics as default if not already set
+                best_attempt = min(self.all_attempts, key=lambda x: x.get('score', float('inf')))
+                result.quality_metrics = best_attempt.get('metrics', {})
+
             self._generate_exhaustive_report(output_file)
             self._save_detailed_report_to_file(output_file, success=True)
             return True

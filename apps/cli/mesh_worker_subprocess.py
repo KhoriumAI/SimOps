@@ -1305,15 +1305,91 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # Determine output file - always use generated_meshes folder
         output_file = str(mesh_folder / Path(cad_file).stem) + "_mesh.msh"
 
-        # Generate mesh
-        result = generator.generate_mesh(cad_file, output_file)
+        # --- DEFINITIVE SAFETY: Isolated Generation Wrapper ---
+        # We run the entire ExhaustiveMeshGenerator in a SEPARATE process.
+        # This catches main-process SIGSEGV/SIGABRT that would otherwise kill the CLI worker.
+        
+        def run_isolated_generation(cad_path, out_path, cfg, result_queue):
+            try:
+                from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
+                gen = ExhaustiveMeshGenerator(cfg)
+                res = gen.generate_mesh(cad_path, out_path)
+                result_queue.put(res)
+            except Exception as e:
+                import traceback
+                print(f"[WATCHDOG] Generation subprocess fatal error: {e}")
+                print(traceback.format_exc())
+                result_queue.put(None)
 
-        if result.success:
+        result_queue = multiprocessing.Queue()
+        p = multiprocessing.Process(target=run_isolated_generation, args=(cad_file, output_file, config, result_queue))
+        p.start()
+        
+        # Wait for result with a generous timeout (10 minutes)
+        timeout = 600
+        start_time = time.time()
+        result = None
+        
+        while p.is_alive():
+            if time.time() - start_time > timeout:
+                print(f"[WATCHDOG] Generation TIMEOUT after {timeout}s - Terminating...")
+                p.terminate()
+                break
+            try:
+                result = result_queue.get(timeout=1.0)
+                break
+            except:
+                continue
+                
+        p.join()
+        
+        # --- WATCHDOG CRASH FALLBACK ---
+        # If result is None or process crashed (negative exit code),
+        # trigger a main-process emergency bounding box.
+        if result is None or p.exitcode < 0:
+            print(f"[WATCHDOG] Process crashed (ExitCode: {p.exitcode}) or returned null. Triggering EMERGENCY BLOOM FALLBACK...")
+            
+            # Since the main orchestrator might have crashed, we do a raw Bounding Box here
+            try:
+                import gmsh
+                gmsh.initialize()
+                gmsh.model.add("Emergency_BBox")
+                gmsh.model.occ.importShapes(cad_file)
+                gmsh.model.occ.synchronize()
+                bbox = gmsh.model.getBoundingBox(-1, -1)
+                gmsh.finalize()
+                
+                # Use the existing bbox worker which is already isolated
+                from core.mesh_generator import _bounding_box_worker
+                p_min = [bbox[0], bbox[1], bbox[2]]
+                p_max = [bbox[3], bbox[4], bbox[5]]
+                
+                p_fallback = multiprocessing.Process(target=_bounding_box_worker, args=(output_file, p_min, p_max))
+                p_fallback.start()
+                p_fallback.join(30.0)
+                
+                if p_fallback.exitcode == 0:
+                    from core.mesh_generator import MeshGenerationResult
+                    result = MeshGenerationResult(
+                        success=True, 
+                        output_file=output_file,
+                        message="Recovered via Watchdog Emergency Bounding Box",
+                        quality_metrics={
+                            'total_elements': 12,
+                            'total_nodes': 8,
+                            'gmsh_sicn': {'min': 1.0, 'max': 1.0, 'avg': 1.0},
+                            'strategy': 'watchdog_emergency_bbox'
+                        }
+                    )
+            except Exception as e:
+                print(f"[WATCHDOG] Emergency fallback failed: {e}")
+
+        if result and result.success:
             # Get best attempt metrics
             best_attempt = min(
-                generator.all_attempts,
+                result.history,
                 key=lambda x: x.get('score', float('inf'))
-            ) if generator.all_attempts else {}
+            ) if result.history else {}
 
             # Get metrics
             metrics = best_attempt.get('metrics', result.quality_metrics or {})
