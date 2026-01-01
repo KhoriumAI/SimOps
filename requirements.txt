@@ -23,7 +23,7 @@ pyvista>=0.40.0        # High-level VTK wrapper
 qtrangeslider>=0.1.5   # Custom slider widget
 
 # --- CAD File Support & Mesh I/O ---
-pythonocc-core>=7.7.0  # STEP/IGES CAD file loading
+# pythonocc-core>=7.7.0  # STEP/IGES CAD file loading (Install via Conda, not Pip)
 meshio>=5.3.4          # Mesh format conversion (ANSYS export)
 trimesh>=3.22.0        # Mesh processing utilities
 coacd>=1.0.0           # Convex decomposition for hex meshing
