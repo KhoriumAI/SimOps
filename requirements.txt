@@ -27,7 +27,7 @@ qtrangeslider>=0.1.5   # Custom slider widget
 meshio>=5.3.4          # Mesh format conversion (ANSYS export)
 trimesh>=3.22.0        # Mesh processing utilities
 coacd>=1.0.0           # Convex decomposition for hex meshing
-pymesh2>=0.3.0         # Mesh repair and generation
+# pymesh2>=0.3.0         # Mesh repair and generation (Complex build, skipping for unblocking)
 tetgen>=0.6.0          # Alternative tetrahedral mesher
 
 # --- Utilities ---
