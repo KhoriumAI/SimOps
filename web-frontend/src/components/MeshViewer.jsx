@@ -665,41 +665,8 @@ export default function MeshViewer({
 
   return (
     <div className="w-full h-full relative bg-gradient-to-br from-gray-200 to-gray-300">
-      {/* Loading Overlay - Centered */}
-      {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center z-50 bg-gray-900/60 backdrop-blur-sm">
-          <div className="bg-gray-800 rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
-            {/* Animated Spinner */}
-            <div className="relative w-16 h-16 mx-auto mb-4">
-              <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-10 h-10 rounded-full bg-blue-500/20"></div>
-              </div>
-            </div>
-
-            {/* Loading Message */}
-            <p className="text-white font-medium mb-3">
-              {loadingMessage || 'Loading...'}
-            </p>
-
-            {/* Progress Bar */}
-            {loadingProgress !== undefined && (
-              <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300 ease-out"
-                  style={{ width: `${loadingProgress}%` }}
-                />
-              </div>
-            )}
-            {loadingProgress !== undefined && (
-              <p className="text-gray-400 text-xs mt-2">{loadingProgress}% complete</p>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Empty State */}
-      {!meshData && !isLoading && (
+      {!meshData && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center text-gray-500">
             <Box className="w-16 h-16 mx-auto mb-3 opacity-30" />
