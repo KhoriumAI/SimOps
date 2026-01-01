@@ -77,9 +77,10 @@ function App() {
   const [qualityMetric, setQualityMetric] = useState('sicn')
   const [showHistogram, setShowHistogram] = useState(false)
 
+  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
   const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine', 'Ultra Fine', 'Custom']
   const [meshStrategies, setMeshStrategies] = useState([
-    'Tetrahedral (HXT)',  // Fallback default
+    'Tetrahedral (Fast)',  // Fallback default
   ])
 
   // Fetch available strategies from backend on mount
@@ -138,6 +139,7 @@ function App() {
           // Always fetch final mesh when completed (replaces preview)
           if (!meshData || meshData.isPreview) {
             fetchMeshData(currentProject)
+            setColorMode('quality') // Auto-switch to quality view on completion
           }
           // Save mesh duration
           if (meshStartTime) {
@@ -439,7 +441,7 @@ function App() {
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
         setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
-        setMeshData(null)
+        // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
       } else {
@@ -935,6 +937,8 @@ function App() {
               setQualityMetric={setQualityMetric}
               showHistogram={showHistogram}
               setShowHistogram={setShowHistogram}
+              colorMode={colorMode}
+              setColorMode={setColorMode}
               // Progress props
               meshProgress={meshProgress}
               loadingStartTime={meshStartTime}

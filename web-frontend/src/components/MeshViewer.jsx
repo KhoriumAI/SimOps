@@ -374,6 +374,8 @@ export default function MeshViewer({
   setShowAxes,
   qualityMetric,
   setQualityMetric,
+  colorMode,
+  setColorMode,
   // Mesh progress from App
   meshProgress,
   loadingStartTime
@@ -381,7 +383,8 @@ export default function MeshViewer({
   // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
   const showWireframe = meshData && !meshData.isPreview && status === 'completed'
   // Derive quality coloring: ON for completed meshes with quality data
-  const showQuality = status === 'completed' && meshData?.colors?.length > 0
+  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || (meshData?.qualityColors && Object.keys(meshData.qualityColors).length > 0) || meshData?.hasQualityData
+  const showQuality = status === 'completed' && hasQualityData
   const [clipping, setClipping] = useState({
     enabled: false,
     showQualitySlice: true,
@@ -457,7 +460,7 @@ export default function MeshViewer({
 
   // Paint/Color options
   const [meshColor, setMeshColor] = useState('#4a9eff')
-  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
+  // colorMode lifted to App.jsx
   const [opacity, setOpacity] = useState(1.0)
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
@@ -546,25 +549,61 @@ export default function MeshViewer({
 
   // Flood fill algorithm
   const performFloodFill = useCallback((startFaceIndex) => {
-    if (!adjacency) return [startFaceIndex]
+    if (!adjacency || !meshData) return [startFaceIndex]
 
     const visited = new Set()
     const queue = [startFaceIndex]
     visited.add(startFaceIndex)
 
-    // We only flood fill across surfaces (same entity_tag if available)
-    const targetEntity = meshData?.entity_tags ? meshData.entity_tags[startFaceIndex] : null
+    // Check for entity tags (CAD faces)
+    const hasTags = meshData.entity_tags && meshData.entity_tags.length > 0
+    const targetEntity = hasTags ? meshData.entity_tags[startFaceIndex] : null
+
+    // For geometric flood fill (if no tags available for this face)
+    // Reuse vectors to avoid GC pressure in loop
+    const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3()
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
+    const n1 = new THREE.Vector3(), n2 = new THREE.Vector3()
+    const CREASE_THRESHOLD = 0.8 // Stop at angles > ~37 deg
+
+    const vertices = meshData.vertices
+    const getNormal = (idx, target) => {
+      const i = idx * 9
+      v1.set(vertices[i], vertices[i + 1], vertices[i + 2])
+      v2.set(vertices[i + 3], vertices[i + 4], vertices[i + 5])
+      v3.set(vertices[i + 6], vertices[i + 7], vertices[i + 8])
+      e1.subVectors(v2, v1)
+      e2.subVectors(v3, v1)
+      target.crossVectors(e1, e2).normalize()
+    }
 
     let iterations = 0
     while (queue.length > 0 && iterations < 50000) { // Safety limit
       const current = queue.shift()
       iterations++
 
+      // If doing geometric fill, compute current normal
+      if (!hasTags || targetEntity == null) {
+        getNormal(current, n1)
+      }
+
       const neighbors = adjacency[current]
       for (const next of neighbors) {
         if (!visited.has(next)) {
-          // Check entity constraint
-          if (targetEntity === null || (meshData?.entity_tags && meshData.entity_tags[next] === targetEntity)) {
+          let shouldAdd = false
+
+          if (hasTags && targetEntity != null) {
+            // Use Entity Tags if available
+            shouldAdd = (meshData.entity_tags[next] === targetEntity)
+          } else {
+            // Use Geometric Crease Angle
+            getNormal(next, n2)
+            if (n1.dot(n2) >= CREASE_THRESHOLD) {
+              shouldAdd = true
+            }
+          }
+
+          if (shouldAdd) {
             visited.add(next)
             queue.push(next)
           }

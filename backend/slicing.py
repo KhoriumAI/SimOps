@@ -1,4 +1,6 @@
 import numpy as np
+import gmsh
+import sys
 
 def intersect_edge_with_plane(v1, v2, plane_origin, plane_normal):
     """Calculate intersection of an edge with a plane."""
@@ -149,66 +151,75 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
 
 def parse_msh_for_slicing(msh_path):
     """
-    Parses a Gmsh 4.1 file specifically for volume elements and nodes.
+    Parses a Gmsh file using the Gmsh API (handles binary/ASCII and versions).
     Returns: (nodes_dict, vol_elements)
     nodes_dict: {id: [x,y,z]}
     vol_elements: [(type, tag, [node_ids])]
     """
     nodes = {}
-    vol_elements = [] # (type, tag, node_ids)
+    vol_elements = [] 
     
-    # Volume element types in Gmsh
-    VOL_TYPES = {
-        4: 4,   # Tet4
-        11: 10, # Tet10
-        5: 8,   # Hex8
-        12: 27, # Hex27
-        29: 20, # Prism15
-        30: 21, # Prism21
-    }
+    # Initialize separate Gmsh instance to avoid conflicts
+    # Note: Gmsh python API is usually singleton-ish but we can use simple init/finalize 
+    # if we are careful, or assume initialized. 
+    # Safest is to initialize, do work, finalize.
+    if not gmsh.is_initialized():
+        gmsh.initialize()
     
-    with open(msh_path, 'r') as f:
-        content = f.read()
-        
-    # Parse Nodes
+    gmsh.option.setNumber("General.Terminal", 0)
+    
     try:
-        nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
-        num_blocks, total_nodes, _, _ = map(int, nodes_section[0].split())
+        gmsh.open(msh_path)
         
-        curr_line = 1
-        for _ in range(num_blocks):
-            dim, tag, parametric, num_nodes_in_block = map(int, nodes_section[curr_line].split())
-            curr_line += 1
-            node_ids = [int(nodes_section[curr_line + i]) for i in range(num_nodes_in_block)]
-            curr_line += num_nodes_in_block
-            for i in range(num_nodes_in_block):
-                coords = list(map(float, nodes_section[curr_line + i].split()))
-                nodes[node_ids[i]] = coords
-            curr_line += num_nodes_in_block
-    except Exception as e:
-        print(f"Error parsing nodes: {e}")
-
-    # Parse Elements
-    try:
-        elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
-        num_blocks, total_elements, _, _ = map(int, elements_section[0].split())
+        # Get all nodes
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
         
-        curr_line = 1
-        for _ in range(num_blocks):
-            line = elements_section[curr_line].split()
-            if not line: break
-            entity_dim, entity_tag, el_type, num_els_in_block = map(int, line)
-            curr_line += 1
+        # Convert to dict for fast lookup
+        # node_coords is flat [x,y,z, x,y,z...]
+        # Using numpy slicing for speed? Or simple loop.
+        # Simple loop is fine for <1M nodes, robust.
+        for i in range(len(node_tags)):
+            nodes[int(node_tags[i])] = [
+                float(node_coords[i*3]),
+                float(node_coords[i*3+1]),
+                float(node_coords[i*3+2])
+            ]
             
-            if entity_dim == 3 and el_type in VOL_TYPES:
-                nodes_per_el = VOL_TYPES[el_type]
-                for i in range(num_els_in_block):
-                    el_line = list(map(int, elements_section[curr_line + i].split()))
-                    el_tag = el_line[0]
-                    node_ids = el_line[1:]
-                    vol_elements.append((el_type, el_tag, node_ids))
-            curr_line += num_els_in_block
+        # Get all 3D elements
+        # -1 tag means all entities
+        # 3 dim means volumes
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(3, -1)
+        
+        for i, et in enumerate(elem_types):
+            et = int(et)
+            tags = elem_tags[i]
+            node_tags_flat = elem_node_tags[i]
+            
+            num_elems = len(tags)
+            if num_elems == 0: continue
+            
+            num_nodes_total = len(node_tags_flat)
+            nodes_per_elem = num_nodes_total // num_elems
+            
+            for j in range(num_elems):
+                tag = int(tags[j])
+                # Extract nodes for this element
+                start = j * nodes_per_elem
+                end = start + nodes_per_elem
+                el_nodes = [int(n) for n in node_tags_flat[start:end]]
+                
+                vol_elements.append((et, tag, el_nodes))
+                
     except Exception as e:
-        print(f"Error parsing elements: {e}")
+        print(f"Error parsing mesh with Gmsh API: {e}", file=sys.stderr)
+    finally:
+        # Close current model to free memory
+        gmsh.clear()
+        # We generally shouldn't finalize if other threads use it?
+        # But multiprocessing uses separate processes.
+        # If running in Gunicorn worker, safe to finalize?
+        # Better to just clear. Finalize might break repeated calls if re-init is slow.
+        # But re-init is fine.
+        gmsh.finalize()
         
     return nodes, vol_elements
