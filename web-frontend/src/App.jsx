@@ -365,10 +365,20 @@ function App() {
       clearInterval(progressInterval)
 
       if (!response.ok) {
-        const error = await response.json()
+        let errorMessage = 'Failed to upload file'
+        try {
+          const error = await response.json()
+          errorMessage = error.error || errorMessage
+        } catch (e) {
+          // Server returned non-JSON (likely HTML error page)
+          const text = await response.text()
+          console.error('Upload error (non-JSON):', text)
+          errorMessage = `Server error (${response.status}): ${response.statusText}`
+        }
         setIsUploading(false)
         setUploadProgress(0)
-        alert(error.error || 'Failed to upload file')
+        setLogs(prev => [...prev, `[ERROR] ${errorMessage}`])
+        alert(errorMessage)
         return
       }
 

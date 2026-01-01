@@ -704,16 +704,6 @@ def register_routes(app):
         filename = secure_filename(file.filename) or f"file{file_ext}"
         storage_filename = f"{project_id}_{filename}"
         
-        # Log import job start
-        log_import_job(
-            job_id=import_job_id,
-            user_email=user.email,
-            project_id=project_id,
-            filename=original_filename,
-            file_size=file_size,
-            status='started'
-        )
-        
         # Calculate file size and hash before saving
         file.seek(0, 2)  # Seek to end
         file_size = file.tell()
@@ -723,6 +713,16 @@ def register_routes(app):
         file_content = file.read()
         file_hash = hashlib.sha256(file_content).hexdigest()
         file.seek(0)  # Reset again for saving
+        
+        # Log import job start
+        log_import_job(
+            job_id=import_job_id,
+            user_email=user.email,
+            project_id=project_id,
+            filename=original_filename,
+            file_size=file_size,
+            status='started'
+        )
         
         # Use storage abstraction (local or S3 based on config)
         storage = get_storage()
