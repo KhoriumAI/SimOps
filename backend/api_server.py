@@ -27,7 +27,12 @@ from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
-from slicing import generate_slice_mesh, parse_msh_for_slicing
+try:
+    from slicing import generate_slice_mesh, parse_msh_for_slicing
+except Exception as e:
+    print(f"[WARNING] Failed to load slicing module (gmsh might be missing): {e}")
+    generate_slice_mesh = None
+    parse_msh_for_slicing = None
 from job_logger import (
     generate_job_id, log_import_job, log_mesh_job, log_job_update,
     get_logs_by_job_id, get_recent_logs
