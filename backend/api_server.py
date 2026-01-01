@@ -213,6 +213,9 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                 text=True,
                 bufsize=1
             )
+            
+            # Register process for potential termination
+            active_mesh_processes[project_id] = process
 
             line_count = 0
             for line in process.stdout:
@@ -308,6 +311,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                             pass
 
             process.wait()
+            # Remove from active processes
+            if project_id in active_mesh_processes:
+                del active_mesh_processes[project_id]
+                
             print(f"[MESH GEN] Process exited with code {process.returncode}")
 
             # Final update
@@ -359,6 +366,34 @@ def register_routes(app):
     def health_check():
         return jsonify({"status": "healthy", "service": "mesh-generation-api", "version": "2.0"})
 
+    @app.route('/api/projects/<project_id>/stop', methods=['POST'])
+    @jwt_required()
+    def stop_mesh_generation(project_id):
+        """Terminate a running mesh generation process"""
+        if project_id in active_mesh_processes:
+            process = active_mesh_processes[project_id]
+            try:
+                print(f"[MESH GEN] Terminating process for project {project_id}")
+                process.terminate()
+                # Wait briefly for process to exit
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                
+                # Update project status immediately
+                project = Project.query.get(project_id)
+                if project:
+                    project.status = 'error'
+                    project.error_message = 'Process terminated by user'
+                    db.session.commit()
+                
+                return jsonify({"status": "success", "message": "Process terminated"}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": str(e)}), 500
+        
+        return jsonify({"status": "error", "message": "No active process found for this project"}), 404
+
     @app.route('/strategies', methods=['GET'])  # Alias without /api prefix
     @app.route('/api/strategies', methods=['GET'])
     def get_mesh_strategies():
@@ -372,7 +407,7 @@ def register_routes(app):
                 'name': 'Tet (Fast)',
                 'description': 'Fast single-pass HXT Delaunay - ideal for batch processing',
                 'element_type': 'tet',
-                'recommended': True,
+                'recommended': False,
                 'fast': True
             },
             {
@@ -394,7 +429,7 @@ def register_routes(app):
                 'name': 'Tetrahedral (HXT)',
                 'description': 'High-performance parallel meshing',
                 'element_type': 'tet',
-                'recommended': False
+                'recommended': True
             },
             {
                 'id': 'hex_dominant',
@@ -410,7 +445,7 @@ def register_routes(app):
         return jsonify({
             'strategies': strategies,
             'names': [s['name'] for s in strategies],
-            'default': 'Tet (Fast)'
+            'default': 'Tetrahedral (HXT)'
         })
 
     @app.route('/feedback', methods=['POST'])  # Alias without /api prefix
@@ -462,7 +497,7 @@ def register_routes(app):
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
-                                "text": "🔔 *Attention:* @Mark Mukminov @Aaron Wu"
+                                "text": "🔔 *Attention:* <@U09N48XUHGB> <@U09RHN339LM>"
                             }
                         },
                         {

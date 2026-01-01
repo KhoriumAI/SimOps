@@ -11,10 +11,10 @@ import { API_BASE } from './config'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
-  'Coarse': { min: 0.5, max: 10.0 },
-  'Medium': { min: 0.1, max: 3.0 },
-  'Fine': { min: 0.05, max: 1.0 },
-  'Very Fine': { min: 0.01, max: 0.5 }
+  'Coarse': { min: 1.0, max: 10.0 },
+  'Medium': { min: 0.5, max: 3.0 },
+  'Fine': { min: 0.2, max: 1.0 },
+  'Very Fine': { min: 0.1, max: 0.5 }
 }
 
 // Parse number expressions: supports scientific notation (1e-6) and math (39.26/2)
@@ -48,7 +48,7 @@ function App() {
   const [minElementSize, setMinElementSize] = useState(0.1)
   const [elementOrder, setElementOrder] = useState('1')
   const [ansysMode, setAnsysMode] = useState('None')
-  const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (Delaunay)')
+  const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (HXT)')
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(false)
   const [geometryInfo, setGeometryInfo] = useState(null)
   const [isUploading, setIsUploading] = useState(false)
@@ -72,7 +72,7 @@ function App() {
 
   const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
   const [meshStrategies, setMeshStrategies] = useState([
-    'Tetrahedral (Delaunay)',  // Fallback default
+    'Tetrahedral (HXT)',  // Fallback default
   ])
 
   // Fetch available strategies from backend on mount
@@ -427,6 +427,24 @@ function App() {
     }
   }
 
+  const handleStopMesh = async () => {
+    if (!currentProject) return
+    try {
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/stop`, {
+        method: 'POST'
+      })
+      if (response.ok) {
+        setIsPolling(false)
+        setLogs(prev => [...prev, `[INFO] Stop command sent to server.`])
+      } else {
+        const err = await response.json()
+        alert(`Failed to stop mesh: ${err.message}`)
+      }
+    } catch (error) {
+      console.error('Stop mesh failed:', error)
+    }
+  }
+
   const canGenerate = projectStatus &&
     (projectStatus.status === 'uploaded' || projectStatus.status === 'error' || projectStatus.status === 'completed')
   const canDownload = projectStatus?.status === 'completed'
@@ -632,16 +650,16 @@ function App() {
                           value={minElementSize}
                           onChange={(e) => {
                             const val = parseNumberExpression(e.target.value)
-                            if (!isNaN(val) && val >= 0.01) setMinElementSize(val)
+                            if (!isNaN(val) && val >= 0.1) setMinElementSize(val)
                           }}
                           onBlur={(e) => {
                             const val = parseNumberExpression(e.target.value)
-                            // Enforce 0.01mm floor on blur
-                            if (!isNaN(val)) setMinElementSize(Math.max(0.01, val))
+                            // Enforce 0.1mm floor on blur
+                            if (!isNaN(val)) setMinElementSize(Math.max(0.1, val))
                           }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
-                          placeholder="≥0.01"
+                          placeholder="≥0.1"
                         />
                         <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
@@ -759,7 +777,7 @@ function App() {
 
                   {isGenerating && (
                     <button
-                      onClick={() => setIsPolling(false)}
+                      onClick={handleStopMesh}
                       className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500 hover:bg-red-600 text-white transition-colors flex items-center justify-center gap-1"
                     >
                       <Square className="w-3 h-3 fill-current" />

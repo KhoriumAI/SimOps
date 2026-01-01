@@ -132,7 +132,7 @@ export default function FeedbackButton({ userEmail }) {
                                                     ? 'Describe the feature you would like to see...'
                                                     : 'Share your thoughts, suggestions, or comments...'
                                         }
-                                        className="w-full h-32 px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        className="w-full h-32 px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white text-gray-900"
                                         required
                                     />
                                 </div>
