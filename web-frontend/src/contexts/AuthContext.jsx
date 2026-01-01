@@ -2,10 +2,13 @@ import { createContext, useContext, useState, useEffect, useRef } from 'react'
 
 const AuthContext = createContext(null)
 // API base URL - uses proxy in development, full URL in production
+const ALB_DNS = 'webdev-alb-1882895883.us-west-1.elb.amazonaws.com'
 const API_BASE = import.meta.env.VITE_API_URL ||
-  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? '/api'
-    : `http://${window.location.hostname}:5000/api`)
+    : (window.location.hostname.includes('s3-website')
+      ? `http://${ALB_DNS}/api`
+      : `http://${window.location.hostname}:5000/api`))
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
