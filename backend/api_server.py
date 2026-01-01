@@ -161,45 +161,46 @@ def fix_db_schema(app):
     """
     Ensure the database schema is up-to-date by manually adding missing columns.
     This acts as a simple migration tool for SQLite when db.create_all() is insufficient.
+    NOTE: This function expects to be called from within an app_context().
     """
     from sqlalchemy import inspect, text
     
-    with app.app_context():
-        engine = db.engine
-        inspector = inspect(engine)
+    engine = db.engine
+    inspector = inspect(engine)
+    
+    # 1. Check mesh_results for boundary_zones
+    if 'mesh_results' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('mesh_results')]
+        if 'boundary_zones' not in columns:
+            print("[DB-MIGRATE] Adding 'boundary_zones' column to 'mesh_results'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN boundary_zones JSON"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added boundary_zones column successfully.")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Failed to add boundary_zones column: {e}")
         
-        # 1. Check mesh_results for boundary_zones
-        if 'mesh_results' in inspector.get_table_names():
-            columns = [c['name'] for c in inspector.get_columns('mesh_results')]
-            if 'boundary_zones' not in columns:
-                print("[DB-MIGRATE] Adding 'boundary_zones' column to 'mesh_results'...")
-                try:
-                    with engine.connect() as conn:
-                        conn.execute(text("ALTER TABLE mesh_results ADD COLUMN boundary_zones JSON"))
-                        conn.commit()
-                        print("[DB-MIGRATE] Added boundary_zones column successfully.")
-                except Exception as e:
-                    print(f"[DB-MIGRATE] Failed to add boundary_zones column: {e}")
-            
-            # check for params column (added in a previous session but might be missing)
-            if 'params' not in columns:
-                print("[DB-MIGRATE] Adding 'params' column to 'mesh_results'...")
-                try:
-                    with engine.connect() as conn:
-                        conn.execute(text("ALTER TABLE mesh_results ADD COLUMN params JSON"))
-                        conn.commit()
-                except: pass
+        # check for params column (added in a previous session but might be missing)
+        if 'params' not in columns:
+            print("[DB-MIGRATE] Adding 'params' column to 'mesh_results'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN params JSON"))
+                    conn.commit()
+            except: pass
 
-        # 2. Check projects for preview_path (added in a previous session)
-        if 'projects' in inspector.get_table_names():
-            columns = [c['name'] for c in inspector.get_columns('projects')]
-            if 'preview_path' not in columns:
-                print("[DB-MIGRATE] Adding 'preview_path' column to 'projects'...")
-                try:
-                    with engine.connect() as conn:
-                        conn.execute(text("ALTER TABLE projects ADD COLUMN preview_path VARCHAR(500)"))
-                        conn.commit()
-                except: pass
+    # 2. Check projects for preview_path (added in a previous session)
+    if 'projects' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('projects')]
+        if 'preview_path' not in columns:
+            print("[DB-MIGRATE] Adding 'preview_path' column to 'projects'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN preview_path VARCHAR(500)"))
+                    conn.commit()
+            except: pass
+
 
 
 
