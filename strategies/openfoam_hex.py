@@ -48,13 +48,26 @@ def check_openfoam_available() -> bool:
 
 
 def check_snappy_available() -> bool:
-    """Check if snappyHexMesh is installed in WSL."""
+    """Check if snappyHexMesh is installed in WSL or native Linux."""
     try:
-        result = subprocess.run(
-            ['wsl', 'bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
-            capture_output=True, timeout=10
-        )
-        return result.returncode == 0
+        if platform.system() == 'Windows':
+            result = subprocess.run(
+                ['wsl', 'bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
+                capture_output=True, timeout=10
+            )
+            return result.returncode == 0
+        else:
+            # On Linux (AWS), check if it's in the PATH directly (e.g. docker shim) or sourceable
+            # First check direct path (preferred for Docker shims)
+            if shutil.which('snappyHexMesh'):
+                return True
+            
+            # Fallback to sourcing bashrc and checking
+            result = subprocess.run(
+                ['bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
+                capture_output=True, timeout=10
+            )
+            return result.returncode == 0
     except:
         return False
 
@@ -535,7 +548,7 @@ def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
     # This saves ~10-15 seconds by avoiding multiple bashrc sourcing
     # Pipeline: blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK
     cmd_str = (
-        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; '
+        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null || true; ' # true allows continuing if source fails (e.g. wrapper in path)
         f'cd "{case_dir_wsl}" && '
         f'echo "[TIMING] Starting blockMesh..." && '
         f'time (blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
@@ -548,7 +561,11 @@ def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
         f'echo "[TIMING] Pipeline complete!"'
     )
     
-    cmd = ['wsl', 'bash', '-c', cmd_str]
+    if platform.system() == 'Windows':
+        cmd = ['wsl', 'bash', '-c', cmd_str]
+    else:
+        # Native Linux (AWS)
+        cmd = ['bash', '-c', cmd_str]
     
     if verbose:
         print("[OpenFOAM] Running OPTIMIZED pipeline (single WSL call)...")
