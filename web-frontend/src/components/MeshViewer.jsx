@@ -369,6 +369,10 @@ export default function MeshViewer({
   status,
   showHistogram,
   setShowHistogram,
+  showAxes,
+  setShowAxes,
+  qualityMetric,
+  setQualityMetric,
   // Mesh progress from App
   meshProgress,
   loadingStartTime
