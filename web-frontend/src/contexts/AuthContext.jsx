@@ -2,13 +2,16 @@ import { createContext, useContext, useState, useEffect, useRef } from 'react'
 
 const AuthContext = createContext(null)
 // API base URL - uses proxy in development, full URL in production
-const API_BASE = import.meta.env.VITE_API_URL || '/api'
+const API_BASE = import.meta.env.VITE_API_URL ||
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? '/api'
+    : `http://${window.location.hostname}:5000/api`)
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
-  
+
   // Refresh lock to prevent thundering herd problem
   // When multiple requests get 401 simultaneously, only the first one refreshes
   // Others wait for that refresh to complete
@@ -33,12 +36,12 @@ export function AuthProvider({ children }) {
     if (refreshPromiseRef.current) {
       return refreshPromiseRef.current
     }
-    
+
     const refreshToken = localStorage.getItem('refresh_token')
     if (!refreshToken) {
       return { success: false, reason: 'no_refresh_token' }
     }
-    
+
     // Create the refresh promise and store it
     const doRefresh = async () => {
       try {
@@ -64,10 +67,10 @@ export function AuthProvider({ children }) {
         return { success: false, reason: 'network_error' }
       }
     }
-    
+
     // Store promise, execute, then clear
     refreshPromiseRef.current = doRefresh()
-    
+
     try {
       return await refreshPromiseRef.current
     } finally {
@@ -81,11 +84,11 @@ export function AuthProvider({ children }) {
   const authFetch = async (url, options = {}) => {
     const token = localStorage.getItem('access_token')
     const headers = { ...options.headers }
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`
     }
-    
+
     // Don't set Content-Type for FormData
     if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
       headers['Content-Type'] = 'application/json'
@@ -97,7 +100,7 @@ export function AuthProvider({ children }) {
     // If unauthorized, try to refresh (with lock to prevent thundering herd)
     if (response.status === 401) {
       const refreshResult = await refreshAccessToken()
-      
+
       if (refreshResult.success) {
         // Retry with new token
         headers['Authorization'] = `Bearer ${refreshResult.token}`
@@ -139,7 +142,7 @@ export function AuthProvider({ children }) {
 
   const register = async (email, password, name = '') => {
     setError(null)
-    
+
     try {
       const response = await fetch(`${API_BASE}/auth/register`, {
         method: 'POST',
@@ -157,7 +160,7 @@ export function AuthProvider({ children }) {
       // Store tokens
       localStorage.setItem('access_token', data.access_token)
       localStorage.setItem('refresh_token', data.refresh_token)
-      
+
       setUser(data.user)
       return true
     } catch (error) {
@@ -168,7 +171,7 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     setError(null)
-    
+
     try {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
@@ -186,7 +189,7 @@ export function AuthProvider({ children }) {
       // Store tokens
       localStorage.setItem('access_token', data.access_token)
       localStorage.setItem('refresh_token', data.refresh_token)
-      
+
       setUser(data.user)
       return true
     } catch (error) {

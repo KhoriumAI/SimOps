@@ -53,6 +53,11 @@ def create_app(config_class=None):
         "http://localhost:5173",
         "http://localhost:3000", 
         "http://127.0.0.1:5173",
+        "http://54.67.128.4",
+        "http://54.67.128.4:5000",
+        "http://10.0.8.121",
+        "http://10.0.8.121:5000",
+        "http://webdev-alb-1882895883.us-west-1.elb.amazonaws.com",
         "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com"
     ]
     
