@@ -7,7 +7,24 @@ cd /home/ubuntu/MeshPackageLean
 git pull origin main
 sudo systemctl restart gunicorn
 sudo systemctl status gunicorn
+```bash
+cd /home/ubuntu/MeshPackageLean
+git pull origin main
+sudo systemctl restart gunicorn
+sudo systemctl status gunicorn
 ```
+
+## Frontend Deploy (Windows -> S3)
+
+To update the frontend (app.khorium.ai), you must run the deployment script from your local machine:
+
+```powershell
+.\deploy.ps1
+```
+
+This builds the React app and syncs it to the S3 bucket.
+**Note:** You may need to invalidate the CloudFront cache if changes don't appear immediately.
+
 
 ## Why Restart?
 
@@ -37,6 +54,20 @@ CORS_ORIGINS=https://your-frontend.com,https://another-domain.com
 ```
 
 After changing, restart Gunicorn:
+```bash
+sudo systemctl restart gunicorn
+sudo systemctl restart gunicorn
+```
+
+## Environment Configuration
+
+To enable Slack notifications for feedback, add the webhook URL to `/home/ubuntu/MeshPackageLean/backend/.env`:
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+```
+
+Then restart Gunicorn:
 ```bash
 sudo systemctl restart gunicorn
 ```
