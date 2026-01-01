@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { io } from 'socket.io-client'
+import { API_BASE, WS_URL } from '../config'
 
 /**
  * useWebSocket Hook
@@ -17,10 +18,8 @@ export function useWebSocket(batchId, onProgress) {
   const connect = useCallback(() => {
     if (!batchId) return
 
-    const wsUrl = import.meta.env.VITE_WS_URL || window.location.origin
-
     try {
-      socketRef.current = io(wsUrl, {
+      socketRef.current = io(WS_URL, {
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: maxReconnectAttempts,
@@ -48,7 +47,7 @@ export function useWebSocket(batchId, onProgress) {
         console.log('[WS] Connection error:', err.message)
         setError(err.message)
         reconnectAttempts.current++
-        
+
         if (reconnectAttempts.current >= maxReconnectAttempts) {
           console.log('[WS] Max reconnect attempts reached, falling back to polling')
         }
@@ -100,11 +99,7 @@ export function useWebSocket(batchId, onProgress) {
 
 /**
  * useBatchPolling Hook
- * 
- * Fallback polling for batch status when WebSocket is unavailable.
  */
-const API_BASE = import.meta.env.VITE_API_URL || '/api'
-
 export function useBatchPolling(batchId, authFetch, interval = 2000) {
   const [batch, setBatch] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -126,7 +121,7 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
         const data = await response.json()
         setBatch(data)
         setError(null)
-        
+
         // Auto-stop polling when batch reaches final state
         if (isFinalState(data.status) && timerRef.current) {
           console.log('[Polling] Batch complete, stopping polling')
@@ -147,7 +142,7 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
 
   const startPolling = useCallback(() => {
     if (timerRef.current || isPollingRef.current) return
-    
+
     // Don't start polling if already in final state
     if (batch && isFinalState(batch.status)) return
 
@@ -171,7 +166,7 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
     if (batchId && authFetch) {
       setLoading(true)
       setBatch(null)
-      
+
       const doFetch = async () => {
         try {
           const response = await authFetch(`${API_BASE}/batch/${batchId}?include_files=true&include_jobs=true`)
@@ -189,7 +184,7 @@ export function useBatchPolling(batchId, authFetch, interval = 2000) {
           setLoading(false)
         }
       }
-      
+
       doFetch()
     } else if (!batchId) {
       setBatch(null)

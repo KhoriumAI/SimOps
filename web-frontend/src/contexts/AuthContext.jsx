@@ -1,14 +1,9 @@
 import { createContext, useContext, useState, useEffect, useRef } from 'react'
+import { API_BASE } from '../config'
 
 const AuthContext = createContext(null)
 // API base URL - uses proxy in development, full URL in production
-const ALB_DNS = 'webdev-alb-1882895883.us-west-1.elb.amazonaws.com'
-const API_BASE = import.meta.env.VITE_API_URL ||
-  ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? '/api'
-    : (window.location.hostname.includes('s3-website')
-      ? `http://${ALB_DNS}/api`
-      : `http://${window.location.hostname}:5000/api`))
+
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
@@ -21,8 +16,9 @@ export function AuthProvider({ children }) {
   const refreshPromiseRef = useRef(null)
 
   const clearTokens = () => {
-    localStorage.removeItem('access_token')
+    localStorage.removeItem('token')
     localStorage.removeItem('refresh_token')
+    localStorage.removeItem('user')
   }
 
   // Centralized refresh logic with lock to prevent thundering herd
@@ -55,7 +51,7 @@ export function AuthProvider({ children }) {
 
         if (refreshResponse.ok) {
           const data = await refreshResponse.json()
-          localStorage.setItem('access_token', data.access_token)
+          localStorage.setItem('token', data.access_token)
           return { success: true, token: data.access_token }
         } else {
           // Refresh token is invalid/expired - user must re-login
@@ -85,22 +81,26 @@ export function AuthProvider({ children }) {
 
   // authFetch reads tokens directly from localStorage each time
   const authFetch = async (url, options = {}) => {
-    const token = localStorage.getItem('access_token')
-    const headers = { ...options.headers }
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
+    const token = localStorage.getItem('token')
+    const headers = {
+      ...options.headers,
+      'Authorization': `Bearer ${token}`,
     }
 
-    // Don't set Content-Type for FormData
-    if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+    // Don't set Content-Type for FormData if not explicitly set
+    if (!headers['Content-Type'] && options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
       headers['Content-Type'] = 'application/json'
       options.body = JSON.stringify(options.body)
     }
 
-    let response = await fetch(url, { ...options, headers })
+    let response;
+    try {
+      response = await fetch(url, { ...options, headers })
+    } catch (err) {
+      console.error('Fetch error:', err)
+      throw err
+    }
 
-    // If unauthorized, try to refresh (with lock to prevent thundering herd)
     if (response.status === 401) {
       const refreshResult = await refreshAccessToken()
 
@@ -117,7 +117,7 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const checkAuth = async () => {
-      const token = localStorage.getItem('access_token')
+      const token = localStorage.getItem('token')
       if (!token) {
         setIsLoading(false)
         return
@@ -161,8 +161,9 @@ export function AuthProvider({ children }) {
       }
 
       // Store tokens
-      localStorage.setItem('access_token', data.access_token)
+      localStorage.setItem('token', data.access_token)
       localStorage.setItem('refresh_token', data.refresh_token)
+      localStorage.setItem('user', JSON.stringify(data.user))
 
       setUser(data.user)
       return true
@@ -182,21 +183,28 @@ export function AuthProvider({ children }) {
         body: JSON.stringify({ email, password })
       })
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        setError(data.error || 'Login failed')
+      const contentType = response.headers.get("content-type");
+      if (response.ok && contentType && contentType.includes("application/json")) {
+        const data = await response.json()
+        localStorage.setItem('token', data.access_token)
+        localStorage.setItem('refresh_token', data.refresh_token)
+        localStorage.setItem('user', JSON.stringify(data.user))
+        setUser(data.user)
+        return true
+      } else {
+        let errorMessage = 'Login failed';
+        if (contentType && contentType.includes("application/json")) {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } else if (response.status === 405) {
+          errorMessage = 'Method Not Allowed: Check if API endpoint is correct (S3 does not support POST).';
+        }
+        setError(errorMessage)
         return false
       }
-
-      // Store tokens
-      localStorage.setItem('access_token', data.access_token)
-      localStorage.setItem('refresh_token', data.refresh_token)
-
-      setUser(data.user)
-      return true
     } catch (error) {
-      setError('Network error')
+      console.error('Login error:', error)
+      setError('Network error or server unreachable')
       return false
     }
   }

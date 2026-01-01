@@ -1,7 +1,5 @@
-import { useState } from 'react'
 import { MessageCircle, X, Send, Bug, Lightbulb, AlertCircle } from 'lucide-react'
-
-const API_BASE = import.meta.env.VITE_API_URL || '/api'
+import { API_BASE } from '../config'
 
 export default function FeedbackButton({ userEmail }) {
     const [isOpen, setIsOpen] = useState(false)
@@ -104,8 +102,8 @@ export default function FeedbackButton({ userEmail }) {
                                                 type="button"
                                                 onClick={() => setFeedbackType(id)}
                                                 className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg border-2 transition-all text-sm font-medium ${feedbackType === id
-                                                        ? `border-${color}-500 bg-${color}-50 text-${color}-700`
-                                                        : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                                                    ? `border-${color}-500 bg-${color}-50 text-${color}-700`
+                                                    : 'border-gray-200 text-gray-600 hover:border-gray-300'
                                                     }`}
                                                 style={{
                                                     borderColor: feedbackType === id ? (color === 'blue' ? '#3b82f6' : color === 'red' ? '#ef4444' : '#eab308') : undefined,

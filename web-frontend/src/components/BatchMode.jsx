@@ -7,8 +7,7 @@ import {
   Plus, List, Settings, ToggleLeft, ToggleRight,
   Loader2, RefreshCw, ChevronDown
 } from 'lucide-react'
-
-const API_BASE = import.meta.env.VITE_API_URL || '/api'
+import { API_BASE } from '../config'
 
 /**
  * BatchMode Component
@@ -472,8 +471,8 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                 onClick={createBatch}
                 disabled={selectedFiles.length === 0 || isCreating || isUploading}
                 className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${selectedFiles.length > 0 && !isCreating
-                    ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                    : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
                   }`}
               >
                 {isCreating || isUploading ? (
@@ -544,9 +543,9 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
                       {b.name || `Batch ${b.id.slice(0, 8)}`}
                     </span>
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${b.status === 'completed' ? 'bg-green-100 text-green-600' :
-                        b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
-                          b.status === 'failed' ? 'bg-red-100 text-red-600' :
-                            'bg-gray-100 text-gray-600'
+                      b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
+                        b.status === 'failed' ? 'bg-red-100 text-red-600' :
+                          'bg-gray-100 text-gray-600'
                       }`}>
                       {b.status}
                     </span>

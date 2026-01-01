@@ -3,6 +3,7 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
 import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors } from 'lucide-react'
+import { API_BASE } from '../config'
 import QualityHistogram from './QualityHistogram'
 
 function SliceMesh({ sliceData, clippingPlanes }) {
@@ -358,7 +359,7 @@ export default function MeshViewer({
       setIsSlicing(true)
       try {
         const token = localStorage.getItem('token')
-        const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/projects/${projectId}/slice`, {
+        const response = await fetch(`${API_BASE}/projects/${projectId}/slice`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
