@@ -474,7 +474,7 @@ export default function MeshViewer({
   const [pendingFaceName, setPendingFaceName] = useState('')
   const [isSavingZones, setIsSavingZones] = useState(false)
 
-  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
+
   const isCompleted = status === 'completed'
 
   // Fetch zones on load

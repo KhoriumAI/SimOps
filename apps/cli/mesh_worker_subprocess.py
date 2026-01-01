@@ -1200,16 +1200,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # Continue with standard mesh strategy dispatch
         # =====================================================================
         
-        if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy or 'Direct Hex' in mesh_strategy:
+        if 'Pure Hex' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy or 'Direct Hex' in mesh_strategy:
             from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_any_openfoam_available
             # Try OpenFOAM (cfMesh or snappy) first
             if check_any_openfoam_available():
                 print("[DEBUG] OpenFOAM available - using robust hex pipeline")
                 return generate_openfoam_hex_wrapper(cad_file, output_dir, quality_params)
             else:
-                print("[DEBUG] OpenFOAM not available - falling back to experimental CoACD pipeline")
-                from strategies.conformal_hex_glue import generate_conformal_hex_mesh
-                return generate_conformal_hex_test(cad_file, output_dir, quality_params)
+                print("[DEBUG] OpenFOAM not available - cannot run Pure Hex strategy")
+                return {
+                    'success': False, 
+                    'message': 'OpenFOAM is not installed or not found on this server. "Pure Hex" strategy requires OpenFOAM (v2306+ or v2406).'
+                }
         
         # Regular Hex Dominant (subdivision approach)
         if 'Hex Dominant' in mesh_strategy:

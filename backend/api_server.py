@@ -521,9 +521,9 @@ def register_routes(app):
                 'recommended': True
             },
             {
-                'id': 'hex_dominant',
-                'name': 'Hex-Dominant',
-                'description': 'Hexahedral mesh with tet fill - best for CFD',
+                'id': 'pure_hex',
+                'name': 'Pure Hex',
+                'description': 'Hexahedral mesh (OpenFOAM) - best for CFD',
                 'element_type': 'hex',
                 'recommended': False
             }
