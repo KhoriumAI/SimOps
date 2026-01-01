@@ -454,6 +454,13 @@ def register_routes(app):
                 slack_payload = {
                     "blocks": [
                         {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🔔 *Attention:* @Mark Mukminov @Aaron Wu"
+                            }
+                        },
+                        {
                             "type": "header",
                             "text": {
                                 "type": "plain_text",
