@@ -34,8 +34,7 @@ try:
 except ImportError:
     meshio = None
 
-# Track active mesh processes for termination
-active_mesh_processes = {}
+# Note: active_mesh_processes is now attached to the Flask app object in create_app()
 
 def create_app(config_class=None):
     """Application factory"""
@@ -136,6 +135,9 @@ def create_app(config_class=None):
     instance_dir = Path(__file__).parent / 'instance'
     instance_dir.mkdir(parents=True, exist_ok=True)
     
+    # Track active mesh processes for termination (attached to app for thread safety/scoping)
+    app.active_mesh_processes = {}
+    
     # Create database tables
     with app.app_context():
         db.create_all()
@@ -217,7 +219,7 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             )
             
             # Register process for potential termination
-            active_mesh_processes[project_id] = process
+            app.active_mesh_processes[project_id] = process
 
             line_count = 0
             for line in process.stdout:
@@ -314,8 +316,8 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
 
             process.wait()
             # Remove from active processes
-            if project_id in active_mesh_processes:
-                del active_mesh_processes[project_id]
+            if project_id in app.active_mesh_processes:
+                del app.active_mesh_processes[project_id]
                 
             print(f"[MESH GEN] Process exited with code {process.returncode}")
 
@@ -372,9 +374,8 @@ def register_routes(app):
     @jwt_required()
     def stop_mesh_generation(project_id):
         """Terminate a running mesh generation process"""
-        global active_mesh_processes
-        if project_id in active_mesh_processes:
-            process = active_mesh_processes[project_id]
+        if project_id in app.active_mesh_processes:
+            process = app.active_mesh_processes[project_id]
             try:
                 print(f"[MESH GEN] Terminating process for project {project_id}")
                 process.terminate()

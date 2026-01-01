@@ -45,8 +45,8 @@ function App() {
   const [meshData, setMeshData] = useState(null)
   const [isPolling, setIsPolling] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
-  const [maxElementSize, setMaxElementSize] = useState(3.0)
-  const [minElementSize, setMinElementSize] = useState(0.1)
+  const [maxElementSize, setMaxElementSize] = useState(10.0)
+  const [minElementSize, setMinElementSize] = useState(2.0)
   const [elementOrder, setElementOrder] = useState('1')
   const [ansysMode, setAnsysMode] = useState('None')
   const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (HXT)')
@@ -64,8 +64,8 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
 
   // UX states for input boxes to allow typing (including blank)
-  const [maxSizeStr, setMaxSizeStr] = useState('3.0')
-  const [minSizeStr, setMinSizeStr] = useState('0.1')
+  const [maxSizeStr, setMaxSizeStr] = useState('10.0')
+  const [minSizeStr, setMinSizeStr] = useState('2.0')
 
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
