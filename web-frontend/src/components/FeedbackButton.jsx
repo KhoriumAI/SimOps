@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { MessageCircle, X, Send, Bug, Lightbulb, AlertCircle } from 'lucide-react'
 import { API_BASE } from '../config'
 
