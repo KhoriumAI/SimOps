@@ -466,6 +466,9 @@ export default function MeshViewer({
   const [pendingFaceName, setPendingFaceName] = useState('')
   const [isSavingZones, setIsSavingZones] = useState(false)
 
+  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
+  const isCompleted = status === 'completed'
+
   // Fetch zones on load
   useEffect(() => {
     if (projectId && isCompleted) {
@@ -486,9 +489,6 @@ export default function MeshViewer({
       fetchZones()
     }
   }, [projectId, isCompleted])
-
-  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
-  const isCompleted = status === 'completed'
 
   // Build adjacency map for flood fill
   const adjacency = useMemo(() => {
