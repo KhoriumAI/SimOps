@@ -1061,24 +1061,41 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* Named Faces List */}
-          {Object.keys(faceNames).length > 0 && !showFacePanel && (
+          {/* Named Faces List (Boundary Zones) */}
+          {Object.keys(boundaryZones).length > 0 && !showFacePanel && (
             <div className="absolute bottom-3 right-3 bg-gray-900/95 backdrop-blur rounded-lg p-2 z-10 text-xs text-gray-300 max-w-48 shadow-xl border border-gray-700">
               <div className="flex items-center gap-1.5 mb-1.5 text-[10px] text-gray-400">
                 <Tag className="w-3 h-3" />
-                <span>Named Faces ({Object.keys(faceNames).length})</span>
+                <span>Boundary Zones ({Object.keys(boundaryZones).length})</span>
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
-                {Object.entries(faceNames).map(([faceIndex, name]) => (
-                  <div key={faceIndex} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
-                    <span className="text-white truncate">{name}</span>
+                {Object.entries(boundaryZones).map(([name, indices]) => (
+                  <div key={name} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
+                    <div className="flex flex-col overflow-hidden max-w-[100px]">
+                      <span className="text-white truncate" title={name}>{name}</span>
+                      <span className="text-[9px] text-gray-500">{indices.length} faces</span>
+                    </div>
                     <button
-                      onClick={() => {
-                        const newNames = { ...faceNames }
-                        delete newNames[faceIndex]
-                        setFaceNames(newNames)
+                      onClick={async () => {
+                        const newZones = { ...boundaryZones }
+                        delete newZones[name]
+                        setBoundaryZones(newZones)
+
+                        try {
+                          const token = localStorage.getItem('token')
+                          await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                              'Authorization': `Bearer ${token}`
+                            },
+                            body: JSON.stringify(newZones)
+                          })
+                        } catch (err) {
+                          console.error("Failed to delete zone:", err)
+                        }
                       }}
-                      className="text-gray-500 hover:text-red-400 ml-2"
+                      className="text-gray-500 hover:text-red-400 ml-2 flex-shrink-0"
                     >
                       <X className="w-3 h-3" />
                     </button>
