@@ -28,6 +28,10 @@ from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
 from slicing import generate_slice_mesh, parse_msh_for_slicing
+from job_logger import (
+    generate_job_id, log_import_job, log_mesh_job, log_job_update,
+    get_logs_by_job_id, get_recent_logs
+)
 import numpy as np
 try:
     import meshio
@@ -156,6 +160,9 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
     import time
     import tempfile
     start_time = time.time()
+    
+    # Extract job ID if passed from API
+    mesh_job_id = quality_params.pop('_mesh_job_id', None) if quality_params else None
     
     with app.app_context():
         project = Project.query.get(project_id)
@@ -304,11 +311,32 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                                 project.status = 'completed'
                                 project.last_accessed = datetime.utcnow()
                                 logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
+                                
+                                # Log mesh job completion
+                                if mesh_job_id:
+                                    log_job_update(
+                                        job_id=mesh_job_id,
+                                        status='completed',
+                                        details={
+                                            'processing_time': mesh_result.processing_time,
+                                            'strategy': mesh_result.strategy,
+                                            'node_count': result.get('total_nodes'),
+                                            'element_count': result.get('total_elements')
+                                        }
+                                    )
                             else:
                                 error = result.get('error', 'Unknown error')
                                 project.status = 'error'
                                 project.error_message = error
                                 logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {error}")
+                                
+                                # Log mesh job error
+                                if mesh_job_id:
+                                    log_job_update(
+                                        job_id=mesh_job_id,
+                                        status='error',
+                                        details={'error': error}
+                                    )
                             mesh_result.logs = logs
                             db.session.commit()
                         except json.JSONDecodeError:
@@ -344,6 +372,14 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             project.error_message = str(e)
             db.session.commit()
             print(traceback.format_exc())
+            
+            # Log mesh job exception
+            if mesh_job_id:
+                log_job_update(
+                    job_id=mesh_job_id,
+                    status='error',
+                    details={'error': str(e), 'traceback': traceback.format_exc()[:500]}
+                )
 
 
 def register_routes(app):
@@ -472,6 +508,7 @@ def register_routes(app):
         url = data.get('url', '')
         user_agent = data.get('userAgent', '')[:200]  # Truncate
         timestamp = data.get('timestamp', datetime.utcnow().isoformat())
+        job_id = data.get('jobId', '')  # Optional Job ID for traceability
         
         if not message:
             return jsonify({"error": "Message is required"}), 400
@@ -537,7 +574,7 @@ def register_routes(app):
                             "elements": [
                                 {
                                     "type": "mrkdwn",
-                                    "text": f"📅 {timestamp} | 🌐 {url[:50] + '...' if len(url) > 50 else url}"
+                                    "text": f"📅 {timestamp} | 🌐 {url[:50] + '...' if len(url) > 50 else url}" + (f" | 🎫 `{job_id}`" if job_id else "")
                                 }
                             ]
                         }
@@ -563,6 +600,7 @@ def register_routes(app):
             details={
                 'message': message[:1000],  # Truncate for DB
                 'url': url,
+                'job_id': job_id,
                 'slack_notified': slack_success
             },
             ip_address=request.remote_addr,
@@ -612,9 +650,20 @@ def register_routes(app):
             return jsonify({"error": f"Invalid file type"}), 400
 
         project_id = str(uuid.uuid4())
+        import_job_id = generate_job_id('IMP')
         original_filename = file.filename
         filename = secure_filename(file.filename) or f"file{file_ext}"
         storage_filename = f"{project_id}_{filename}"
+        
+        # Log import job start
+        log_import_job(
+            job_id=import_job_id,
+            user_email=user.email,
+            project_id=project_id,
+            filename=original_filename,
+            file_size=file_size,
+            status='started'
+        )
         
         # Calculate file size and hash before saving
         file.seek(0, 2)  # Seek to end
@@ -717,8 +766,29 @@ def register_routes(app):
             db.session.add(project)
             db.session.add(activity)
             db.session.commit()
+            
+            # Log import job completion
+            log_import_job(
+                job_id=import_job_id,
+                user_email=user.email,
+                project_id=project_id,
+                filename=original_filename,
+                file_size=file_size,
+                status='completed',
+                details={'preview_generated': preview_path is not None}
+            )
         except Exception as e:
             db.session.rollback()
+            # Log import job error
+            log_import_job(
+                job_id=import_job_id,
+                user_email=user.email,
+                project_id=project_id,
+                filename=original_filename,
+                file_size=file_size,
+                status='error',
+                details={'error': str(e)}
+            )
             # Try to clean up the uploaded files
             try:
                 storage.delete_file(filepath)
@@ -730,6 +800,7 @@ def register_routes(app):
 
         return jsonify({
             "project_id": project_id,
+            "job_id": import_job_id,
             "filename": filename,
             "status": "uploaded",
             "preview_ready": preview_path is not None
@@ -751,12 +822,34 @@ def register_routes(app):
             return jsonify({"error": f"Cannot generate mesh - status is {project.status}"}), 400
 
         quality_params = request.json if request.is_json else None
+        
+        # Generate mesh job ID
+        mesh_job_id = generate_job_id('MSH')
+        
+        # Get user for logging
+        user = User.query.get(current_user_id)
+        
+        # Log mesh job start
+        log_mesh_job(
+            job_id=mesh_job_id,
+            user_email=user.email if user else 'unknown',
+            project_id=project_id,
+            filename=project.filename,
+            status='started',
+            strategy=quality_params.get('mesh_strategy') if quality_params else None,
+            quality_params=quality_params
+        )
+        
+        # Store job_id in quality_params to pass to thread
+        if quality_params is None:
+            quality_params = {}
+        quality_params['_mesh_job_id'] = mesh_job_id
 
         thread = Thread(target=run_mesh_generation, args=(app, project_id, quality_params))
         thread.daemon = True
         thread.start()
 
-        return jsonify({"message": "Mesh generation started", "project_id": project_id})
+        return jsonify({"message": "Mesh generation started", "project_id": project_id, "job_id": mesh_job_id})
 
     @app.route('/api/projects/<project_id>/status', methods=['GET'])
     @jwt_required()
@@ -843,6 +936,74 @@ def register_routes(app):
             "offset": offset_percent,
             "mesh": slice_data
         })
+
+    @app.route('/api/projects/<project_id>/mesh-results/<result_id>/boundary-zones', methods=['POST'])
+    @jwt_required()
+    def save_boundary_zones(project_id, result_id):
+        """Save user-defined boundary zones (face selections)"""
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+        if not project or project.user_id != current_user_id:
+            return jsonify({"error": "Forbidden"}), 403
+            
+        result = MeshResult.query.get(result_id)
+        if not result or result.project_id != project_id:
+            return jsonify({"error": "Result not found"}), 404
+            
+        data = request.json
+        # Format: { "inlet": [1, 2, 3], "outlet": [4, 5, 6] }
+        result.boundary_zones = data
+        db.session.commit()
+        
+        return jsonify({"success": True})
+
+    @app.route('/api/projects/<project_id>/mesh-results/<result_id>/boundary-zones', methods=['GET'])
+    @jwt_required()
+    def get_boundary_zones(project_id, result_id):
+        """Retrieve user-defined boundary zones"""
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+        if not project or project.user_id != current_user_id:
+            return jsonify({"error": "Forbidden"}), 403
+            
+        result = MeshResult.query.get(result_id)
+        if not result or result.project_id != project_id:
+            return jsonify({"error": "Result not found"}), 404
+            
+        return jsonify(result.boundary_zones or {})
+
+    @app.route('/api/projects/<project_id>/boundary-zones', methods=['POST'])
+    @jwt_required()
+    def save_boundary_zones_latest(project_id):
+        """Save user-defined boundary zones for the latest mesh result"""
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+        if not project or project.user_id != current_user_id:
+            return jsonify({"error": "Forbidden"}), 403
+            
+        result = project.mesh_results.first()
+        if not result:
+            return jsonify({"error": "No mesh result found"}), 404
+            
+        data = request.json
+        result.boundary_zones = data
+        db.session.commit()
+        return jsonify({"success": True})
+
+    @app.route('/api/projects/<project_id>/boundary-zones', methods=['GET'])
+    @jwt_required()
+    def get_boundary_zones_latest(project_id: str):
+        """Retrieve user-defined boundary zones for the latest mesh result"""
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+        if not project or project.user_id != current_user_id:
+            return jsonify({"error": "Forbidden"}), 403
+            
+        result = project.mesh_results.first()
+        if not result:
+            return jsonify({})
+            
+        return jsonify(result.boundary_zones or {})
 
     @app.route('/api/projects/<project_id>/logs', methods=['GET'])
     @jwt_required()
@@ -948,6 +1109,82 @@ def register_routes(app):
                 as_attachment=True,
                 download_name=f"{Path(project.filename).stem}_mesh.msh"
             )
+            
+    @app.route('/api/projects/<project_id>/export/ansys', methods=['POST'])
+    @jwt_required()
+    def export_ansys_mesh(project_id: str):
+        """Export mesh to ANSYS Fluent (TGrid) format with named boundary zones"""
+        from core.export_fluent_msh import export_fluent_msh, extract_tet_faces
+        import tempfile
+        
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
+
+        if not project:
+            return jsonify({"error": "Project not found"}), 404
+
+        if project.user_id != current_user_id:
+            return jsonify({"error": "Access denied"}), 403
+        
+        if project.status != "completed":
+            return jsonify({"error": "Mesh not ready"}), 400
+
+        result = project.mesh_results.first()
+        if not result or not result.output_path:
+            return jsonify({"error": "Mesh file not found"}), 404
+            
+        boundary_zones = result.boundary_zones or {}
+        
+        try:
+            # Load mesh indices and points for the exporter
+            # We can re-use the parsing logic or just call Gmsh
+            import gmsh
+            if not gmsh.isInitialized():
+                gmsh.initialize()
+            
+            gmsh.open(result.output_path)
+            
+            # Get points
+            node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+            points = np.array(node_coords).reshape(-1, 3)
+            
+            # Map node tags to 0-based indices
+            tag_to_idx = {int(tag): i for i, tag in enumerate(node_tags)}
+            
+            # Get tets
+            elem_types, elem_tags, node_tags_list = gmsh.model.mesh.getElements(3)
+            tets = []
+            for etype, etags, enodes in zip(elem_types, elem_tags, node_tags_list):
+                if etype == 4: # Tet4
+                    for i in range(len(etags)):
+                        tets.append([tag_to_idx[int(n)] for n in enodes[i*4:(i+1)*4]])
+            
+            tets = np.array(tets)
+            
+            # Prepare output file
+            output_fd, output_path = tempfile.mkstemp(suffix='.msh')
+            os.close(output_fd)
+            
+            # Run exporter
+            export_fluent_msh(
+                output_path,
+                points,
+                tets,
+                user_zones=boundary_zones,
+                verbose=True
+            )
+            
+            return send_file(
+                output_path,
+                as_attachment=True,
+                download_name=f"{Path(project.filename).stem}_fluent.msh"
+            )
+        except Exception as e:
+            print(f"[ANSYS EXPORT] Error: {e}")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+        finally:
+            gmsh.finalize()
 
     @app.route('/api/projects/<project_id>/mesh-data', methods=['GET'])
     @jwt_required()
@@ -1144,6 +1381,56 @@ def register_routes(app):
             "pages": activities.pages,
             "current_page": page
         })
+
+    @app.route('/api/admin/logs', methods=['GET'])
+    @jwt_required()
+    def get_admin_logs():
+        """
+        Get job logs for admin/debugging.
+        
+        Query params:
+        - job_id: Specific job ID to look up
+        - limit: Max entries to return (default 100)
+        - job_type: Filter by 'import' or 'mesh'
+        - status: Filter by status
+        """
+        current_user_id = int(get_jwt_identity())
+        user = User.query.get(current_user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Get query params
+        job_id = request.args.get('job_id', None)
+        limit = request.args.get('limit', 100, type=int)
+        job_type = request.args.get('job_type', None)
+        status = request.args.get('status', None)
+        
+        if job_id:
+            # Look up specific job
+            logs = get_logs_by_job_id(job_id)
+            return jsonify({
+                "job_id": job_id,
+                "entries": logs,
+                "count": len(logs)
+            })
+        else:
+            # Get recent logs with optional filters
+            logs = get_recent_logs(
+                limit=min(limit, 500),  # Cap at 500
+                job_type=job_type,
+                user_email=user.email if user.role != 'admin' else None,  # Non-admins see only their logs
+                status=status
+            )
+            return jsonify({
+                "entries": logs,
+                "count": len(logs),
+                "filters": {
+                    "job_type": job_type,
+                    "status": status,
+                    "limit": limit
+                }
+            })
 
 
 def parse_step_file_for_preview(step_filepath: str):
@@ -1715,25 +2002,18 @@ finally:
             else:
                 val = max(0.0, min(1.0, q))
                 
-            # Smooth gradient from red (0) to green (1)
-            if val <= 0.1:
-                return 0.8, 0.0, 0.0  # Dark red - very bad
-            elif val < 0.3:
-                # Red to Orange
-                t = (val - 0.1) / 0.2
-                return 1.0, 0.3 * t, 0.0
-            elif val < 0.5:
-                # Orange to Yellow
-                t = (val - 0.3) / 0.2
-                return 1.0, 0.3 + 0.7 * t, 0.0
-            elif val < 0.7:
-                # Yellow to Light Green
-                t = (val - 0.5) / 0.2
-                return 1.0 - 0.5 * t, 1.0, 0.0
+            # Smooth vibrant gradient from red (0) to green (1)
+            if val < 0.5:
+                # Red (1,0,0) to Yellow (1,1,0)
+                r = 1.0
+                g = val * 2.0
+                b = 0.0
             else:
-                # Light Green to Green
-                t = min(1.0, (val - 0.7) / 0.3)
-                return 0.5 - 0.5 * t, 0.8 + 0.2 * t, 0.2 * t
+                # Yellow (1,1,0) to Green (0,1,0)
+                r = 1.0 - (val - 0.5) * 2.0
+                g = 1.0
+                b = 0.0
+            return r, g, b
 
         # Load all metrics from quality.json
         per_element_gamma = {}

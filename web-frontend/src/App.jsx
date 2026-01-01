@@ -44,6 +44,7 @@ function App() {
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
   const [isPolling, setIsPolling] = useState(false)
+  const [isExportingAnsys, setIsExportingAnsys] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
   const [maxElementSize, setMaxElementSize] = useState(10.0)
   const [minElementSize, setMinElementSize] = useState(2.0)
@@ -62,6 +63,7 @@ function App() {
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
+  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
@@ -374,7 +376,8 @@ function App() {
       const data = await response.json()
       setCurrentProject(data.project_id)
       setProjectStatus(data)
-      setLogs([`[INFO] Uploaded ${file.name}`, `[INFO] Loading CAD preview...`])
+      setCurrentJobId(data.job_id)  // Capture Job ID from upload
+      setLogs([`[INFO] Uploaded ${file.name}`, data.job_id ? `[JOB] ${data.job_id}` : '', `[INFO] Loading CAD preview...`].filter(Boolean))
       setIsPolling(false)
 
       // Fetch CAD preview to show geometry before meshing
@@ -420,10 +423,12 @@ function App() {
       clearTimeout(timeoutId)
 
       if (response.ok) {
+        const data = await response.json()
+        setCurrentJobId(data.job_id)  // Capture mesh Job ID
         setIsPolling(true)
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
-        setLogs([`[INFO] Starting mesh generation...`])
+        setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
         setMeshData(null)
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
@@ -434,6 +439,36 @@ function App() {
     } catch (error) {
       console.error('Failed to start mesh generation:', error)
       alert('Failed to start mesh generation')
+    }
+  }
+
+  const handleAnsysExport = async () => {
+    if (!currentProject) return
+
+    setIsExportingAnsys(true)
+    try {
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/export/ansys`, {
+        method: 'POST'
+      })
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      } else {
+        const error = await response.json()
+        alert(error.error || 'Failed to export ANSYS mesh')
+      }
+    } catch (error) {
+      console.error('Failed to export ANSYS mesh:', error)
+      alert('Failed to export ANSYS mesh')
+    } finally {
+      setIsExportingAnsys(false)
     }
   }
 
@@ -568,13 +603,26 @@ function App() {
           )}
 
           {canDownload && (
-            <button
-              onClick={handleDownload}
-              className="flex items-center gap-1.5 px-3 py-1 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Download
-            </button>
+            <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold text-gray-700 bg-white hover:bg-gray-50 rounded shadow-sm transition-colors border border-gray-200"
+              >
+                <Download className="w-3 h-3" />
+                MSH
+              </button>
+              <button
+                onClick={handleAnsysExport}
+                disabled={isExportingAnsys}
+                className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'text-blue-600 hover:text-blue-700'
+                  }`}
+              >
+                {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+                ANSYS
+              </button>
+            </div>
           )}
         </div>
 
@@ -847,39 +895,7 @@ function App() {
                 </div>
               )}
 
-              {/* Progress - Only when generating */}
-              {isGenerating && (
-                <div className="bg-white rounded border border-gray-200 p-2 text-xs">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium text-gray-700">Progress</span>
-                    <MeshTimer
-                      isRunning={isGenerating}
-                      startTime={meshStartTime}
-                      status={projectStatus?.status}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    {[
-                      { key: 'strategy', label: 'Strategy' },
-                      { key: '1d', label: '1D' },
-                      { key: '2d', label: '2D' },
-                      { key: '3d', label: '3D' },
-                      { key: 'optimize', label: 'Optimize' },
-                      { key: 'quality', label: 'Quality' }
-                    ].map(({ key, label }) => (
-                      <div key={key} className="flex items-center gap-2">
-                        <span className="w-14 text-gray-500">{label}</span>
-                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
-                          <div
-                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
-                            style={{ width: `${meshProgress[key]}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Progress UI has been moved to FloatingProgress in MeshViewer */}
             </div>
           )}
         </div>
@@ -909,6 +925,9 @@ function App() {
               setQualityMetric={setQualityMetric}
               showHistogram={showHistogram}
               setShowHistogram={setShowHistogram}
+              // Progress props
+              meshProgress={meshProgress}
+              loadingStartTime={meshStartTime}
             />
           </div>
 
@@ -948,7 +967,7 @@ function App() {
       </div>
 
       {/* Feedback Button - Fixed position */}
-      <FeedbackButton userEmail={user?.email} />
+      <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
     </div>
   )
 }

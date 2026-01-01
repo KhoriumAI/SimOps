@@ -97,10 +97,17 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
         # q is 0 to 1 (0=bad, 1=good)
         # Low quality (0) -> Red [1, 0, 0]
         # High quality (1) -> Green [0, 1, 0]
-        # Using a smooth transition
-        r = 1.0 - q
-        g = q
-        b = 0.2
+        # Mid quality (0.5) -> Yellow [1, 1, 0]
+        if q < 0.5:
+            # Red to Yellow
+            r = 1.0
+            g = q * 2.0
+            b = 0.0
+        else:
+            # Yellow to Green
+            r = 1.0 - (q - 0.5) * 2.0
+            g = 1.0
+            b = 0.0
         return [r, g, b]
 
     vertex_count = 0

@@ -84,3 +84,34 @@ sudo systemctl restart gunicorn
 ## Golden Rule
 
 **No code goes to production unless it has a Git Commit Hash.**
+
+---
+
+## Job Logs (New)
+
+Every import and mesh operation now generates a unique Job ID (e.g., `IMP-0101-ABCD` or `MSH-0101-EFGH`). These are logged as structured JSON-lines for easy searching and debugging.
+
+### Log Location
+Logs are stored in the backend folder and rotate monthly:
+`/home/ubuntu/MeshPackageLean/backend/logs/jobs_YYYY-MM.jsonl`
+
+### Quick Troubleshooting
+
+**Watch live logs:**
+```bash
+tail -f /home/ubuntu/MeshPackageLean/backend/logs/jobs_$(date +%Y-%m).jsonl
+```
+
+**Search for a specific Job ID provided by a user:**
+```bash
+grep "MSH-0101-ABCD" /home/ubuntu/MeshPackageLean/backend/logs/jobs_*.jsonl
+```
+
+**Find all failed jobs today:**
+```bash
+grep "\"status\": \"error\"" /home/ubuntu/MeshPackageLean/backend/logs/jobs_$(date +%Y-%m).jsonl | grep $(date +%m%d)
+```
+
+### Admin API
+You can also query logs via API:
+`GET /api/admin/logs?job_id=MSH-...` (Requires admin JWT)

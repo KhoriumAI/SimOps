@@ -107,6 +107,7 @@ class MeshResult(db.Model):
     quality_metrics = db.Column(db.JSON, nullable=True)
     logs = db.Column(db.JSON, nullable=True)
     params = db.Column(db.JSON, nullable=True)
+    boundary_zones = db.Column(db.JSON, nullable=True)  # { "ZoneName": [face_indices], ... }
     
     # Processing info
     processing_time = db.Column(db.Float, nullable=True)  # Time in seconds

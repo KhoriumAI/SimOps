@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { MessageCircle, X, Send, Bug, Lightbulb, AlertCircle } from 'lucide-react'
 import { API_BASE } from '../config'
 
-export default function FeedbackButton({ userEmail }) {
+export default function FeedbackButton({ userEmail, jobId }) {
     const [isOpen, setIsOpen] = useState(false)
     const [feedbackType, setFeedbackType] = useState('feedback')
     const [message, setMessage] = useState('')
@@ -28,7 +28,8 @@ export default function FeedbackButton({ userEmail }) {
                     userEmail: userEmail,
                     url: window.location.href,
                     userAgent: navigator.userAgent,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
+                    jobId: jobId || null  // Include Job ID if available
                 })
             })
 
@@ -154,6 +155,7 @@ export default function FeedbackButton({ userEmail }) {
                                 </button>
 
                                 <p className="text-xs text-gray-400 text-center">
+                                    {jobId && <span className="block mb-1 text-gray-500">Job ID: <code className="bg-gray-100 px-1 rounded">{jobId}</code></span>}
                                     Your feedback helps us improve. Thank you!
                                 </p>
                             </form>

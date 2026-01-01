@@ -174,59 +174,67 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("\nAnalyzing geometry for defeaturing...")
         geom_stats = self.geometry_cleanup.analyze_geometry()
 
-        # Define all strategies to try
-        # Use custom order from config if provided
-        # OPTIMIZED: Only run 4 core strategies in parallel for speed
-        default_strategy_names = [
+        # Define core parallel strategies
+        core_parallel_strategies = [
             "tet_delaunay_optimized",     # HXT Fast-Path
             "tet_hxt_optimized",          # HXT Quality-focused
-            "tet_frontal_optimized",      # Frontal-Delaunay 3D
+            "fast_tet_delaunay",          # Ultra-fast path
             "adaptive_coarse_to_fine",    # Adaptive refinement
+        ]
+        
+        # All other strategies for sequential fallback
+        fallback_strategies = [
+            "tet_mmg3d_optimized",
+            "tet_frontal_optimized",
+            "tet_with_boundary_layers",
+            "anisotropic_curvature",
+            "hybrid_prism_tet",
+            "hybrid_hex_tet",
+            "recombined_to_hex",
+            "transfinite_structured",
+            "very_coarse_tet",
+            "linear_tet_delaunay",
+            "linear_tet_frontal",
+            "subdivide_and_mesh",
+            "resurfacing_reconstruction",
+            "automatic_gmsh_default"
         ]
         
         # Use custom strategy order from config if provided
         using_custom_order = False
         if hasattr(self.config.mesh_params, 'strategy_order') and self.config.mesh_params.strategy_order:
-            strategy_names = list(self.config.mesh_params.strategy_order)  # Make a copy to avoid mutation
+            strategy_names = list(self.config.mesh_params.strategy_order) 
             using_custom_order = True
             self.log_message(f"Using custom strategy order: {strategy_names}")
+            # In custom mode, we run EVERYTHING in parallel (user knows what they want)
+            parallel_strategies = strategy_names
+            sequential_strategies = []
         else:
-            strategy_names = list(default_strategy_names)  # Make a copy to avoid mutation
-        
+            parallel_strategies = core_parallel_strategies
+            sequential_strategies = fallback_strategies
+            self.log_message(f"Parallel race: {parallel_strategies}")
+            self.log_message(f"Sequential fallback: {len(sequential_strategies)} strategies")
+
         # Get score threshold from config
         score_threshold = getattr(self.config.mesh_params, 'score_threshold', 50.0)
 
-        # Only add supplementary meshers if NOT using custom strategy order
-        # (User's custom selection should be respected exactly)
-        if not using_custom_order:
-            if TETGEN_AVAILABLE:
-                strategy_names.append("tetgen")
-            if PYMESH_AVAILABLE:
-                strategy_names.append("pymesh")
-        
         # ANSYS FLUENT COMPATIBILITY: Filter out hex/poly strategies
-        # Fluent export only supports tetrahedral meshes
         ansys_mode = getattr(self.config.mesh_params, 'ansys_mode', 'None')
         if ansys_mode and ansys_mode != "None":
-            # List of strategies that produce non-tetrahedral elements
             hex_poly_strategies = [
                 "hybrid_hex_tet",
                 "recombined_to_hex",
                 "transfinite_structured",
-                "subdivide_and_mesh",  # Produces hex elements
-                "resurfacing_reconstruction",  # Might produce non-tet
+                "subdivide_and_mesh",
+                "resurfacing_reconstruction",
             ]
             
-            original_count = len(strategy_names)
-            strategy_names = [s for s in strategy_names if s not in hex_poly_strategies]
-            filtered_count = original_count - len(strategy_names)
-            
-            if filtered_count > 0:
-                self.log_message(f"[ANSYS] Filtered out {filtered_count} hex/poly strategies (Fluent requires tets)")
-                self.log_message(f"[ANSYS] Remaining strategies: {len(strategy_names)}")
+            parallel_strategies = [s for s in parallel_strategies if s not in hex_poly_strategies]
+            sequential_strategies = [s for s in sequential_strategies if s not in hex_poly_strategies]
+            self.log_message(f"[ANSYS] Filtered hex/poly strategies. Parallel: {len(parallel_strategies)}, Seq: {len(sequential_strategies)}")
 
-        # Determine number of workers - FIXED at 4 for the 4 parallel strategies
-        num_workers = min(4, len(strategy_names))
+        # Determine number of workers
+        num_workers = min(4, len(parallel_strategies))
         
         # Allow override via environment variable for advanced tuning
         if 'MESH_MAX_WORKERS' in os.environ:
@@ -406,7 +414,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 stop_event = manager.Event()
                 
                 # Prepare arguments for workers: (strategy_name, input_file, config, stop_event)
-                worker_args = [(name, input_file, self.config, stop_event) for name in strategy_names]
+                worker_args = [(name, input_file, self.config, stop_event) for name in parallel_strategies]
                 
                 pool = None
                 try:
@@ -415,6 +423,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                     # Use imap_unordered to process results as they arrive
                     results_iter = pool.imap_unordered(run_strategy_wrapper, worker_args)
                     
+                    winner_found = False
                     for strategy_name, success, metrics, result_data in results_iter:
                         # If we already found a winner, we are just draining the pool
                         if stop_event.is_set():
@@ -445,6 +454,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                                 best_score = score
                                 best_strategy = strategy_name
                                 self.all_attempts.append(attempt_data)
+                                winner_found = True
                                 break # Exit loop and proceed to cleanup
                             
                             # Check if score is below threshold (user-settable early stop)
@@ -458,10 +468,16 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                                 best_score = score
                                 best_strategy = strategy_name
                                 self.all_attempts.append(attempt_data)
+                                winner_found = True
                                 break
                             
                             # Keep as candidate
                             if score < best_score:
+                                # Clean up previous best if it was from a parallel worker
+                                if best_mesh_path and os.path.exists(best_mesh_path) and "temp_mesh_" in best_mesh_path:
+                                    try: os.remove(best_mesh_path)
+                                    except: pass
+                                    
                                 best_score = score
                                 best_mesh_path = temp_mesh_file
                                 best_strategy = strategy_name
@@ -473,17 +489,78 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                         
                         self.all_attempts.append(attempt_data)
                     
-                    # Graceful shutdown strategy:
-                    # 1. We already signaled stop_event.set() if we broke the loop.
-                    # 2. Close the pool to prevent new work from starting
-                    # 3. Workers will check stop_event and exit gracefully
+                    # Graceful shutdown of the pool
                     pool.close()
                     pool.join()
                     
+                    # --- SEQUENTIAL FALLBACK ---
+                    # If we didn't find a "winner" (meets targets) in parallel, try the others sequentially
+                    if not winner_found and sequential_strategies and not stop_event.is_set():
+                        self.log_message(f"\n[FALLBACK] No winner found in parallel race. Trying remaining {len(sequential_strategies)} strategies sequentially...")
+                        
+                        for strategy_name in sequential_strategies:
+                            if stop_event.is_set(): break
+                            
+                            self.log_message(f"\nTrying fallback strategy: {strategy_name}")
+                            method_name = f"_try_{strategy_name}"
+                            method = getattr(self, method_name, None)
+                            if not method: continue
+                            
+                            try:
+                                # Run directly
+                                success, metrics = method()
+                                
+                                attempt_data = {
+                                    'strategy': strategy_name,
+                                    'success': success,
+                                    'metrics': metrics
+                                }
+                                
+                                if success:
+                                    score = self._calculate_quality_score(metrics)
+                                    attempt_data['score'] = score
+                                    self.log_message(f"  Quality Score: {score:.2f}")
+                                    
+                                    if self.check_quality_targets(metrics) or score < score_threshold:
+                                        self.log_message(f"\n[!!!] WINNER FOUND (Fallback): {strategy_name} score {score:.2f}")
+                                        
+                                        temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
+                                        self.save_mesh(temp_output)
+                                        
+                                        if best_mesh_path and os.path.exists(best_mesh_path) and "temp_mesh_" in best_mesh_path:
+                                            try: os.remove(best_mesh_path)
+                                            except: pass
+                                            
+                                        best_mesh_path = temp_output
+                                        best_score = score
+                                        best_strategy = strategy_name
+                                        self.all_attempts.append(attempt_data)
+                                        break
+                                    
+                                    if score < best_score:
+                                        temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
+                                        self.save_mesh(temp_output)
+                                        
+                                        if best_mesh_path and os.path.exists(best_mesh_path) and "temp_mesh_" in best_mesh_path:
+                                            try: os.remove(best_mesh_path)
+                                            except: pass
+                                            
+                                        best_score = score
+                                        best_mesh_path = temp_output
+                                        best_strategy = strategy_name
+                                        self.log_message(f"  New best fallback (score {score:.2f})")
+                                else:
+                                    attempt_data['score'] = float('inf')
+                                    
+                                self.all_attempts.append(attempt_data)
+                                
+                            except Exception as e:
+                                self.log_message(f"[!] Fallback strategy {strategy_name} failed: {e}")
+                
                 except Exception as e:
                     self.log_message(f"[!] Parallel execution error: {e}")
                     if pool:
-                        pool.terminate() # Fallback to hard kill on error
+                        pool.terminate()
                         pool.join()
                 
         # Process the winner
@@ -736,6 +813,29 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.OptimizeNetgen", 0) # Disable slow Netgen
         gmsh.option.setNumber("Mesh.Smoothing", 10)
 
+        return self._generate_and_analyze()
+
+    def _try_fast_tet_delaunay(self) -> Tuple[bool, Optional[Dict]]:
+        """Ultra-fast HXT strategy with minimal optimization"""
+        self.log_message("Fast Tetrahedral HXT (minimal optimization)...")
+        
+        mesh_params = {
+            'max_size_mm': self.config.mesh_params.max_size_mm,
+            'min_size_mm': self.config.mesh_params.min_size_mm
+        }
+        self.apply_mesh_parameters(mesh_params)
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT
+        gmsh.option.setNumber("Mesh.ElementOrder", 1)   # Always linear for speed
+        
+        # Apply paintbrush refinement if available
+        self._apply_painted_refinement()
+
+        gmsh.option.setNumber("Mesh.Optimize", 0)       # No optimization
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
+        gmsh.option.setNumber("Mesh.Smoothing", 0)      # No smoothing
+        
         return self._generate_and_analyze()
 
     def _try_tet_frontal_optimized(self) -> Tuple[bool, Optional[Dict]]:
