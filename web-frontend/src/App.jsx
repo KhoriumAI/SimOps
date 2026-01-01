@@ -369,12 +369,17 @@ function App() {
       if (!response.ok) {
         let errorMessage = 'Failed to upload file'
         try {
-          const error = await response.json()
-          errorMessage = error.error || errorMessage
-        } catch (e) {
-          // Server returned non-JSON (likely HTML error page)
           const text = await response.text()
-          console.error('Upload error (non-JSON):', text)
+          try {
+            const error = JSON.parse(text)
+            errorMessage = error.error || errorMessage
+          } catch {
+            // Not JSON
+            console.error('Upload error (non-JSON):', text)
+            errorMessage = `Server error (${response.status}): ${response.statusText}`
+          }
+        } catch (e) {
+          console.error('Failed to read error response:', e)
           errorMessage = `Server error (${response.status}): ${response.statusText}`
         }
         setIsUploading(false)
