@@ -6,7 +6,7 @@ import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
-import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3 } from 'lucide-react'
+import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
 import { API_BASE } from './config'
 
 // Preset sizes: maps preset names to min/max element sizes
