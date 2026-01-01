@@ -259,7 +259,8 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
       const point = intersects[0].point
       const normal = intersects[0].face?.normal
 
-      const isFloodFill = event.shiftKey || event.metaKey || event.ctrlKey
+      // Default to flood fill (logical face selection)
+      const isFloodFill = !event.altKey
       onFaceSelect({
         faceIndex,
         point: { x: point.x, y: point.y, z: point.z },

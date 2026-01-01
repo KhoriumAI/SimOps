@@ -212,6 +212,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         else:
             parallel_strategies = core_parallel_strategies
             sequential_strategies = fallback_strategies
+            strategy_names = parallel_strategies + sequential_strategies
             self.log_message(f"Parallel race: {parallel_strategies}")
             self.log_message(f"Sequential fallback: {len(sequential_strategies)} strategies")
 
