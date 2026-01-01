@@ -34,7 +34,7 @@ function SliceMesh({ sliceData, clippingPlanes }) {
 function AxesIndicator({ visible }) {
   if (!visible) return null
   return (
-    <GizmoHelper alignment="bottom-left" margin={[80, 80]}>
+    <GizmoHelper alignment="bottom-left" margin={[40, 40]}>
       <GizmoViewport axisColors={['#ff4444', '#44ff44', '#4444ff']} labelColor="white" />
     </GizmoHelper>
   )
@@ -312,15 +312,15 @@ export default function MeshViewer({
   // Props from App sidebar
   showAxes,
   setShowAxes,
-  showWireframe,
-  setShowWireframe,
-  showQuality,
-  setShowQuality,
   qualityMetric,
   setQualityMetric,
   showHistogram,
   setShowHistogram
 }) {
+  // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
+  const showWireframe = meshData && !meshData.isPreview && status === 'completed'
+  // Derive quality coloring: ON for completed meshes with quality data
+  const showQuality = status === 'completed' && meshData?.colors?.length > 0
   const [clipping, setClipping] = useState({
     enabled: false,
     showQualitySlice: true,
@@ -531,11 +531,21 @@ export default function MeshViewer({
               Paint
             </button>
             <button
-              onClick={() => setShowControls(!showControls)}
+              onClick={() => {
+                if (!showControls) {
+                  // Opening panel - auto-enable with X axis
+                  setShowControls(true)
+                  setClipping({ enabled: true, showQualitySlice: true, x: true, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                } else {
+                  // Closing panel - disable clipping
+                  setShowControls(false)
+                  setClipping({ enabled: false, showQualitySlice: true, x: false, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                }
+              }}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showControls ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
             >
               <Scissors className="w-3.5 h-3.5" />
-              Clip
+              Section View
             </button>
             <button
               onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
@@ -556,7 +566,7 @@ export default function MeshViewer({
                 <label className="text-gray-400 text-[10px] uppercase">Color Mode</label>
                 <select
                   value={colorMode}
-                  onChange={(e) => { setColorMode(e.target.value); setShowQuality(e.target.value === 'quality'); }}
+                  onChange={(e) => setColorMode(e.target.value)}
                   className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
                 >
                   <option value="solid">Solid Color</option>
@@ -976,65 +986,53 @@ export default function MeshViewer({
             <AxesIndicator visible={showAxes} />
           </Canvas>
 
-          {/* Clipping Controls Panel */}
+          {/* Section View Controls Panel */}
           {showControls && (
             <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur p-3 rounded z-10 text-xs text-gray-300 w-48">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-white">Clipping</span>
-                <input
-                  type="checkbox"
-                  checked={clipping.enabled}
-                  onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
-                  className="accent-blue-500 w-3 h-3"
-                />
+              <div className="font-medium text-white mb-2">Section View</div>
+
+              <div className="mb-3 pb-2 border-b border-gray-800">
+                <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={clipping.showQualitySlice}
+                    onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
+                    className="accent-blue-500 w-3 h-3"
+                  />
+                  View Quality Slice
+                </label>
+                {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
               </div>
 
-              {clipping.enabled && (
-                <div className="mb-3 pb-2 border-b border-gray-800">
-                  <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={clipping.showQualitySlice}
-                      onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
-                      className="accent-blue-500 w-3 h-3"
-                    />
-                    View Quality Slice
-                  </label>
-                  {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
-                </div>
-              )}
-
-              {clipping.enabled && (
-                <div className="space-y-2">
-                  {[
-                    { axis: 'x', label: 'X', color: 'red' },
-                    { axis: 'y', label: 'Y', color: 'green' },
-                    { axis: 'z', label: 'Z', color: 'blue' }
-                  ].map(({ axis, label }) => (
-                    <div key={axis} className="space-y-0.5">
-                      <div className="flex justify-between">
-                        <label className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={clipping[axis]}
-                            onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
-                            className="accent-blue-500 w-3 h-3"
-                          />
-                          {label}
-                        </label>
-                        <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
-                      </div>
-                      <input
-                        type="range" min="-50" max="50"
-                        value={clipping[`${axis}Value`]}
-                        onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
-                        disabled={!clipping[axis]}
-                        className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
-                      />
+              <div className="space-y-2">
+                {[
+                  { axis: 'x', label: 'X', color: 'red' },
+                  { axis: 'y', label: 'Y', color: 'green' },
+                  { axis: 'z', label: 'Z', color: 'blue' }
+                ].map(({ axis, label }) => (
+                  <div key={axis} className="space-y-0.5">
+                    <div className="flex justify-between">
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={clipping[axis]}
+                          onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
+                          className="accent-blue-500 w-3 h-3"
+                        />
+                        {label}
+                      </label>
+                      <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
                     </div>
-                  ))}
-                </div>
-              )}
+                    <input
+                      type="range" min="-50" max="50"
+                      value={clipping[`${axis}Value`]}
+                      onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
+                      disabled={!clipping[axis]}
+                      className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </>

@@ -397,22 +397,6 @@ def register_routes(app):
                 'description': 'Hexahedral mesh with tet fill - best for CFD',
                 'element_type': 'hex',
                 'recommended': False
-            },
-            {
-                'id': 'gpu_delaunay',
-                'name': 'GPU Delaunay',
-                'description': 'GPU-accelerated meshing (requires CUDA)',
-                'element_type': 'tet',
-                'recommended': False,
-                'requires': 'cuda'
-            },
-            {
-                'id': 'polyhedral',
-                'name': 'Polyhedral',
-                'description': 'Polyhedral cells - experimental',
-                'element_type': 'poly',
-                'recommended': False,
-                'experimental': True
             }
         ]
         
@@ -422,6 +406,129 @@ def register_routes(app):
             'strategies': strategies,
             'names': [s['name'] for s in strategies],
             'default': 'Tet (Fast)'
+        })
+
+    @app.route('/feedback', methods=['POST'])  # Alias without /api prefix
+    @app.route('/api/feedback', methods=['POST'])
+    @jwt_required()
+    def submit_feedback():
+        """
+        Submit user feedback, bug reports, or feature requests.
+        Posts to Slack webhook for live team notifications.
+        """
+        import requests
+        
+        current_user_id = int(get_jwt_identity())
+        user = User.query.get(current_user_id)
+        
+        data = request.json
+        feedback_type = data.get('type', 'feedback')
+        message = data.get('message', '')
+        user_email = data.get('userEmail', user.email if user else 'unknown')
+        url = data.get('url', '')
+        user_agent = data.get('userAgent', '')[:200]  # Truncate
+        timestamp = data.get('timestamp', datetime.utcnow().isoformat())
+        
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+        
+        # Format type emoji
+        type_emoji = {
+            'feedback': '💬',
+            'bug': '🐛',
+            'feature': '💡'
+        }.get(feedback_type, '📝')
+        
+        type_label = {
+            'feedback': 'Feedback',
+            'bug': 'Bug Report',
+            'feature': 'Feature Request'
+        }.get(feedback_type, 'Feedback')
+        
+        # Try to post to Slack webhook if configured
+        slack_webhook_url = os.environ.get('SLACK_WEBHOOK_URL')
+        slack_success = False
+        
+        if slack_webhook_url:
+            try:
+                slack_payload = {
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"{type_emoji} New {type_label}",
+                                "emoji": True
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "fields": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"*From:*\n{user_email}"
+                                },
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"*Type:*\n{type_label}"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Message:*\n{message}"
+                            }
+                        },
+                        {
+                            "type": "context",
+                            "elements": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"📅 {timestamp} | 🌐 {url[:50] + '...' if len(url) > 50 else url}"
+                                }
+                            ]
+                        }
+                    ]
+                }
+                
+                slack_response = requests.post(
+                    slack_webhook_url,
+                    json=slack_payload,
+                    timeout=5
+                )
+                slack_success = slack_response.status_code == 200
+                
+            except Exception as e:
+                print(f"[FEEDBACK] Slack webhook error: {e}")
+        
+        # Log feedback to database activity log
+        activity = ActivityLog(
+            user_id=current_user_id,
+            action='feedback',
+            resource_type=feedback_type,
+            resource_id=None,
+            details={
+                'message': message[:1000],  # Truncate for DB
+                'url': url,
+                'slack_notified': slack_success
+            },
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string[:500] if request.user_agent else None
+        )
+        
+        try:
+            db.session.add(activity)
+            db.session.commit()
+        except Exception as e:
+            print(f"[FEEDBACK] DB error: {e}")
+            db.session.rollback()
+        
+        return jsonify({
+            "success": True,
+            "message": "Feedback received",
+            "slack_notified": slack_success
         })
 
     @app.route('/upload', methods=['POST'])  # Alias without /api prefix

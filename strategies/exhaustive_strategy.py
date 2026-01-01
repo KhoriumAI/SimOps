@@ -176,25 +176,12 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         # Define all strategies to try
         # Use custom order from config if provided
+        # OPTIMIZED: Only run 4 core strategies in parallel for speed
         default_strategy_names = [
-            "tet_delaunay_optimized",
-            "tet_frontal_optimized",
-            "tet_hxt_optimized",
-            "tet_mmg3d_optimized",
-            "tet_with_boundary_layers",
-            "anisotropic_curvature",
-            "hybrid_prism_tet",
-            "hybrid_hex_tet",
-            "recombined_to_hex",
-            "transfinite_structured",
-            "very_coarse_tet",
-            "adaptive_coarse_to_fine",
-            "linear_tet_delaunay",
-            "linear_tet_frontal",
-            "subdivide_and_mesh",
-            "subdivide_and_mesh",
-            "automatic_gmsh_default",
-            "resurfacing_reconstruction",
+            "tet_delaunay_optimized",     # HXT Fast-Path
+            "tet_hxt_optimized",          # HXT Quality-focused
+            "tet_frontal_optimized",      # Frontal-Delaunay 3D
+            "adaptive_coarse_to_fine",    # Adaptive refinement
         ]
         
         # Use custom strategy order from config if provided
@@ -238,26 +225,20 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 self.log_message(f"[ANSYS] Filtered out {filtered_count} hex/poly strategies (Fluent requires tets)")
                 self.log_message(f"[ANSYS] Remaining strategies: {len(strategy_names)}")
 
-        # Determine number of workers
-        # Use up to 65% of available cores for parallel meshing
-        # Cap at 6 workers to prevent Windows pool shutdown hangs
-        # (8 workers caused deadlocks during graceful termination)
-        total_cores = multiprocessing.cpu_count()
-        max_workers = max(1, min(int(total_cores * 0.65), 6))
+        # Determine number of workers - FIXED at 4 for the 4 parallel strategies
+        num_workers = min(4, len(strategy_names))
         
         # Allow override via environment variable for advanced tuning
         if 'MESH_MAX_WORKERS' in os.environ:
             try:
                 override = int(os.environ['MESH_MAX_WORKERS'])
-                if 1 <= override <= total_cores:
-                    max_workers = override
-                    self.log_message(f"Using MESH_MAX_WORKERS override: {max_workers}")
+                if 1 <= override <= multiprocessing.cpu_count():
+                    num_workers = override
+                    self.log_message(f"Using MESH_MAX_WORKERS override: {num_workers}")
             except ValueError:
                 pass
         
-        num_workers = max_workers
-        
-        self.log_message(f"Starting parallel pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
+        self.log_message(f"Starting parallel pool with {num_workers} workers ({len(strategy_names)} strategies)")
         self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
         # --- EARLY CANARY CHECKS ---
@@ -322,10 +303,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         best_score = float('inf')
         best_strategy = None
         
-        # OPTIMIZATION: Use sequential execution when only 1 worker or 1 strategy
-        # or it's a single part (<= 3 volumes) for cleaner verbose output
-        # This avoids spawning unnecessary subprocess and the [INIT] overhead
-        use_sequential = (num_workers == 1) or (len(strategy_names) == 1) or (num_vols <= 3)
+        # FORCE PARALLEL MODE for the 4 core strategies (no sequential fallback)
+        use_sequential = False
         
         if use_sequential:
             self.log_message(f"Using SEQUENTIAL mode (1 worker or 1 strategy - no subprocess overhead)")

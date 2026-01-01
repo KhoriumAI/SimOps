@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, Optional
 import platform
@@ -85,7 +86,7 @@ def get_stl_bounds(stl_path: str):
         return [[-100, -100, -100], [100, 100, 100]]
 
 
-def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0, mesh_scope: str = 'Internal', layers: int = 0, volume_centroids: list = None) -> None:
+def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0, mesh_scope: str = 'Internal', layers: int = 0, volume_centroids: list = None, enclosure_config: dict = None) -> None:
     """
     Create OpenFOAM case directory structure for snappyHexMesh.
     
@@ -94,24 +95,46 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0, me
         stl_path: Path to input STL file
         cell_size: Target cell size in mm
         volume_centroids: List of (x,y,z) tuples from CAD extraction (preferred over STL splitting)
+        enclosure_config: Optional enclosure configuration for external flow:
+            {
+                'type': 'box'|'cylinder'|'sphere',
+                'enclosure_stl': path to enclosure STL,
+                'boundary_patches': {name: BoundaryPatch, ...}
+            }
     """
     # Create directory structure
     (case_dir / "constant" / "triSurface").mkdir(parents=True, exist_ok=True)
     (case_dir / "system").mkdir(parents=True, exist_ok=True)
     
-    # Copy STL file
+    # Copy STL file(s)
     stl_filename = "geometry.stl"
     stl_dest = case_dir / "constant" / "triSurface" / stl_filename
     shutil.copy(stl_path, stl_dest)
     
-    # Get bounds for blockMesh
-    bounds = get_stl_bounds(stl_path)
+    # Handle enclosure if provided (for external flow)
+    enclosure_filename = None
+    if enclosure_config and 'enclosure_stl' in enclosure_config:
+        enclosure_filename = "enclosure.stl"
+        enc_dest = case_dir / "constant" / "triSurface" / enclosure_filename
+        shutil.copy(enclosure_config['enclosure_stl'], enc_dest)
+        print(f"[OpenFOAM] Copied enclosure STL: {enclosure_config['enclosure_stl']}")
+        
+        # For external flow with enclosure, use enclosure bounds for blockMesh
+        bounds = get_stl_bounds(enclosure_config['enclosure_stl'])
+    else:
+        # Get bounds for blockMesh from part STL
+        bounds = get_stl_bounds(stl_path)
+    
     min_b, max_b = bounds[0], bounds[1]
     
-    # Add margin (50%)
+    # Add margin (50%) unless using explicit enclosure
     center = (min_b + max_b) / 2
     size = max_b - min_b
-    margin = size * 0.5
+    if enclosure_config:
+        # Enclosure already defines the domain, add small margin (5%) for safety
+        margin = size * 0.05
+    else:
+        margin = size * 0.5
     min_pt = min_b - margin
     max_pt = max_b + margin
     
@@ -297,6 +320,27 @@ boundary
         location_clause = f"insidePoint ({location_in_mesh[0]} {location_in_mesh[1]} {location_in_mesh[2]});"
 
     # Generate snappyHexMeshDict
+    # Build geometry section - include enclosure if provided
+    geometry_entries = f'''    {stl_filename}
+    {{
+        type triSurfaceMesh;
+        file "{stl_filename}";
+    }}'''
+    
+    if enclosure_filename:
+        geometry_entries += f'''
+    {enclosure_filename}
+    {{
+        type triSurfaceMesh;
+        file "{enclosure_filename}";
+        regions
+        {{
+            inlet {{ name inlet; }}
+            outlet {{ name outlet; }}
+            walls {{ name walls; }}
+        }}
+    }}'''
+    
     snappy_dict = f'''FoamFile
 {{
     version     2.0;
@@ -311,12 +355,9 @@ addLayers       {add_layers_bool};
 
 geometry
 {{
-    {stl_filename}
-    {{
-        type triSurfaceMesh;
-        file "{stl_filename}";
-    }}
+{geometry_entries}
 }};
+
 
 castellatedMeshControls
 {{
@@ -490,33 +531,54 @@ def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
     """Run snappyHexMesh pipeline via WSL."""
     case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
     
-    # Chain commands: if one fails, print its log and exit
-    # We use parentheses to group the "try or print log" logic
-    # SKIPPING surfaceFeatureExtract (implicit snapping)
+    # OPTIMIZED: Combined all OpenFOAM commands into ONE WSL call
+    # This saves ~10-15 seconds by avoiding multiple bashrc sourcing
+    # Pipeline: blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK
     cmd_str = (
         f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; '
         f'cd "{case_dir_wsl}" && '
-        f'(blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
-        f'(snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1))'
+        f'echo "[TIMING] Starting blockMesh..." && '
+        f'time (blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
+        f'echo "[TIMING] Starting snappyHexMesh..." && '
+        f'time (snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1)) && '
+        f'echo "[TIMING] Starting foamMeshToFluent..." && '
+        f'time (foamMeshToFluent > log.fluent 2>&1) && '
+        f'echo "[TIMING] Starting foamToVTK..." && '
+        f'time (foamToVTK > log.vtk 2>&1) && '
+        f'echo "[TIMING] Pipeline complete!"'
     )
     
     cmd = ['wsl', 'bash', '-c', cmd_str]
     
     if verbose:
-        print("[OpenFOAM] Running snappyHexMesh pipeline (Implicit Feature Snapping)...")
+        print("[OpenFOAM] Running OPTIMIZED pipeline (single WSL call)...")
+        print("[OpenFOAM] blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK")
+    
+    start_time = time.time()
     
     try:
-        # Increase timeout for snappy (can be slow)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        # Increase timeout for full pipeline (can be slow on complex meshes)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        
+        elapsed = time.time() - start_time
         
         if result.returncode != 0:
-            print(f"[OpenFOAM] ERROR: Pipeline failed.")
+            print(f"[OpenFOAM] ERROR: Pipeline failed after {elapsed:.1f}s")
             print(f"Stdout/Stderr capture:\n{result.stdout}\n{result.stderr}")
             return False
+        
+        if verbose:
+            # Print timing info from the output
+            print(f"[OpenFOAM] Pipeline completed in {elapsed:.1f}s total")
+            # Extract timing lines from output
+            for line in result.stdout.split('\n'):
+                if '[TIMING]' in line or 'real' in line:
+                    print(f"  {line.strip()}")
             
         return True
     except subprocess.TimeoutExpired:
-        print("[OpenFOAM] ERROR: snappyHexMesh timed out")
+        elapsed = time.time() - start_time
+        print(f"[OpenFOAM] ERROR: Pipeline timed out after {elapsed:.1f}s")
         return False
     except Exception as e:
         print(f"[OpenFOAM] ERROR: {e}")
@@ -545,10 +607,20 @@ def convert_to_fluent(case_dir: Path, verbose: bool = True) -> Optional[Path]:
     ]
     
     if verbose:
-        print("[OpenFOAM] Converting to Fluent format...")
+        print("[OpenFOAM] Converting to Fluent format (this may take several minutes for large meshes)...")
         
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        # Increased timeout from 300s to 900s to match snappyHexMesh
+        # Large meshes can take 10+ minutes for Fluent conversion
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        
+        # Print output for visibility if verbose
+        if verbose and result.stdout:
+            for line in result.stdout.strip().split('\n')[-10:]:  # Last 10 lines
+                print(f"[Fluent] {line}")
+        if verbose and result.stderr:
+            for line in result.stderr.strip().split('\n')[-5:]:  # Last 5 error lines
+                print(f"[Fluent] {line}")
         
         # Check if .msh file exists (recursively, as it may be in fluentInterface/)
         msh_files = list(case_dir.rglob("*.msh"))
@@ -566,8 +638,21 @@ def convert_to_fluent(case_dir: Path, verbose: bool = True) -> Optional[Path]:
                     print(f"[OpenFOAM] Conversion Log:\n{log_file.read_text()}")
             return None
             
+        if verbose:
+            print(f"[OpenFOAM] Fluent conversion complete: {msh_files[0].name}")
         return msh_files[0]
         
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print(f"[OpenFOAM] ERROR: Fluent conversion timed out after 900 seconds")
+            # Try to print partial log
+            log_file = case_dir / "log.fluent"
+            if log_file.exists():
+                log_content = log_file.read_text()
+                print(f"[OpenFOAM] Partial log (last 20 lines):")
+                for line in log_content.strip().split('\n')[-20:]:
+                    print(f"  {line}")
+        return None
     except Exception as e:
         if verbose:
             print(f"[OpenFOAM] Error converting to Fluent: {e}")
@@ -590,14 +675,28 @@ def generate_openfoam_hex_mesh(
     verbose: bool = True,
     mesh_scope: str = 'Internal',
     layers: int = 0,
-    volume_centroids: list = None
+    volume_centroids: list = None,
+    enclosure_config: dict = None,
+    skip_fluent: bool = False  # Skip Fluent conversion if only VTK needed for visualization
 ) -> Dict:
     """
     Generate hex-dominant mesh using OpenFOAM (cfMesh or snappyHexMesh).
+    
+    Args:
+        stl_path: Path to part STL file
+        output_path: Path for output mesh file
+        cell_size: Target cell size in mm
+        verbose: Print progress messages
+        mesh_scope: 'Internal' or 'External' meshing mode
+        layers: Number of boundary layers
+        volume_centroids: List of (x,y,z) for multi-region meshing
+        enclosure_config: Optional enclosure configuration from EnclosureGenerator
     """
     if verbose:
         print(f"[OpenFOAM] Generating hex mesh for: {stl_path}")
         print(f"[OpenFOAM] Target cell size: {cell_size} mm")
+        if enclosure_config:
+            print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}")
     
     # Check prerequisites
     if platform.system() == 'Windows':
@@ -624,20 +723,38 @@ def generate_openfoam_hex_mesh(
             if not run_cartesian_mesh(case_dir, verbose):
                 return {'success': False, 'error': 'cartesianMesh failed'}
         else:
-            create_snappy_case(case_dir, stl_path, cell_size, mesh_scope=mesh_scope, layers=layers, volume_centroids=volume_centroids or [])
+            create_snappy_case(case_dir, stl_path, cell_size, mesh_scope=mesh_scope, 
+                             layers=layers, volume_centroids=volume_centroids or [],
+                             enclosure_config=enclosure_config)
             if not run_snappy_hex_mesh(case_dir, verbose):
-                return {'success': False, 'error': 'snappyHexMesh failed'}
+                return {'success': False, 'error': 'snappyHexMesh pipeline failed'}
         
-        # Convert to Fluent
-        msh_file = convert_to_fluent(case_dir, verbose)
-        if not msh_file:
-            return {'success': False, 'error': 'Fluent conversion failed'}
+        # OPTIMIZED: Files are already generated by the combined pipeline
+        # Just find them instead of calling separate conversion functions
         
-        shutil.copy(msh_file, output_path)
+        # Find Fluent .msh file (generated by combined pipeline)
+        msh_files = list(case_dir.rglob("*.msh"))
+        msh_file = msh_files[0] if msh_files else None
         
-        # Convert to VTK for internal visualization
-        # We try to create a sibling file with .vtk extension (or .vtu)
-        vtk_file = convert_to_vtk(case_dir, verbose)
+        if msh_file:
+            shutil.copy(msh_file, output_path)
+            if verbose:
+                print(f"[OpenFOAM] Fluent mesh: {msh_file.name}")
+        else:
+            if verbose:
+                print("[OpenFOAM] WARNING: No Fluent .msh file found")
+        
+        # Find VTK file (generated by combined pipeline)
+        vtk_dir = case_dir / "VTK"
+        vtk_files = []
+        if vtk_dir.exists():
+            vtk_files = list(vtk_dir.rglob("*.vtk")) + list(vtk_dir.rglob("*.vtu"))
+        
+        vtk_file = None
+        if vtk_files:
+            # Prefer internal mesh over boundary
+            vtk_files.sort(key=lambda p: ('boundary' in str(p), -p.stat().st_size))
+            vtk_file = vtk_files[0]
         
         output_vtk_path = None
         if vtk_file:

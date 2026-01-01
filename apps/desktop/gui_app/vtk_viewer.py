@@ -151,6 +151,7 @@ class PreviewWorker(QThread):
     Keeps the main GUI thread (and spinner animation) responsive.
     """
     finished = pyqtSignal(object)  # Emits (poly_data, complexity_info)
+    lines_ready = pyqtSignal(object) # Emits poly_data (wireframe)
     error = pyqtSignal(str)
     log = pyqtSignal(str)          # Emits status messages for the GUI console
     progress = pyqtSignal(str, float) # Emits (operation_name, percentage_0_to_1)
@@ -167,6 +168,10 @@ class PreviewWorker(QThread):
             import pyvista as pv
             import os
             import sys
+            import re
+            import time
+            import queue
+            import threading
             
             # Get verbose setting from gui_app.vtk_viewer at runtime
             import apps.desktop.gui_app.vtk_viewer as vtk_module
@@ -186,6 +191,7 @@ import json
 import sys
 import math
 import os
+import tempfile
 
 try:
     gmsh.initialize()
@@ -210,27 +216,99 @@ try:
 
     gmsh.option.setNumber("General.Terminal", 1)  # Enable terminal output
     gmsh.option.setNumber("General.Verbosity", 3) # Full verbosity
-    
-    # SAFETY: Enable minimal healing to prevent "No elements in surface" on complex CAD
-    # Disabling these caused failures on Mac/Linux for sliver surfaces
+
+    print("STATUS:Reading CAD file...", flush=True)
+
+    def set_defaults():
+        gmsh.option.setNumber("General.NumThreads", 1)
+        gmsh.option.setNumber("Mesh.RandomFactor", 1e-9)
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
+        gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-6)
+        # Disable orientations fixing in raw modes as it can crash
+        try: gmsh.option.setNumber("Geometry.OCCFixOrientations", 1)
+        except: pass
+
+    def get_entity_count():
+        return len(gmsh.model.getEntities(2))
+
+    # --- ATTEMPT 1: WITH HEALING (Standard) ---
+    print(f"[CAD] Opening file (Attempt 1 - Healing Enabled): {self.filepath}", flush=True)
+    set_defaults()
     gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)
     gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
     gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
     gmsh.option.setNumber("Geometry.OCCAutoFix", 1)
-    
-    # Use standard tolerance (1e-6) instead of aggressive 1e-3
-    # Aggressive tolerance was causing invalid geometry merges
-    gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
-    gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-6)
-    
-    # AutoCoherence already enabled by default or above
-    # Duplicate lines removed
-
     gmsh.model.add("ComplexityAnalysis")
-    print("[CAD] Opening file: {self.filepath}", flush=True)
-    gmsh.open(r"{self.filepath}")
-    print("[CAD] Synchronizing OCC...", flush=True)
-    gmsh.model.occ.synchronize()
+    
+    try:
+        print("STATUS:Synchronizing CAD topology...", flush=True)
+        gmsh.open(r"{self.filepath}")
+        gmsh.model.occ.synchronize()
+        if get_entity_count() > 0:
+            load_success = True
+            print("Stage 1 Success.", flush=True)
+        else:
+            print("Stage 1 result empty.", flush=True)
+            load_success = False
+    except Exception as e:
+        print(f"Stage 1 (Healing) failed: {{e}}", flush=True)
+        load_success = False
+
+    # --- ATTEMPT 2: RAW OPEN ---
+    if not load_success:
+        print("[CAD] Resetting and attempting Stage 2 (Raw Open)...", flush=True)
+        gmsh.finalize()
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Verbosity", 3)
+        set_defaults()
+        gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+        gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+        gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+        gmsh.model.add("ComplexityAnalysis_Raw")
+        try:
+            print("STATUS:Synchronizing CAD topology (Raw)...", flush=True)
+            gmsh.open(r"{self.filepath}")
+            gmsh.model.occ.synchronize()
+            if get_entity_count() > 0:
+                load_success = True
+                print("[CAD] Stage 2 Success.", flush=True)
+            else:
+                print("[CAD] Stage 2 result empty.", flush=True)
+                load_success = False
+        except Exception as e:
+            print(f"[CAD] Stage 2 failed: {{e}}", flush=True)
+            load_success = False
+
+    # --- ATTEMPT 3: DEEP IMPORT (importShapes) ---
+    if not load_success:
+        print("[CAD] Resetting and attempting Stage 3 (Deep Import)...", flush=True)
+        gmsh.finalize()
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.option.setNumber("General.Verbosity", 3)
+        set_defaults()
+        gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+        gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+        gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
+        try: gmsh.option.setNumber("Geometry.OCCFixOrientations", 0) # Ultra-raw
+        except: pass
+        gmsh.model.add("ComplexityAnalysis_Deep")
+        try:
+            print("STATUS:Synchronizing CAD topology (Deep)...", flush=True)
+            gmsh.model.occ.importShapes(r"{self.filepath}")
+            gmsh.model.occ.synchronize()
+            if get_entity_count() > 0:
+                load_success = True
+                print("[CAD] Stage 3 Success.", flush=True)
+            else:
+                print("[CAD] ERROR: All import stages resulted in empty geometry.", flush=True)
+                sys.exit(1)
+        except Exception as e:
+            print(f"[CAD] ERROR: Stage 3 also failed: {{e}}", flush=True)
+            sys.exit(1)
     
     
     # [DIAGNOSTIC 1] Check Topology Interpretation
@@ -258,6 +336,23 @@ try:
     bbox_diag = math.sqrt(dx*dx + dy*dy + dz*dz)
     volume = dx * dy * dz
     
+    # --- STAGE 1: WIREFRAME (1D) ---
+    try:
+        print("STATUS:Discretizing CAD curves...", flush=True)
+        print("DEBUG: Starting 1D discretization...", flush=True)
+        gmsh.model.mesh.generate(1)
+        print("DEBUG: 1D discretization complete.", flush=True)
+        
+        tmp_lines_vtk = tempfile.mktemp(suffix='.vtk')
+        print(f"DEBUG: Writing lines to {{tmp_lines_vtk}}...", flush=True)
+        gmsh.write(tmp_lines_vtk)
+        # Simplify marker to avoid any parsing issues
+        print("LINES_READY_MARKER:" + str(tmp_lines_vtk), flush=True)
+        print("DEBUG: LINES_READY_MARKER printed.", flush=True)
+    except Exception as e:
+        print("DEBUG: Progressive lines generation failed (skipping): " + str(e), flush=True)
+
+    print("STATUS:Tessellating surfaces...", flush=True)
     # COARSE PREVIEW - prioritize speed over quality
     # Use a larger mesh size for fast preview generation
     mesh_size_max = bbox_diag / 10.0  # Coarse but stable
@@ -350,56 +445,105 @@ except Exception as e:
                 print(msg)
                 self.log.emit(msg)
             
+            import queue
+            import threading
+
+            def enqueue_output(out, q):
+                for line in iter(out.readline, ''):
+                    q.put(line)
+                out.close()
+
+            stdout_queue = queue.Queue()
+            thread = threading.Thread(target=enqueue_output, args=(process.stdout, stdout_queue))
+            thread.daemon = True
+            thread.start()
+            
+            import time
+            import apps.desktop.gui_app.vtk_viewer as vtk_module
+            
+            start_time = time.time()
+            timeout_seconds = 120
             stdout_full = []
-            max_invalid_elements = 0
-            current_invalid_elements = 0
+            process_killed = False
             
             while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
+                if time.time() - start_time > timeout_seconds:
+                    process.kill()
+                    process_killed = True
+                    self.log.emit(f"[ERROR] CAD Preview timed out after {timeout_seconds}s (Process killed)")
                     break
-                if line:
-                    line = line.strip()
-                    stdout_full.append(line)
-                    
-                    import re
-                    # We've removed the bouncing progress tracking based on invalid elements
-                    # for the fast preview, as it incorrectly jumps between batches.
-                            
-                    if line.startswith("PROGRESS:"):
-                        try:
-                            parts = line[9:].split('|')
-                            op_name = parts[0]
-                            val = float(parts[1])
-                            
-                            # Filter out 'Fixing mesh' which resets per-surface and causes bouncing progress
-                            if op_name != "Fixing mesh":
-                                self.progress.emit(op_name, val)
-                        except: pass
-                    elif line.startswith("STATUS:"):
-                        # Fallback for older gmsh versions without onProgress
-                        status_msg = line[7:]
-                        self.log.emit(f"[CAD] {status_msg}")
-                    elif line.startswith("COMPLEXITY:"):
-                        # We'll parse this finally
-                        pass
-                    elif line.startswith("SUCCESS_MARKER") or line.startswith("ERROR:"):
-                        # These are handled separately
-                        pass
-                    elif line:
-                        # Check verbosity at runtime by importing module
-                        import apps.desktop.gui_app.vtk_viewer as vtk_module
-                        if vtk_module.VERBOSE_PREVIEW and "elements remain invalid" not in line.lower():
-                            # Send subprocess output if verbose enabled
-                            print(f"[CAD-Subprocess] {line}")
-                            self.log.emit(f"[CAD] {line}")
+
+                try:
+                    line = stdout_queue.get_nowait()
+                except queue.Empty:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.01)
+                    continue
+
+                line = line.strip()
+                if not line: continue
+                stdout_full.append(line)
                 
-                # Small delay to give UI thread breathing room
-                import time
-                time.sleep(0.001)
+                if "Error   : Empty bounding box" in line:
+                    self.log.emit("[ERROR] CAD geometry is empty or invalid (Empty bounding box)")
+
+                # CLEAN SINGLE CHAIN
+                if "LINES_READY_MARKER:" in line:
+                    try:
+                        path = line.split("LINES_READY_MARKER:")[1].strip()
+                        msg = f"[PreviewWorker] Found wireframe marker: {path}"
+                        print(msg)
+                        self.log.emit(msg)
+                        
+                        if os.path.exists(path):
+                            try:
+                                print(f"[PreviewWorker] Loading wireframe mesh...")
+                                line_mesh = pv.read(path)
+                                self.lines_ready.emit(line_mesh)
+                                os.remove(path)
+                                self.log.emit("[PreviewWorker] Wireframe emitted successfully")
+                            except Exception as e:
+                                msg = f"[PreviewWorker] Error loading lines: {e}"
+                                print(msg)
+                                self.log.emit(msg)
+                        else:
+                            msg = f"[PreviewWorker] ERROR: Wireframe file missing: {path}"
+                            print(msg)
+                            self.log.emit(msg)
+                    except Exception as e:
+                         print(f"[PreviewWorker] Error parsing marker line: {e}")
+
+                elif line.startswith("PROGRESS:"):
+                    try:
+                        parts = line[9:].split('|')
+                        op_name = parts[0]
+                        val = float(parts[1])
+                        if op_name != "Fixing mesh":
+                            self.progress.emit(op_name, val)
+                    except: pass
+                elif line.startswith("STATUS:"):
+                    status_msg = line[7:]
+                    self.log.emit(f"[CAD] {status_msg}")
+                elif line.startswith("COMPLEXITY:"):
+                    pass
+                elif line.startswith("SUCCESS_MARKER") or line.startswith("ERROR:"):
+                    pass
+                elif line:
+                    if vtk_module.VERBOSE_PREVIEW and "elements remain invalid" not in line.lower():
+                        # Don't double-prefix if it already has [CAD] from the subprocess print
+                        clean_line = line.replace("[CAD]", "").strip()
+                        print(f"[CAD-Subprocess] {clean_line}")
+                        self.log.emit(f"[CAD] {clean_line}")
             
             process.wait()
             stdout = "\n".join(stdout_full)
+            
+            if process_killed:
+                self.error.emit("CAD Preview failed: Operation timed out (60s). The geometry might be too complex or corrupt.")
+                self.finished.emit((None, None))
+                return
+
             import apps.desktop.gui_app.vtk_viewer as vtk_module
             if vtk_module.VERBOSE_PREVIEW:
                 msg = f"[PreviewWorker] Subprocess finished with code {process.returncode}"
@@ -410,6 +554,7 @@ except Exception as e:
                 print(f"[PreviewWorker] Subprocess output: {stdout}")
                 error_part = stdout.split("ERROR:")[1] if "ERROR:" in stdout else "Unknown error in CAD subprocess"
                 self.error.emit(error_part.strip())
+                self.finished.emit((None, None))
                 return
 
             # Parse results
@@ -436,6 +581,7 @@ except Exception as e:
             else:
                 print(f"[PreviewWorker] Preview STL file not found: {tmp_stl}")
                 self.error.emit("Subprocess failed to generate preview STL")
+                self.finished.emit((None, None))
                 
         except Exception as e:
             msg = f"[PreviewWorker] Exception in run(): {e}"
@@ -4145,6 +4291,7 @@ except Exception as e:
         Stage 1: Initiate CAD load with cache check. Returns immediately (async).
         """
         print(f"\n[STAGE 1] Opening CAD session: {os.path.basename(filepath)}")
+        self.lines_displayed = False
         
         # Check for cached HQ STL
         self.full_quality_stl_path = self._get_hq_stl_cache_path(filepath)
@@ -4165,6 +4312,7 @@ except Exception as e:
         print(f"[STAGE 1] Starting PreviewWorker thread...")
         self.preview_worker = PreviewWorker(filepath, self)
         self.preview_worker.finished.connect(self._on_preview_ready)
+        self.preview_worker.lines_ready.connect(self._on_preview_lines_ready) # Progressive display
         self.preview_worker.error.connect(self._on_preview_error)
         self.preview_worker.log.connect(self.log_requested.emit)      # Forward to GUI
         self.preview_worker.progress.connect(self._on_preview_progress) # Handle progress
@@ -4173,7 +4321,8 @@ except Exception as e:
     def _on_preview_progress(self, operation: str, value: float):
         """Update loading overlay with granular progress"""
         pct = int(value * 100)
-        self.loading_overlay.set_message("Reading CAD file...", f"{operation}: {pct}%")
+        title = "Tessellating surfaces..." if getattr(self, 'lines_displayed', False) else "Reading CAD file..."
+        self.loading_overlay.set_message(title, f"{operation}: {pct}%")
         self.progress_update.emit(operation, value) # Forward to main GUI
 
     def _on_preview_error(self, error_msg: str):
@@ -4181,10 +4330,38 @@ except Exception as e:
         self.loading_overlay.hide()
         self.info_label.setText(f"Load Error: {error_msg}")
 
+    def _on_preview_lines_ready(self, line_mesh):
+        """Stage 1.5: Wireframe results ready for immediate feedback"""
+        print("[STAGE 1.5] Wireframe lines ready for display")
+        self.lines_displayed = True
+        self.loading_overlay.set_message("CAD Lines Displayed", "Tessellating surfaces...")
+        
+        # Immediate display of lines
+        self.clear_view()
+        mapper = vtk.vtkDataSetMapper()
+        mapper.SetInputData(line_mesh)
+        self.line_actor = vtk.vtkActor()
+        self.line_actor.SetMapper(mapper)
+        self.line_actor.GetProperty().SetColor(0.2, 0.4, 0.8) # Blue-ish lines
+        self.line_actor.GetProperty().SetLineWidth(1.5)
+        
+        self.renderer.AddActor(self.line_actor)
+        self.renderer.ResetCamera()
+        self.vtk_widget.GetRenderWindow().Render()
+
     def _on_preview_ready(self, results):
         """Stage 2: Geometry results ready from background thread"""
         mesh, complexity = results
+        if mesh is None or complexity is None:
+            return  # Handle error state gracefully
+
         print(f"[STAGE 1] ✓ Coarse preview generated")
+        
+        # Remove intermediate lines before showing full preview
+        if hasattr(self, 'line_actor') and self.line_actor:
+            self.renderer.RemoveActor(self.line_actor)
+            self.line_actor = None
+
         print(f"[STAGE 2] Geometry analyzed: {complexity['surface_count']} surfaces, {complexity['volume']:.1f} mm³")
         
         # Stage 3: Display results

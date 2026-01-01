@@ -5,11 +5,38 @@ import FileUpload from './components/FileUpload'
 import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
-import BlockingModal from './components/BlockingModal'
+import FeedbackButton from './components/FeedbackButton'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3 } from 'lucide-react'
 
 // API base URL - uses proxy in development, full URL in production
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+
+// Preset sizes: maps preset names to min/max element sizes
+const presetSizes = {
+  'Coarse': { min: 0.5, max: 10.0 },
+  'Medium': { min: 0.1, max: 3.0 },
+  'Fine': { min: 0.05, max: 1.0 },
+  'Very Fine': { min: 0.01, max: 0.5 }
+}
+
+// Parse number expressions: supports scientific notation (1e-6) and math (39.26/2)
+function parseNumberExpression(expr) {
+  if (typeof expr === 'number') return expr
+  const trimmed = String(expr).trim()
+  if (!trimmed) return NaN
+  // Handle scientific notation: 1e-6, 2.5E3
+  if (/^-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/.test(trimmed)) {
+    return parseFloat(trimmed)
+  }
+  // Handle simple math: 39.26/2, 10*2, 5+3
+  try {
+    if (/^[\d\s+\-*/().eE]+$/.test(trimmed)) {
+      const result = Function('"use strict"; return (' + trimmed + ')')()
+      return typeof result === 'number' && isFinite(result) ? result : NaN
+    }
+  } catch { }
+  return parseFloat(trimmed) // Fallback
+}
 
 function App() {
   const { user, logout, authFetch } = useAuth()
@@ -19,8 +46,6 @@ function App() {
   const [meshData, setMeshData] = useState(null)
   const [isPolling, setIsPolling] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
-  const [targetElements, setTargetElements] = useState(2000)
-  const [useTargetElements, setUseTargetElements] = useState(true)
   const [maxElementSize, setMaxElementSize] = useState(3.0)
   const [minElementSize, setMinElementSize] = useState(0.1)
   const [elementOrder, setElementOrder] = useState('1')
@@ -44,8 +69,6 @@ function App() {
 
   // Visualization toggles (shared with MeshViewer)
   const [showAxes, setShowAxes] = useState(true)
-  const [showWireframe, setShowWireframe] = useState(false)
-  const [showQuality, setShowQuality] = useState(false)
   const [qualityMetric, setQualityMetric] = useState('sicn')
   const [showHistogram, setShowHistogram] = useState(false)
 
@@ -334,7 +357,7 @@ function App() {
         method: 'POST',
         body: {
           quality_preset: qualityPreset,
-          target_elements: useTargetElements ? targetElements : null,
+          target_elements: null,
           max_size_mm: maxElementSize,
           min_size_mm: minElementSize,
           element_order: parseInt(elementOrder),
@@ -566,7 +589,15 @@ function App() {
                     <label className="text-gray-500 text-[10px] uppercase mb-1 block">Preset</label>
                     <select
                       value={qualityPreset}
-                      onChange={(e) => setQualityPreset(e.target.value)}
+                      onChange={(e) => {
+                        const preset = e.target.value
+                        setQualityPreset(preset)
+                        // Update min/max sizes based on preset
+                        if (presetSizes[preset]) {
+                          setMinElementSize(presetSizes[preset].min)
+                          setMaxElementSize(presetSizes[preset].max)
+                        }
+                      }}
                       className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                       disabled={isGenerating}
                     >
@@ -576,31 +607,19 @@ function App() {
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <div className="flex items-center justify-between">
-                        <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
-                        <input
-                          type="checkbox"
-                          checked={useTargetElements}
-                          onChange={(e) => setUseTargetElements(e.target.checked)}
-                          className="w-3 h-3 mb-1 accent-blue-500"
-                        />
-                      </div>
-                      <input
-                        type="number"
-                        value={targetElements}
-                        onChange={(e) => setTargetElements(parseInt(e.target.value) || 2000)}
-                        className={`w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${!useTargetElements ? 'opacity-50' : ''}`}
-                        disabled={isGenerating || !useTargetElements}
-                      />
-                    </div>
-                    <div>
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Max Size</label>
                       <div className="relative">
                         <input
-                          type="number"
-                          step="0.1"
+                          type="text"
                           value={maxElementSize}
-                          onChange={(e) => setMaxElementSize(parseFloat(e.target.value) || 3.0)}
+                          onChange={(e) => {
+                            const val = parseNumberExpression(e.target.value)
+                            if (!isNaN(val) && val > 0) setMaxElementSize(val)
+                          }}
+                          onBlur={(e) => {
+                            const val = parseNumberExpression(e.target.value)
+                            if (!isNaN(val) && val > 0) setMaxElementSize(val)
+                          }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
                         />
@@ -611,17 +630,25 @@ function App() {
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Min Size</label>
                       <div className="relative">
                         <input
-                          type="number"
-                          step="0.01"
+                          type="text"
                           value={minElementSize}
-                          onChange={(e) => setMinElementSize(parseFloat(e.target.value) || 0.1)}
+                          onChange={(e) => {
+                            const val = parseNumberExpression(e.target.value)
+                            if (!isNaN(val) && val >= 0.01) setMinElementSize(val)
+                          }}
+                          onBlur={(e) => {
+                            const val = parseNumberExpression(e.target.value)
+                            // Enforce 0.01mm floor on blur
+                            if (!isNaN(val)) setMinElementSize(Math.max(0.01, val))
+                          }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
+                          placeholder="≥0.01"
                         />
                         <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
                     </div>
-                    <div>
+                    <div className="col-span-2">
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Order</label>
                       <select
                         value={elementOrder}
@@ -694,24 +721,6 @@ function App() {
                     <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
                       <input
                         type="checkbox"
-                        checked={showWireframe}
-                        onChange={(e) => setShowWireframe(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Wireframe
-                    </label>
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={showQuality}
-                        onChange={(e) => setShowQuality(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Quality Coloring
-                    </label>
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
                         checked={showHistogram}
                         onChange={(e) => setShowHistogram(e.target.checked)}
                         className="accent-blue-500 w-3.5 h-3.5"
@@ -720,21 +729,19 @@ function App() {
                     </label>
                   </div>
 
-                  {showQuality && (
-                    <div className="pt-2 border-t border-gray-100">
-                      <label className="text-gray-400 text-[10px] uppercase mb-1 block">Metric</label>
-                      <select
-                        value={qualityMetric}
-                        onChange={(e) => setQualityMetric(e.target.value)}
-                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      >
-                        <option value="sicn">SICN (Ideal=1)</option>
-                        <option value="gamma">Gamma (Ideal=1)</option>
-                        <option value="skewness">Skewness</option>
-                        <option value="aspectRatio">Aspect Ratio</option>
-                      </select>
-                    </div>
-                  )}
+                  <div className="pt-2 border-t border-gray-100">
+                    <label className="text-gray-400 text-[10px] uppercase mb-1 block">Quality Metric</label>
+                    <select
+                      value={qualityMetric}
+                      onChange={(e) => setQualityMetric(e.target.value)}
+                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="sicn">SICN (Ideal=1)</option>
+                      <option value="gamma">Gamma (Ideal=1)</option>
+                      <option value="skewness">Skewness</option>
+                      <option value="aspectRatio">Aspect Ratio</option>
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -822,10 +829,6 @@ function App() {
               // Visualization props
               showAxes={showAxes}
               setShowAxes={setShowAxes}
-              showWireframe={showWireframe}
-              setShowWireframe={setShowWireframe}
-              showQuality={showQuality}
-              setShowQuality={setShowQuality}
               qualityMetric={qualityMetric}
               setQualityMetric={setQualityMetric}
               showHistogram={showHistogram}
@@ -849,7 +852,22 @@ function App() {
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
               <button
-                onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(logs.join('\n')); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const text = logs.join('\n');
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(() => {
+                      e.target.innerText = 'Copied!';
+                      setTimeout(() => { e.target.innerText = 'Copy'; }, 1500);
+                    }).catch(() => {
+                      // Fallback for clipboard API failure
+                      prompt('Copy these logs:', text);
+                    });
+                  } else {
+                    // Fallback for older browsers
+                    prompt('Copy these logs:', text);
+                  }
+                }}
                 className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
                 title="Copy logs"
               >
@@ -868,17 +886,8 @@ function App() {
         </div>
       </div>
 
-      {/* Blocking Modal - Prevents user interaction during critical operations */}
-      <BlockingModal
-        isOpen={isUploading || isGenerating}
-        title={isUploading ? 'Uploading File...' : 'Generating Mesh...'}
-        message={
-          isUploading
-            ? 'Processing your CAD file. This may take a few minutes for large files.'
-            : 'Meshing geometry. This can take up to 2 minutes for complex models.'
-        }
-        subMessage="⚠️ Please do not refresh or close this page. The process is running on the server."
-      />
+      {/* Feedback Button - Fixed position */}
+      <FeedbackButton userEmail={user?.email} />
     </div>
   )
 }

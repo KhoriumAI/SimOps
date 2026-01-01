@@ -641,6 +641,112 @@ class ModernMeshGenGUI(QMainWindow):
         layers_layout.addWidget(self.snappy_layers, 1)
         snappy_layout.addLayout(layers_layout)
         
+        # === ENCLOSURE CONTROLS (for External mode) ===
+        # Enclosure Type dropdown
+        enclosure_layout = QHBoxLayout()
+        enclosure_label = QLabel("Enclosure Type:")
+        enclosure_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
+        enclosure_layout.addWidget(enclosure_label)
+        
+        self.enclosure_type = NoScrollComboBox()
+        self.enclosure_type.addItems(["None", "Box (Wind Tunnel)", "Cylinder", "Sphere"])
+        self.enclosure_type.setCurrentIndex(0)
+        self.enclosure_type.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #17a2b8;
+                border-radius: 4px;
+                background-color: white;
+                color: #212529;
+                font-size: 11px;
+            }
+        """)
+        self.enclosure_type.setToolTip(
+            "None: Use automatic enclosure sizing\n"
+            "Box: Rectangular wind tunnel domain\n"
+            "Cylinder: For axisymmetric bodies (rockets, pipes)\n"
+            "Sphere: Omnidirectional flow (hovering drones)"
+        )
+        self.enclosure_type.currentTextChanged.connect(self.on_enclosure_type_changed)
+        enclosure_layout.addWidget(self.enclosure_type, 1)
+        snappy_layout.addLayout(enclosure_layout)
+        
+        # Enclosure Size Multiplier
+        size_mult_layout = QHBoxLayout()
+        size_mult_label = QLabel("Domain Size:")
+        size_mult_label.setStyleSheet("font-size: 11px; color: #495057;")
+        size_mult_layout.addWidget(size_mult_label)
+        
+        self.enclosure_size = NoScrollDoubleSpinBox()
+        self.enclosure_size.setRange(1.5, 20.0)
+        self.enclosure_size.setValue(5.0)
+        self.enclosure_size.setDecimals(1)
+        self.enclosure_size.setSingleStep(0.5)
+        self.enclosure_size.setSuffix("x bbox")
+        self.enclosure_size.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.enclosure_size.setToolTip("Domain size as multiple of part bounding box (5x recommended for most CFD)")
+        size_mult_layout.addWidget(self.enclosure_size, 1)
+        snappy_layout.addLayout(size_mult_layout)
+        
+        # Flow Direction (for inlet/outlet placement)
+        flow_layout = QHBoxLayout()
+        flow_label = QLabel("Flow Direction:")
+        flow_label.setStyleSheet("font-size: 11px; color: #495057;")
+        flow_layout.addWidget(flow_label)
+        
+        self.flow_direction = NoScrollComboBox()
+        self.flow_direction.addItems(["+X (Right)", "-X (Left)", "+Y (Up)", "-Y (Down)", "+Z (Forward)", "-Z (Back)"])
+        self.flow_direction.setCurrentIndex(0)  # Default +X
+        self.flow_direction.setStyleSheet("""
+            QComboBox {
+                padding: 4px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.flow_direction.setToolTip("Direction of incoming flow (determines inlet/outlet placement)")
+        flow_layout.addWidget(self.flow_direction, 1)
+        snappy_layout.addLayout(flow_layout)
+        
+        # === HOLLOW SHELL / BOUNDARY LAYER THICKNESS ===
+        bl_thick_layout = QHBoxLayout()
+        bl_thick_label = QLabel("BL Region Thickness:")
+        bl_thick_label.setStyleSheet("font-size: 11px; color: #495057;")
+        bl_thick_layout.addWidget(bl_thick_label)
+        
+        self.bl_thickness = NoScrollDoubleSpinBox()
+        self.bl_thickness.setRange(0.0, 100.0)
+        self.bl_thickness.setValue(0.0)
+        self.bl_thickness.setDecimals(2)
+        self.bl_thickness.setSingleStep(0.5)
+        self.bl_thickness.setSuffix(" mm")
+        self.bl_thickness.setStyleSheet("""
+            QDoubleSpinBox {
+                padding: 4px;
+                border: 1px solid #6f42c1;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+        """)
+        self.bl_thickness.setToolTip(
+            "Create hollow shell with specified wall thickness.\n"
+            "0 = solid part (no hollow shell)\n"
+            "> 0 = hollow part with boundary layer region of this depth"
+        )
+        bl_thick_layout.addWidget(self.bl_thickness, 1)
+        snappy_layout.addLayout(bl_thick_layout)
+        
         self.snappy_controls.setVisible(False)
         quality_layout.addWidget(self.snappy_controls)
 
@@ -1855,6 +1961,16 @@ class ModernMeshGenGUI(QMainWindow):
             axis=self.clip_axis_combo.currentText(),
             offset=self.clip_offset_slider.value()
         )
+
+    def on_enclosure_type_changed(self, text):
+        """Handle enclosure type change - show/hide related controls"""
+        has_enclosure = text != "None"
+        # Could enable/disable size and flow direction based on selection
+        # For now, all controls are always visible when snappy controls are shown
+        if hasattr(self, 'enclosure_size'):
+            self.enclosure_size.setEnabled(has_enclosure)
+        if hasattr(self, 'flow_direction'):
+            self.flow_direction.setEnabled(has_enclosure)
 
     def on_clip_axis_changed(self, text):
         """Handle clip axis change"""
