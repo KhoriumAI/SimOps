@@ -11,10 +11,11 @@ import { API_BASE } from './config'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
-  'Coarse': { min: 1.0, max: 10.0 },
-  'Medium': { min: 0.5, max: 3.0 },
-  'Fine': { min: 0.2, max: 1.0 },
-  'Very Fine': { min: 0.1, max: 0.5 }
+  'Coarse': { min: 5.0, max: 25.0 },
+  'Medium': { min: 2.0, max: 10.0 },
+  'Fine': { min: 1.0, max: 5.0 },
+  'Very Fine': { min: 0.5, max: 1.0 },
+  'Ultra Fine': { min: 0.25, max: 0.75 }
 }
 
 // Parse number expressions: supports scientific notation (1e-6) and math (39.26/2)
@@ -62,6 +63,10 @@ function App() {
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
 
+  // UX states for input boxes to allow typing (including blank)
+  const [maxSizeStr, setMaxSizeStr] = useState('3.0')
+  const [minSizeStr, setMinSizeStr] = useState('0.1')
+
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
 
@@ -70,7 +75,7 @@ function App() {
   const [qualityMetric, setQualityMetric] = useState('sicn')
   const [showHistogram, setShowHistogram] = useState(false)
 
-  const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
+  const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine', 'Ultra Fine', 'Custom']
   const [meshStrategies, setMeshStrategies] = useState([
     'Tetrahedral (HXT)',  // Fallback default
   ])
@@ -207,6 +212,52 @@ function App() {
     }
 
     setMeshProgress(progress)
+  }
+
+  // Update input strings when numeric values change (e.g. from presets)
+  useEffect(() => {
+    setMaxSizeStr(String(maxElementSize))
+  }, [maxElementSize])
+
+  useEffect(() => {
+    setMinSizeStr(String(minElementSize))
+  }, [minElementSize])
+
+  const handleCopyConsole = (e) => {
+    const text = logs.join('\n')
+    const originalText = e.currentTarget.innerText
+
+    const finalize = (success) => {
+      const btn = e.currentTarget
+      const span = btn.querySelector('span')
+      if (span) span.innerText = success ? 'Copied!' : 'Failed'
+      setTimeout(() => {
+        if (span) span.innerText = 'Copy'
+      }, 2000)
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => finalize(true))
+        .catch(err => {
+          console.error('Clipboard error:', err)
+          finalize(false)
+        })
+    } else {
+      // Fallback: simple copy to clipboard for non-secure contexts
+      try {
+        const textArea = document.createElement('textarea')
+        textArea.value = text
+        document.body.appendChild(textArea)
+        textArea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textArea)
+        finalize(true)
+      } catch (err) {
+        console.error('Fallback copy fail:', err)
+        finalize(false)
+      }
+    }
   }
 
   const fetchMeshData = async (projectId) => {
@@ -627,14 +678,19 @@ function App() {
                       <div className="relative">
                         <input
                           type="text"
-                          value={maxElementSize}
-                          onChange={(e) => {
-                            const val = parseNumberExpression(e.target.value)
-                            if (!isNaN(val) && val > 0) setMaxElementSize(val)
+                          value={maxSizeStr}
+                          onChange={(e) => setMaxSizeStr(e.target.value)}
+                          onBlur={() => {
+                            const val = parseNumberExpression(maxSizeStr)
+                            if (!isNaN(val) && val > 0) {
+                              setMaxElementSize(val)
+                              setQualityPreset('Custom')
+                            } else {
+                              setMaxSizeStr(String(maxElementSize))
+                            }
                           }}
-                          onBlur={(e) => {
-                            const val = parseNumberExpression(e.target.value)
-                            if (!isNaN(val) && val > 0) setMaxElementSize(val)
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.target.blur()
                           }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
@@ -647,19 +703,23 @@ function App() {
                       <div className="relative">
                         <input
                           type="text"
-                          value={minElementSize}
-                          onChange={(e) => {
-                            const val = parseNumberExpression(e.target.value)
-                            if (!isNaN(val) && val >= 0.1) setMinElementSize(val)
+                          value={minSizeStr}
+                          onChange={(e) => setMinSizeStr(e.target.value)}
+                          onBlur={() => {
+                            const val = parseNumberExpression(minSizeStr)
+                            if (!isNaN(val) && val >= 0.01) { // Allow down to 0.01 now
+                              setMinElementSize(val)
+                              setQualityPreset('Custom')
+                            } else {
+                              setMinSizeStr(String(minElementSize))
+                            }
                           }}
-                          onBlur={(e) => {
-                            const val = parseNumberExpression(e.target.value)
-                            // Enforce 0.1mm floor on blur
-                            if (!isNaN(val)) setMinElementSize(Math.max(0.1, val))
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.target.blur()
                           }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
-                          placeholder="≥0.1"
+                          placeholder="≥0.01"
                         />
                         <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
@@ -868,27 +928,12 @@ function App() {
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const text = logs.join('\n');
-                  if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(text).then(() => {
-                      e.target.innerText = 'Copied!';
-                      setTimeout(() => { e.target.innerText = 'Copy'; }, 1500);
-                    }).catch(() => {
-                      // Fallback for clipboard API failure
-                      prompt('Copy these logs:', text);
-                    });
-                  } else {
-                    // Fallback for older browsers
-                    prompt('Copy these logs:', text);
-                  }
-                }}
+                onClick={handleCopyConsole}
                 className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
                 title="Copy logs"
               >
                 <Copy className="w-3 h-3" />
-                Copy
+                <span>Copy</span>
               </button>
             </div>
 

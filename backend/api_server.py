@@ -34,6 +34,8 @@ try:
 except ImportError:
     meshio = None
 
+# Track active mesh processes for termination
+active_mesh_processes = {}
 
 def create_app(config_class=None):
     """Application factory"""
@@ -370,6 +372,7 @@ def register_routes(app):
     @jwt_required()
     def stop_mesh_generation(project_id):
         """Terminate a running mesh generation process"""
+        global active_mesh_processes
         if project_id in active_mesh_processes:
             process = active_mesh_processes[project_id]
             try:

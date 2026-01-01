@@ -35,11 +35,11 @@ function SliceMesh({ sliceData, clippingPlanes }) {
 function AxesIndicator({ visible }) {
   if (!visible) return null
   return (
-    <GizmoHelper alignment="bottom-left" margin={[60, 60]}>
+    <GizmoHelper alignment="bottom-left" margin={[30, 30]}>
       <GizmoViewport
         axisColors={['#ff4444', '#44ff44', '#4444ff']}
         labelColor="white"
-        scale={60}
+        scale={20}
       />
     </GizmoHelper>
   )
@@ -957,7 +957,7 @@ export default function MeshViewer({
               dampingFactor={0}
               rotateSpeed={0.8}
               panSpeed={0.8}
-              zoomSpeed={1.2}
+              zoomSpeed={2.4}
               enabled={!selectionMode}
               makeDefault
             />
