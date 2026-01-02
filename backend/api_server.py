@@ -1189,6 +1189,10 @@ def register_routes(app):
             
         boundary_zones = result.boundary_zones or {}
         
+        # Track temp files to clean up
+        temp_input_file = None
+        temp_output_file = None
+        
         try:
             # Load mesh indices and points for the exporter
             # We can re-use the parsing logic or just call Gmsh
@@ -1196,7 +1200,22 @@ def register_routes(app):
             if not gmsh.isInitialized():
                 gmsh.initialize()
             
-            gmsh.open(result.output_path)
+            output_path = result.output_path
+            storage = get_storage()
+            use_s3 = app.config.get('USE_S3', False)
+            
+            # If S3, download to temp file for Gmsh to read
+            if use_s3 and output_path.startswith('s3://'):
+                temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.msh')
+                temp_input_file = temp_input.name
+                temp_input.close()
+                storage.download_to_local(output_path, temp_input_file)
+                local_mesh_path = temp_input_file
+                print(f"[ANSYS EXPORT] Downloaded S3 mesh to: {temp_input_file}")
+            else:
+                local_mesh_path = output_path
+            
+            gmsh.open(local_mesh_path)
             
             # Get points
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -1216,12 +1235,12 @@ def register_routes(app):
             tets = np.array(tets)
             
             # Prepare output file
-            output_fd, output_path = tempfile.mkstemp(suffix='.msh')
+            output_fd, temp_output_file = tempfile.mkstemp(suffix='.msh')
             os.close(output_fd)
             
             # Run exporter
             export_fluent_msh(
-                output_path,
+                temp_output_file,
                 points,
                 tets,
                 user_zones=boundary_zones,
@@ -1229,7 +1248,7 @@ def register_routes(app):
             )
             
             return send_file(
-                output_path,
+                temp_output_file,
                 as_attachment=True,
                 download_name=f"{Path(project.filename).stem}_fluent.msh"
             )
@@ -1239,6 +1258,12 @@ def register_routes(app):
             return jsonify({"error": str(e)}), 500
         finally:
             gmsh.finalize()
+            # Clean up temp input file (output file is cleaned up by Flask after send)
+            if temp_input_file and Path(temp_input_file).exists():
+                try:
+                    Path(temp_input_file).unlink()
+                except:
+                    pass
 
     @app.route('/api/projects/<project_id>/mesh-data', methods=['GET'])
     @jwt_required()

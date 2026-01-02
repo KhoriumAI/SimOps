@@ -1016,10 +1016,14 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         # For coarse/medium/fine, this ensures different densities
         print(f"[HXT] Mesh sizes: min={min_size:.4f}, max={max_size:.4f}, target_elements={target_elements}", flush=True)
         
-        # Set global mesh sizes
+        # Set global mesh sizes  - enforce user values strictly
         gmsh.option.setNumber("Mesh.MeshSizeMin", min_size)
         gmsh.option.setNumber("Mesh.MeshSizeMax", max_size)
-        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 1.0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)  # Disabled: use user sizes exactly
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)     # Disabled: use user sizes exactly
         gmsh.option.setNumber("Mesh.MinimumCircleNodes", 12)
         
         # Set HXT algorithm (fast, parallel, robust)

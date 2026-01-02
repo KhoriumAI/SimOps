@@ -804,20 +804,6 @@ function App() {
                   </div>
 
                   <div>
-                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Ansys Export</label>
-                    <select
-                      value={ansysMode}
-                      onChange={(e) => setAnsysMode(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      disabled={isGenerating}
-                    >
-                      <option value="None">None (Only .msh)</option>
-                      <option value="CFD (Fluent)">CFD (Fluent)</option>
-                      <option value="FEA (Mechanical)">FEA (Mechanical)</option>
-                    </select>
-                  </div>
-
-                  <div>
                     <label className="text-gray-500 text-[10px] uppercase mb-1 block">Strategy</label>
                     <select
                       value={meshStrategy}
@@ -967,6 +953,9 @@ function App() {
               >
                 <TerminalIcon className="w-3.5 h-3.5" />
                 <span className="font-medium">Console</span>
+                {currentJobId && (
+                  <span className="text-blue-400 font-mono text-[10px] bg-gray-700 px-1.5 py-0.5 rounded">{currentJobId}</span>
+                )}
                 <span className="text-gray-500">({logs.length} messages)</span>
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>

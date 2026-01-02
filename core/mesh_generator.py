@@ -1077,7 +1077,7 @@ class BaseMeshGenerator(ABC):
         return params
 
     def apply_mesh_parameters(self, params: Optional[Dict] = None):
-        """Apply mesh parameters to Gmsh"""
+        """Apply mesh parameters to Gmsh - sets all relevant size options"""
         if params is None:
             params = self.current_mesh_params
 
@@ -1086,10 +1086,21 @@ class BaseMeshGenerator(ABC):
         cl_min = params.get('cl_min') or params.get('min_size_mm') or 1.0
         cl_max = params.get('cl_max') or params.get('max_size_mm') or 10.0
 
+        # Set BOTH old and new Gmsh size options to ensure compatibility
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", cl_min)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", cl_max)
+        gmsh.option.setNumber("Mesh.MeshSizeMin", cl_min)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", cl_max)
+        
+        # Reset factor to 1.0 so user sizes are respected exactly
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFactor", 1.0)
+        
+        # Disable geometry-based sizing that can override user values
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
-        self.log_message(f"Applied mesh parameters: CL_min={cl_min:.4f}, CL_max={cl_max:.4f}")
+        self.log_message(f"Applied mesh parameters: min={cl_min:.4f}, max={cl_max:.4f} (all size options set)")
 
     def set_mesh_algorithm(self, algorithm_2d: Optional[int] = None,
                            algorithm_3d: Optional[int] = None):

@@ -166,8 +166,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         Run exhaustive meshing - try EVERYTHING in PARALLEL
         """
         self.log_message("\n" + "=" * 60)
-        self.log_message("EXHAUSTIVE MESH GENERATION STRATEGY (PARALLEL RACE)")
-        self.log_message("Will run strategies concurrently. First winner takes all.")
+        self.log_message("EXHAUSTIVE MESH GENERATION STRATEGY (SEQUENTIAL)")
+        self.log_message("Will try strategies in order until quality targets met.")
         self.log_message("=" * 60)
 
         # Analyze geometry for defeaturing (this happens in main process once)
@@ -314,15 +314,15 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         best_score = float('inf')
         best_strategy = None
         
-        # FORCE PARALLEL MODE for the 4 core strategies (no sequential fallback)
-        use_sequential = False
+        # SEQUENTIAL MODE: Run strategies one at a time with Gmsh using 4 internal threads
+        # This is more efficient than parallel racing which spawns separate processes
+        use_sequential = True
         
         if use_sequential:
-            self.log_message(f"Using SEQUENTIAL mode (1 worker or 1 strategy - no subprocess overhead)")
+            self.log_message(f"Using SEQUENTIAL mode with 4 Gmsh threads (no subprocess overhead)")
             
-            # Elevate verbosity for single parts (<= 3 volumes) as requested
-            if num_vols <= 3:
-                self.elevate_verbosity(level=3)
+            # Elevate verbosity for detailed logging
+            self.elevate_verbosity(level=3)
             
 
             for strategy_name in strategy_names:
