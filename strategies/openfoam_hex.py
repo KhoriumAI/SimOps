@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, Optional
 import platform
@@ -47,13 +48,26 @@ def check_openfoam_available() -> bool:
 
 
 def check_snappy_available() -> bool:
-    """Check if snappyHexMesh is installed in WSL."""
+    """Check if snappyHexMesh is installed in WSL or native Linux."""
     try:
-        result = subprocess.run(
-            ['wsl', 'bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
-            capture_output=True, timeout=10
-        )
-        return result.returncode == 0
+        if platform.system() == 'Windows':
+            result = subprocess.run(
+                ['wsl', 'bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
+                capture_output=True, timeout=10
+            )
+            return result.returncode == 0
+        else:
+            # On Linux (AWS), check if it's in the PATH directly (e.g. docker shim) or sourceable
+            # First check direct path (preferred for Docker shims)
+            if shutil.which('snappyHexMesh'):
+                return True
+            
+            # Fallback to sourcing bashrc and checking
+            result = subprocess.run(
+                ['bash', '-c', 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; which snappyHexMesh'],
+                capture_output=True, timeout=10
+            )
+            return result.returncode == 0
     except:
         return False
 
@@ -72,16 +86,20 @@ def get_stl_bounds(stl_path: str):
     try:
         import trimesh
         mesh = trimesh.load(stl_path)
-        return mesh.bounds
-    except ImportError:
+        if mesh.bounds is not None:
+            return mesh.bounds
+        else:
+             print("[OpenFOAM] WARNING: trimesh returned None for bounds (empty mesh?). Using default.")
+             return [[-100, -100, -100], [100, 100, 100]]
+    except Exception as e:
         # Simple fallback parser for ASCII/Binary STL
         # This is risky, but we only need approx bounds for background mesh
         # For robustness, we assume user has trimesh (it's in requirements)
-        print("[OpenFOAM] WARNING: trimesh not found, using default bounds")
+        print(f"[OpenFOAM] WARNING: Failed to get bounds via trimesh: {e}. Using default bounds")
         return [[-100, -100, -100], [100, 100, 100]]
 
 
-def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) -> None:
+def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0, mesh_scope: str = 'Internal', layers: int = 0, volume_centroids: list = None, enclosure_config: dict = None) -> None:
     """
     Create OpenFOAM case directory structure for snappyHexMesh.
     
@@ -89,36 +107,134 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
         case_dir: Path to case directory
         stl_path: Path to input STL file
         cell_size: Target cell size in mm
+        volume_centroids: List of (x,y,z) tuples from CAD extraction (preferred over STL splitting)
+        enclosure_config: Optional enclosure configuration for external flow:
+            {
+                'type': 'box'|'cylinder'|'sphere',
+                'enclosure_stl': path to enclosure STL,
+                'boundary_patches': {name: BoundaryPatch, ...}
+            }
     """
     # Create directory structure
     (case_dir / "constant" / "triSurface").mkdir(parents=True, exist_ok=True)
     (case_dir / "system").mkdir(parents=True, exist_ok=True)
     
-    # Copy STL file
+    # Copy STL file(s)
     stl_filename = "geometry.stl"
     stl_dest = case_dir / "constant" / "triSurface" / stl_filename
     shutil.copy(stl_path, stl_dest)
     
-    # Get bounds for blockMesh
-    bounds = get_stl_bounds(stl_path)
+    # Handle enclosure if provided (for external flow)
+    enclosure_filename = None
+    if enclosure_config and 'enclosure_stl' in enclosure_config:
+        enclosure_filename = "enclosure.stl"
+        enc_dest = case_dir / "constant" / "triSurface" / enclosure_filename
+        shutil.copy(enclosure_config['enclosure_stl'], enc_dest)
+        print(f"[OpenFOAM] Copied enclosure STL: {enclosure_config['enclosure_stl']}")
+        
+        # For external flow with enclosure, use enclosure bounds for blockMesh
+        bounds = get_stl_bounds(enclosure_config['enclosure_stl'])
+    else:
+        # Get bounds for blockMesh from part STL
+        bounds = get_stl_bounds(stl_path)
+    
     min_b, max_b = bounds[0], bounds[1]
     
-    # Add margin (50%)
+    # Add margin (50%) unless using explicit enclosure
     center = (min_b + max_b) / 2
     size = max_b - min_b
-    margin = size * 0.5
+    if enclosure_config:
+        # Enclosure already defines the domain, add small margin (5%) for safety
+        margin = size * 0.05
+    else:
+        margin = size * 0.5
     min_pt = min_b - margin
     max_pt = max_b + margin
     
-    # Identify a point inside the mesh (approximation)
-    # For a convex object, centroid is usually safe.
-    # For concave, this can fail. Using center of bbox is a 50/50 gamble.
-    # Ideally ray cast. 
-    # Fallback: assume origin (0,0,0) or center if provided.
-    # Note: STL is in mm, but blockMesh converts to meters (0.001).
-    # We must scale this point to match the background mesh units (Meters).
-    location_in_mesh = center * 0.001 
+    # Identify a point inside or outside the mesh
+    # 1. Use trimesh to find a robust interior point if possible
+    location_in_mesh = center # Default fallback
     
+    if mesh_scope == 'External':
+        # For external flow (wind tunnel), we want a point IN THE AIR
+        # Our blockMesh is bounds + 50% margin
+        # So a point at min_b - margin * 0.25 is definitely outside the object but inside the blockMesh
+        # (min_pt is min_b - margin, so this is inside the domain)
+        location_in_mesh = min_b - (margin * 0.25)
+        print(f"[OpenFOAM] Configured for EXTERNAL meshing. Location being meshed: {location_in_mesh}")
+        all_locations = [location_in_mesh]  # External mode only needs one point
+    else:
+        # Internal meshing (standard)
+        # PREFERRED: Use CAD-provided volume centroids if available
+        if volume_centroids and len(volume_centroids) > 0:
+            print(f"[OpenFOAM] Using {len(volume_centroids)} CAD-extracted volume centroids as seed points")
+            all_locations = [list(c) for c in volume_centroids]  # Convert tuples to lists
+            location_in_mesh = all_locations[0]
+        else:
+            # FALLBACK: Try to split STL into bodies (less reliable for non-manifold meshes)
+            try:
+                import trimesh
+                import numpy as np
+                mesh = trimesh.load(stl_path)
+                
+                # --- MULTI-REGION SUPPORT ---
+                # Split mesh into connected components to handle disjoint assemblies
+                # trimesh.graph.split returns a list of mesh objects
+                bodies = trimesh.graph.split(mesh)
+                
+                locations = []
+                
+                print(f"[OpenFOAM] Detected {len(bodies)} connected bodies in input mesh.")
+                
+                for i, body in enumerate(bodies):
+                    # ROBUST INTERNAL POINT ALGORITHM (Per Body)
+                    found_point = False
+                    # fallback to body centroid
+                    candidate_point = body.centroid 
+                    
+                    if hasattr(body, 'faces') and len(body.faces) > 0:
+                        # Get a sample of faces (up to 20 to be safe)
+                        indices = np.linspace(0, len(body.faces)-1, min(20, len(body.faces))).astype(int)
+                        origins = body.triangles_center[indices]
+                        normals = body.face_normals[indices]
+                        
+                        # Try a few epsilon distances
+                        # Scale epsilon by body size to be robust
+                        body_extents = body.bounds[1] - body.bounds[0]
+                        avg_scale = np.mean(body_extents)
+                        
+                        for eps_factor in [1e-4, 1e-3, 0.01, 0.1]:
+                            eps = avg_scale * eps_factor
+                            candidates = origins - normals * eps
+                            
+                            try:
+                                # Check if point is inside THIS specific body
+                                contains = body.contains(candidates)
+                                if np.any(contains):
+                                    candidate_point = candidates[np.where(contains)[0][0]]
+                                    print(f"[OpenFOAM] Body {i}: Found robust interior point (eps={eps:.4f})")
+                                    found_point = True
+                                    break
+                            except:
+                                continue
+                            if found_point: break
+                    
+                    if not found_point:
+                        print(f"[OpenFOAM] Body {i}: Robust search failed. Using centroid.")
+                    
+                    locations.append(candidate_point)
+                    print(f"[OpenFOAM] Body {i} Location: {candidate_point}")
+
+                # If we found multiple locations, we use them all.
+                # If only one body, we just use the one location.
+                location_in_mesh = locations[0] if locations else center
+                all_locations = locations if locations else [center]
+
+            except Exception as e:
+                print(f"[OpenFOAM] WARNING: trimesh interior detection failed: {e}. Falling back to bbox center.")
+                location_in_mesh = center
+                all_locations = [center]
+
     # Generate blockMeshDict
     # Calculate number of cells based on cell_size * 2 (coarser background)
     n_cells = ((max_pt - min_pt) / (cell_size * 2.0)).astype(int)
@@ -132,7 +248,7 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0) ->
     object      blockMeshDict;
 }}
 
-convertToMeters 0.001; // STL is likely in mm
+convertToMeters 1.0; // Keep everything in mm to match Gmsh STL output
 
 vertices
 (
@@ -173,7 +289,71 @@ boundary
 '''
     (case_dir / "system" / "blockMeshDict").write_text(block_mesh_dict)
 
+    # Layer controls
+    add_layers_bool = "true" if layers > 0 else "false"
+    
+    layer_config = ""
+    if layers > 0:
+        layer_config = f'''
+    relativeSizes true;
+    layers
+    {{
+        {stl_filename}
+        {{
+            nSurfaceLayers {int(layers)};
+        }}
+    }}
+    expansionRatio 1.2;
+    finalLayerThickness 0.3;
+    minThickness 0.1;
+    nGrow 0;
+    featureAngle 60;
+    slipFeatureAngle 30;
+    nRelaxIter 3;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals 3;
+    nSmoothThickness 10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle 90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter 50;
+        '''
+
+    # COMPUTE LOCATION CLAUSE (PRE-BUILD STRING)
+    # OpenFOAM 13 uses insidePoints/outsidePoints instead of locationInMesh/locationsInMesh
+    if mesh_scope != 'External' and len(all_locations) > 1:
+        # Multi-region: insidePoints (list of points)
+        location_lines = []
+        for loc in all_locations:
+            location_lines.append(f"        ({loc[0]} {loc[1]} {loc[2]})")
+        location_clause = "insidePoints\n    (\n" + "\n".join(location_lines) + "\n    );"
+    else:
+        # Single region: insidePoint (single point)
+        location_clause = f"insidePoint ({location_in_mesh[0]} {location_in_mesh[1]} {location_in_mesh[2]});"
+
     # Generate snappyHexMeshDict
+    # Build geometry section - include enclosure if provided
+    geometry_entries = f'''    {stl_filename}
+    {{
+        type triSurfaceMesh;
+        file "{stl_filename}";
+    }}'''
+    
+    if enclosure_filename:
+        geometry_entries += f'''
+    {enclosure_filename}
+    {{
+        type triSurfaceMesh;
+        file "{enclosure_filename}";
+        regions
+        {{
+            inlet {{ name inlet; }}
+            outlet {{ name outlet; }}
+            walls {{ name walls; }}
+        }}
+    }}'''
+    
     snappy_dict = f'''FoamFile
 {{
     version     2.0;
@@ -184,16 +364,13 @@ boundary
 
 castellatedMesh true;
 snap            true;
-addLayers       false;
+addLayers       {add_layers_bool};
 
 geometry
 {{
-    {stl_filename}
-    {{
-        type triSurfaceMesh;
-        name {stl_filename};
-    }}
+{geometry_entries}
 }};
+
 
 castellatedMeshControls
 {{
@@ -222,7 +399,7 @@ castellatedMeshControls
     {{
     }}
 
-    locationInMesh ({location_in_mesh[0]} {location_in_mesh[1]} {location_in_mesh[2]});
+    {location_clause}
     
     allowFreeStandingZoneFaces true;
 }}
@@ -241,6 +418,7 @@ snapControls
 
 addLayersControls
 {{
+    {layer_config}
 }}
 
 meshQualityControls
@@ -366,33 +544,58 @@ def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
     """Run snappyHexMesh pipeline via WSL."""
     case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
     
-    # Chain commands: if one fails, print its log and exit
-    # We use parentheses to group the "try or print log" logic
-    # SKIPPING surfaceFeatureExtract (implicit snapping)
+    # OPTIMIZED: Combined all OpenFOAM commands into ONE WSL call
+    # This saves ~10-15 seconds by avoiding multiple bashrc sourcing
+    # Pipeline: blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK
     cmd_str = (
-        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null; '
+        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null || true; ' # true allows continuing if source fails (e.g. wrapper in path)
         f'cd "{case_dir_wsl}" && '
-        f'(blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
-        f'(snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1))'
+        f'echo "[TIMING] Starting blockMesh..." && '
+        f'time (blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
+        f'echo "[TIMING] Starting snappyHexMesh..." && '
+        f'time (snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1)) && '
+        f'echo "[TIMING] Starting foamMeshToFluent..." && '
+        f'time (foamMeshToFluent > log.fluent 2>&1) && '
+        f'echo "[TIMING] Starting foamToVTK..." && '
+        f'time (foamToVTK > log.vtk 2>&1) && '
+        f'echo "[TIMING] Pipeline complete!"'
     )
     
-    cmd = ['wsl', 'bash', '-c', cmd_str]
+    if platform.system() == 'Windows':
+        cmd = ['wsl', 'bash', '-c', cmd_str]
+    else:
+        # Native Linux (AWS)
+        cmd = ['bash', '-c', cmd_str]
     
     if verbose:
-        print("[OpenFOAM] Running snappyHexMesh pipeline (Implicit Feature Snapping)...")
+        print("[OpenFOAM] Running OPTIMIZED pipeline (single WSL call)...")
+        print("[OpenFOAM] blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK")
+    
+    start_time = time.time()
     
     try:
-        # Increase timeout for snappy (can be slow)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        # Increase timeout for full pipeline (can be slow on complex meshes)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        
+        elapsed = time.time() - start_time
         
         if result.returncode != 0:
-            print(f"[OpenFOAM] ERROR: Pipeline failed.")
+            print(f"[OpenFOAM] ERROR: Pipeline failed after {elapsed:.1f}s")
             print(f"Stdout/Stderr capture:\n{result.stdout}\n{result.stderr}")
             return False
+        
+        if verbose:
+            # Print timing info from the output
+            print(f"[OpenFOAM] Pipeline completed in {elapsed:.1f}s total")
+            # Extract timing lines from output
+            for line in result.stdout.split('\n'):
+                if '[TIMING]' in line or 'real' in line:
+                    print(f"  {line.strip()}")
             
         return True
     except subprocess.TimeoutExpired:
-        print("[OpenFOAM] ERROR: snappyHexMesh timed out")
+        elapsed = time.time() - start_time
+        print(f"[OpenFOAM] ERROR: Pipeline timed out after {elapsed:.1f}s")
         return False
     except Exception as e:
         print(f"[OpenFOAM] ERROR: {e}")
@@ -421,10 +624,20 @@ def convert_to_fluent(case_dir: Path, verbose: bool = True) -> Optional[Path]:
     ]
     
     if verbose:
-        print("[OpenFOAM] Converting to Fluent format...")
+        print("[OpenFOAM] Converting to Fluent format (this may take several minutes for large meshes)...")
         
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        # Increased timeout from 300s to 900s to match snappyHexMesh
+        # Large meshes can take 10+ minutes for Fluent conversion
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        
+        # Print output for visibility if verbose
+        if verbose and result.stdout:
+            for line in result.stdout.strip().split('\n')[-10:]:  # Last 10 lines
+                print(f"[Fluent] {line}")
+        if verbose and result.stderr:
+            for line in result.stderr.strip().split('\n')[-5:]:  # Last 5 error lines
+                print(f"[Fluent] {line}")
         
         # Check if .msh file exists (recursively, as it may be in fluentInterface/)
         msh_files = list(case_dir.rglob("*.msh"))
@@ -442,8 +655,21 @@ def convert_to_fluent(case_dir: Path, verbose: bool = True) -> Optional[Path]:
                     print(f"[OpenFOAM] Conversion Log:\n{log_file.read_text()}")
             return None
             
+        if verbose:
+            print(f"[OpenFOAM] Fluent conversion complete: {msh_files[0].name}")
         return msh_files[0]
         
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print(f"[OpenFOAM] ERROR: Fluent conversion timed out after 900 seconds")
+            # Try to print partial log
+            log_file = case_dir / "log.fluent"
+            if log_file.exists():
+                log_content = log_file.read_text()
+                print(f"[OpenFOAM] Partial log (last 20 lines):")
+                for line in log_content.strip().split('\n')[-20:]:
+                    print(f"  {line}")
+        return None
     except Exception as e:
         if verbose:
             print(f"[OpenFOAM] Error converting to Fluent: {e}")
@@ -463,14 +689,31 @@ def generate_openfoam_hex_mesh(
     stl_path: str,
     output_path: str,
     cell_size: float = 2.0,
-    verbose: bool = True
+    verbose: bool = True,
+    mesh_scope: str = 'Internal',
+    layers: int = 0,
+    volume_centroids: list = None,
+    enclosure_config: dict = None,
+    skip_fluent: bool = False  # Skip Fluent conversion if only VTK needed for visualization
 ) -> Dict:
     """
     Generate hex-dominant mesh using OpenFOAM (cfMesh or snappyHexMesh).
+    
+    Args:
+        stl_path: Path to part STL file
+        output_path: Path for output mesh file
+        cell_size: Target cell size in mm
+        verbose: Print progress messages
+        mesh_scope: 'Internal' or 'External' meshing mode
+        layers: Number of boundary layers
+        volume_centroids: List of (x,y,z) for multi-region meshing
+        enclosure_config: Optional enclosure configuration from EnclosureGenerator
     """
     if verbose:
         print(f"[OpenFOAM] Generating hex mesh for: {stl_path}")
         print(f"[OpenFOAM] Target cell size: {cell_size} mm")
+        if enclosure_config:
+            print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}")
     
     # Check prerequisites
     if platform.system() == 'Windows':
@@ -497,20 +740,38 @@ def generate_openfoam_hex_mesh(
             if not run_cartesian_mesh(case_dir, verbose):
                 return {'success': False, 'error': 'cartesianMesh failed'}
         else:
-            create_snappy_case(case_dir, stl_path, cell_size)
+            create_snappy_case(case_dir, stl_path, cell_size, mesh_scope=mesh_scope, 
+                             layers=layers, volume_centroids=volume_centroids or [],
+                             enclosure_config=enclosure_config)
             if not run_snappy_hex_mesh(case_dir, verbose):
-                return {'success': False, 'error': 'snappyHexMesh failed'}
+                return {'success': False, 'error': 'snappyHexMesh pipeline failed'}
         
-        # Convert to Fluent
-        msh_file = convert_to_fluent(case_dir, verbose)
-        if not msh_file:
-            return {'success': False, 'error': 'Fluent conversion failed'}
+        # OPTIMIZED: Files are already generated by the combined pipeline
+        # Just find them instead of calling separate conversion functions
         
-        shutil.copy(msh_file, output_path)
+        # Find Fluent .msh file (generated by combined pipeline)
+        msh_files = list(case_dir.rglob("*.msh"))
+        msh_file = msh_files[0] if msh_files else None
         
-        # Convert to VTK for internal visualization
-        # We try to create a sibling file with .vtk extension (or .vtu)
-        vtk_file = convert_to_vtk(case_dir, verbose)
+        if msh_file:
+            shutil.copy(msh_file, output_path)
+            if verbose:
+                print(f"[OpenFOAM] Fluent mesh: {msh_file.name}")
+        else:
+            if verbose:
+                print("[OpenFOAM] WARNING: No Fluent .msh file found")
+        
+        # Find VTK file (generated by combined pipeline)
+        vtk_dir = case_dir / "VTK"
+        vtk_files = []
+        if vtk_dir.exists():
+            vtk_files = list(vtk_dir.rglob("*.vtk")) + list(vtk_dir.rglob("*.vtu"))
+        
+        vtk_file = None
+        if vtk_files:
+            # Prefer internal mesh over boundary
+            vtk_files.sort(key=lambda p: ('boundary' in str(p), -p.stat().st_size))
+            vtk_file = vtk_files[0]
         
         output_vtk_path = None
         if vtk_file:
@@ -637,11 +898,27 @@ def convert_to_vtk(case_dir: Path, verbose: bool = True) -> Optional[Path]:
                  print(f"  - {f.relative_to(case_dir)} ({f.stat().st_size} bytes)")
         
         if vtk_files:
-            # Sort by size descending (largest is likely the internal mesh)
-            vtk_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+            # Sort with prioritization:
+            # 1. Prefer files NOT in 'boundary' folder
+            # 2. Prefer files with 'internal' in name
+            # 3. Largest size
+            
+            def sort_key(p):
+                is_boundary = 'boundary' in p.parts
+                is_internal = 'internal' in p.name.lower()
+                size = p.stat().st_size
+                
+                # Tuple comparison: False < True, so:
+                # (is_boundary=False) comes before (is_boundary=True) -> 0 vs 1. We want 0 first.
+                # (is_internal=True) comes before (is_internal=False). We want 1 first.
+                # Size descending.
+                
+                return (is_boundary, not is_internal, -size)
+
+            vtk_files.sort(key=sort_key)
             chosen = vtk_files[0]
             if verbose:
-                print(f"[OpenFOAM] Selected largest file: {chosen.name}")
+                print(f"[OpenFOAM] Selected priority file: {chosen.name} (Boundary: {'boundary' in chosen.parts})")
             return chosen
             
         return None

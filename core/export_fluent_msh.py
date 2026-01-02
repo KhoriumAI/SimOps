@@ -228,6 +228,7 @@ def export_fluent_msh(
     boundary_classifier: Optional[Callable[[np.ndarray], str]] = None,
     boundary_zone_types: Optional[Dict[str, str]] = None,
     cell_zone_name: str = "fluid",
+    user_zones: Optional[Dict[str, List[int]]] = None,
     verbose: bool = True
 ) -> bool:
     """
@@ -242,6 +243,7 @@ def export_fluent_msh(
         boundary_zone_types: Dict mapping zone name -> boundary type (e.g., "inlet" -> "velocity-inlet")
                             If None, all boundaries default to "wall"
         cell_zone_name: Name for the cell zone (default: "fluid")
+        user_zones: Dict mapping zone name -> list of face indices (0-indexed based on boundary extraction)
         verbose: Print progress messages
     
     Returns:
@@ -285,10 +287,25 @@ def export_fluent_msh(
     
     # Group boundary faces by zone
     zone_faces = {}
-    for nodes, owner_cell, key in boundary_faces_raw:
-        face_pts = points[nodes]
-        centroid = np.mean(face_pts, axis=0)
-        zone_name = boundary_classifier(centroid)
+    
+    # Pre-map user zones for faster lookup
+    face_idx_to_zone = {}
+    if user_zones:
+        for zn, indices in user_zones.items():
+            for idx in indices:
+                face_idx_to_zone[idx] = zn
+
+    for i, (nodes, owner_cell, key) in enumerate(boundary_faces_raw):
+        zone_name = face_idx_to_zone.get(i)
+        
+        if zone_name is None:
+            # Fallback to classifier if not in user zones
+            if boundary_classifier:
+                face_pts = points[nodes]
+                centroid = np.mean(face_pts, axis=0)
+                zone_name = boundary_classifier(centroid)
+            else:
+                zone_name = "wall"
         
         if zone_name not in zone_faces:
             zone_faces[zone_name] = []

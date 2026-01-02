@@ -222,13 +222,13 @@ class MeshWorker:
             self.signals.log.emit("=" * 70)
 
             # CRITICAL: Path fix for gui_app package
-            # We are now in gui_app/workers.py, need to go up 3 levels to project root
-            project_root = Path(__file__).parent.parent.parent
-            worker_script = project_root / "cli" / "mesh_worker_subprocess.py"
+            # We are now in gui_app/workers.py, need to go up 4 levels to project root (MeshPackageLean)
+            project_root = Path(__file__).parent.parent.parent.parent
+            worker_script = project_root / "apps" / "cli" / "mesh_worker_subprocess.py"
             
             if not worker_script.exists():
                 # Fallback: check if mesh_worker.py exists instead
-                worker_script = project_root / "cli" / "mesh_worker.py"
+                worker_script = project_root / "apps" / "cli" / "mesh_worker.py"
                 
             self.signals.log.emit("Starting parallel mesh generation...")
 
@@ -476,8 +476,8 @@ except Exception as e:
     sys.exit(1)
 """
             # Set PYTHONPATH to ensure imports work if run from source
-            # Go up 3 levels from gui_app/workers.py to project root
-            project_root = Path(__file__).parent.parent.parent
+            # Go up 4 levels from gui_app/workers.py to project root
+            project_root = Path(__file__).parent.parent.parent.parent
             env = os.environ.copy()
             python_path = env.get("PYTHONPATH", "")
             if python_path:

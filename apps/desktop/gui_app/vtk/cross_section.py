@@ -248,11 +248,42 @@ class CrossSectionHandler:
                 
         ugrid.SetPoints(points)
         
+        # Extract outer boundary of the intersecting elements
         surface_filter = vtk.vtkDataSetSurfaceFilter()
         surface_filter.SetInputData(ugrid)
         surface_filter.Update()
+        boundary_poly = surface_filter.GetOutput()
         
-        return surface_filter.GetOutput()
+        # Generate CAP faces by slicing each element with the plane
+        # This creates the solid "capped" appearance for hex meshes
+        cap_points = vtk.vtkPoints()
+        cap_polys = vtk.vtkCellArray()
+        
+        for element in intersecting_elements:
+            polygon_pts = self._intersect_element_with_plane(element, plane_origin, plane_normal)
+            if len(polygon_pts) >= 3:
+                # Add points and create polygon cell
+                pt_ids = []
+                for pt in polygon_pts:
+                    pid = cap_points.InsertNextPoint(pt)
+                    pt_ids.append(pid)
+                
+                cap_polys.InsertNextCell(len(pt_ids))
+                for pid in pt_ids:
+                    cap_polys.InsertCellPoint(pid)
+        
+        cap_poly = vtk.vtkPolyData()
+        cap_poly.SetPoints(cap_points)
+        cap_poly.SetPolys(cap_polys)
+        
+        # Merge boundary surface + cap faces for complete solid cross-section
+        append_filter = vtk.vtkAppendPolyData()
+        append_filter.AddInputData(boundary_poly)
+        append_filter.AddInputData(cap_poly)
+        append_filter.Update()
+        
+        return append_filter.GetOutput()
+
 
     def _iter_volume_elements(self):
         if not self.viewer.current_mesh_nodes:

@@ -35,7 +35,28 @@ def get_database_url():
     # Ensure the instance directory exists
     instance_dir = BASE_DIR / 'instance'
     instance_dir.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{instance_dir / 'mesh_app.db'}"
+    
+    instance_db = instance_dir / 'mesh_app.db'
+    root_db = BASE_DIR / 'mesh_app.db'
+    
+    # MIGRATION: If we find mesh_app.db in the root but NOT in instance,
+    # or if the one in root is larger (indicates more data), move it to instance.
+    if root_db.exists():
+        if not instance_db.exists():
+            print(f"[CONFIG] Migrating database from {root_db} to {instance_db}")
+            import shutil
+            shutil.copy2(root_db, instance_db)
+            # rename the old one so we don't keep picking it up
+            root_db.rename(BASE_DIR / 'mesh_app.db.migrated')
+        elif root_db.stat().st_size > instance_db.stat().st_size + 1024:
+            # If root DB is significantly larger, user might have registered there
+            print(f"[CONFIG] root database appears to have more data. Backing up and overwriting instance DB.")
+            import shutil
+            instance_db.rename(instance_dir / 'mesh_app.db.bak')
+            shutil.copy2(root_db, instance_db)
+            root_db.rename(BASE_DIR / 'mesh_app.db.migrated')
+
+    return f"sqlite:///{instance_db}"
 
 
 class Config:

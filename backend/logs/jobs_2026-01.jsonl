@@ -1,0 +1,3 @@
+{"timestamp": "2026-01-01T07:01:43.886113Z", "job_id": "IMP-0101-4CA0", "job_type": "import", "user_email": "test@khorium.ai", "project_id": "proj-123", "filename": "test.step", "file_size": 1024, "status": "completed", "details": {}}
+{"timestamp": "2026-01-01T07:01:43.902503Z", "job_id": "MSH-0101-DB63", "job_type": "mesh", "user_email": "test@khorium.ai", "project_id": "proj-123", "filename": "test.step", "status": "started", "strategy": "Tetrahedral (HXT)", "quality_params": null, "details": {}}
+{"timestamp": "2026-01-01T07:01:43.915216Z", "job_id": "MSH-0101-DB63", "status": "completed", "details": {"node_count": 5000}}

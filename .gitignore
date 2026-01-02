@@ -55,6 +55,8 @@ Thumbs.db
 # Generated files
 generated_meshes/
 output/
+sim_build/
+meshing_output/
 *.msh
 *.stl
 *.vtk

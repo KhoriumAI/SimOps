@@ -20,15 +20,15 @@ PyQt5>=5.15.0          # Desktop GUI (main.py)
 PyQt6>=6.4.0           # Montage GUI (montage_gui.py)
 vtk>=9.2.0             # 3D visualization backend
 pyvista>=0.40.0        # High-level VTK wrapper
-qtrangeslider>=0.3.0   # Custom slider widget
+qtrangeslider>=0.1.5   # Custom slider widget
 
 # --- CAD File Support & Mesh I/O ---
-pythonocc-core>=7.7.0  # STEP/IGES CAD file loading
+# pythonocc-core>=7.7.0  # STEP/IGES CAD file loading (Install via Conda, not Pip)
 meshio>=5.3.4          # Mesh format conversion (ANSYS export)
 trimesh>=3.22.0        # Mesh processing utilities
 coacd>=1.0.0           # Convex decomposition for hex meshing
-pymesh2>=0.3.0         # Mesh repair and generation
-tetgen>=0.6.0          # Alternative tetrahedral mesher
+# pymesh2>=0.3.0         # Mesh repair and generation (Complex build, skipping for unblocking)
+# tetgen>=0.6.0          # Alternative tetrahedral mesher (Requires C++ compiler, optional)
 
 # --- Utilities ---
 psutil>=5.9.0          # System resource monitoring

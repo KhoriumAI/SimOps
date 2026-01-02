@@ -54,6 +54,7 @@ def register():
         return jsonify({'error': f'Invalid email: {str(e)}'}), 400
     
     if User.query.filter_by(email=email).first():
+        print(f"[AUTH] Registration failed: Email {email} already exists")
         return jsonify({'error': 'Email already registered'}), 409
     
     user = User(
@@ -66,8 +67,10 @@ def register():
     try:
         db.session.add(user)
         db.session.commit()
-    except Exception:
+        print(f"[AUTH] New user registered: {email} (ID: {user.id})")
+    except Exception as e:
         db.session.rollback()
+        print(f"[AUTH] Registration error for {email}: {e}")
         return jsonify({'error': 'Failed to create user'}), 500
     
     access_token = create_access_token(identity=str(user.id))
@@ -95,14 +98,22 @@ def login():
     if not email or not password:
         return jsonify({'error': 'Email and password are required'}), 400
     
+    print(f"[AUTH] Login attempt for: {email}")
     user = User.query.filter_by(email=email).first()
     
-    if not user or not check_password(password, user.password_hash):
+    if not user:
+        print(f"[AUTH] Login failed: User {email} not found")
+        return jsonify({'error': 'Invalid email or password'}), 401
+        
+    if not check_password(password, user.password_hash):
+        print(f"[AUTH] Login failed: Incorrect password for {email}")
         return jsonify({'error': 'Invalid email or password'}), 401
     
     if not user.is_active:
+        print(f"[AUTH] Login failed: Account deactivated for {email}")
         return jsonify({'error': 'Account is deactivated'}), 401
     
+    print(f"[AUTH] Login successful for: {email}")
     access_token = create_access_token(identity=str(user.id))
     refresh_token = create_refresh_token(identity=str(user.id))
     
