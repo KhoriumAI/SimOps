@@ -960,12 +960,13 @@ function App() {
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
               <div className="flex items-center gap-3">
-                {currentJobId && (
+                {(currentJobId || projectStatus?.latest_result?.job_id) && (
                   <div
-                    className="flex items-center gap-1.5 px-2 py-0.5 bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded text-blue-400 font-mono text-[10px] cursor-pointer transition-colors group"
+                    className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-900/40 hover:bg-blue-800/60 border border-blue-500/50 rounded text-blue-300 font-mono text-[10px] cursor-pointer transition-all group shadow-sm"
                     onClick={(e) => {
+                      const idToCopy = currentJobId || projectStatus?.latest_result?.job_id;
                       e.stopPropagation();
-                      navigator.clipboard.writeText(currentJobId);
+                      navigator.clipboard.writeText(idToCopy);
                       const el = e.currentTarget.querySelector('.job-id-text');
                       if (el) {
                         const originalText = el.innerText;
@@ -975,9 +976,9 @@ function App() {
                     }}
                     title="Click to copy Job ID"
                   >
-                    <span className="text-gray-500 text-[8px] font-bold uppercase tracking-wider">ID:</span>
-                    <span className="job-id-text">{currentJobId}</span>
-                    <Copy className="w-2.5 h-2.5 text-gray-500 group-hover:text-blue-400 transition-colors" />
+                    <span className="text-blue-400/70 text-[8px] font-bold uppercase tracking-wider">ID:</span>
+                    <span className="job-id-text">{currentJobId || projectStatus?.latest_result?.job_id}</span>
+                    <Copy className="w-2.5 h-2.5 text-blue-400/50 group-hover:text-blue-300 transition-colors" />
                   </div>
                 )}
                 <button

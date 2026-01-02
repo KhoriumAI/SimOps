@@ -108,6 +108,8 @@ class MeshResult(db.Model):
     logs = db.Column(db.JSON, nullable=True)
     params = db.Column(db.JSON, nullable=True)
     boundary_zones = db.Column(db.JSON, nullable=True)  # { "ZoneName": [face_indices], ... }
+    job_id = db.Column(db.String(50), nullable=True)  # Human-readable job ID (e.g. MSH-0101-ABCD)
+    
     
     # Processing info
     processing_time = db.Column(db.Float, nullable=True)  # Time in seconds
@@ -122,6 +124,7 @@ class MeshResult(db.Model):
             'id': self.id,
             'project_id': self.project_id,
             'strategy': self.strategy,
+            'job_id': self.job_id,
             'score': self.score,
             'output_path': self.output_path,
             'output_size': self.output_size,

@@ -195,6 +195,15 @@ def fix_db_schema(app):
                     conn.commit()
             except: pass
 
+        # 1c. Check for job_id column
+        if 'job_id' not in columns:
+            print("[DB-MIGRATE] Adding 'job_id' column to 'mesh_results'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN job_id VARCHAR(50)"))
+                    conn.commit()
+            except: pass
+
     # 2. Check projects for preview_path (added in a previous session)
     if 'projects' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('projects')]
@@ -366,6 +375,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                                 project.last_accessed = datetime.utcnow()
                                 logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
                                 
+                                # Save job_id to database result
+                                if mesh_job_id:
+                                    mesh_result.job_id = mesh_job_id
+                                    
                                 # Log mesh job completion
                                 if mesh_job_id:
                                     log_job_update(
