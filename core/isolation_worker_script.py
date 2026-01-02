@@ -17,13 +17,15 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--tag", type=int, required=True)
     parser.add_argument("--order", type=int, default=1)
-    parser.add_argument("--size", type=float, default=2.0)
+    parser.add_argument("--max-size", type=float, default=10.0)
+    parser.add_argument("--min-size", type=float, default=1.0)
     args = parser.parse_args()
 
     # Create config and apply parameters
     config = get_default_config()
     config.mesh_params.element_order = args.order
-    config.mesh_params.max_size_mm = args.size
+    config.mesh_params.max_size_mm = args.max_size
+    config.mesh_params.min_size_mm = args.min_size
     
     # Initialize Generator in Isolation Mode
     gen = ExhaustiveMeshGenerator(config, target_volume_tag=args.tag)
@@ -56,7 +58,7 @@ def main():
             sys.exit(0)
             
         # Try 3D
-            print(f"[Worker V{args.tag}] Generating 3D mesh (Order {args.order}, Size {args.size})...", flush=True)
+        print(f"[Worker V{args.tag}] Generating 3D mesh (Order {args.order}, MinSize {args.min_size}, MaxSize {args.max_size})...", flush=True)
         success, _ = gen._try_tet_hxt_optimized()
         if success:
             # CRITICAL: Enforce unique Physical Group for assembly stitching

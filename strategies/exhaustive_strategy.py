@@ -284,16 +284,18 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
                 return self.create_bounding_box_mesh(output_file)
         
-        # 2D Surface Canary - ONLY for single parts (<= 3 volumes)
-        # For assemblies, meshing ALL surfaces at once is slow and redundant
+        # 2D Surface Canary - For simple parts (≤3 volumes), WARN but proceed
+        # Previously: canary timeout = bounding box. Now: canary timeout = try meshing anyway
         if num_vols <= 3:
             # For complex but large parts, increase 2D timeout
             canary_timeout = 10.0 if complexity['edge_count'] > 5000 else 5.0
-            if not self.generate_2d_canary(timeout=canary_timeout):
-                self.log_message("[!] Geometry failed 2D canary (surface mesh timeout after 5.0s)")
-                self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
-                return self.create_bounding_box_mesh(output_file)
-            self.log_message("[OK] Canary checks passed - geometry is meshable")
+            canary_passed = self.generate_2d_canary(timeout=canary_timeout)
+            if canary_passed:
+                self.log_message("[OK] 2D Canary passed - geometry is meshable")
+            else:
+                # For simple parts (≤3 volumes), don't fail-fast - try actual meshing
+                self.log_message(f"[!] 2D Canary timed out after {canary_timeout}s - will attempt mesh anyway")
+                self.log_message("[INFO] Simple part (≤3 volumes) - proceeding with mesh generation")
         else:
             self.log_message("[CANARY] Assembly detected - skipping global 2D surface canary (isolated parts will be checked individually)")
             self.log_message("[OK] Orchestrator-level canary passed")
@@ -1464,7 +1466,10 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 worker_script,
                 "--input", input_file,
                 "--output", worker_msh,
-                "--tag", str(tag)
+                "--tag", str(tag),
+                "--order", str(self.config.mesh_params.element_order or 1),
+                "--max-size", str(self.config.mesh_params.max_size_mm or 10.0),
+                "--min-size", str(self.config.mesh_params.min_size_mm or 1.0)
             ]
             
             try:

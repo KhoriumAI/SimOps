@@ -827,6 +827,11 @@ function App() {
                     >
                       {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
+                    {meshStrategy.includes('Hex') && meshStrategy.includes('Pure') && (
+                      <p className="text-[10px] text-amber-600 mt-1">
+                        ⚠️ Currently uses subdivision. Cartesian cut-cell hex coming soon.
+                      </p>
+                    )}
                   </div>
 
                   <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
