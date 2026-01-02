@@ -203,6 +203,17 @@ def fix_db_schema(app):
                     conn.execute(text("ALTER TABLE mesh_results ADD COLUMN job_id VARCHAR(50)"))
                     conn.commit()
             except: pass
+        
+        # 1d. Check for output_size column
+        if 'output_size' not in columns:
+            print("[DB-MIGRATE] Adding 'output_size' column to 'mesh_results'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN output_size BIGINT"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'output_size' successfully")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding output_size: {e}")
 
     # 2. Check projects for preview_path (added in a previous session)
     if 'projects' in inspector.get_table_names():
