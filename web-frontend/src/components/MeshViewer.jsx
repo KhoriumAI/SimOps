@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors } from 'lucide-react'
+import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save } from 'lucide-react'
+import { API_BASE } from '../config'
 import QualityHistogram from './QualityHistogram'
 
 function SliceMesh({ sliceData, clippingPlanes }) {
@@ -25,17 +26,75 @@ function SliceMesh({ sliceData, clippingPlanes }) {
       <meshBasicMaterial
         vertexColors={true}
         side={THREE.DoubleSide}
+        transparent={true}
+        opacity={0.9}
         clippingPlanes={clippingPlanes}
       />
     </mesh>
   )
 }
 
+function FloatingProgress({ progress, visible }) {
+  if (!visible) return null;
+
+  const steps = [
+    { key: 'strategy', label: 'Strategy' },
+    { key: '1d', label: '1D' },
+    { key: '2d', label: '2D' },
+    { key: '3d', label: '3D' },
+    { key: 'optimize', label: 'Optimize' },
+    { key: 'quality', label: 'Quality' }
+  ];
+
+  return (
+    <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none w-72">
+      <div className="bg-white/40 backdrop-blur-md border border-white/30 rounded-xl p-4 shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+            <span className="font-semibold text-gray-800 text-sm">Generating Mesh</span>
+          </div>
+          <div className="text-[10px] font-mono bg-blue-500/10 text-blue-700 px-1.5 py-0.5 rounded border border-blue-500/20">
+            STRATEGY RACE
+          </div>
+        </div>
+
+        <div className="space-y-2.5">
+          {steps.map(({ key, label }) => (
+            <div key={key} className="space-y-1">
+              <div className="flex justify-between text-[10px] font-medium">
+                <span className="text-gray-700 uppercase tracking-tight">{label}</span>
+                <span className="text-blue-700 font-bold">{Math.round(progress[key] || 0)}%</span>
+              </div>
+              <div className="h-1.5 w-full bg-gray-200/50 rounded-full overflow-hidden border border-white/20">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-all duration-700 ease-out"
+                  style={{ width: `${progress[key] || 0}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-4 flex items-center gap-2">
+          <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-400/30 to-transparent" />
+          <span className="text-[9px] text-gray-500 font-medium">COMPUTING ON AWS</span>
+          <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-400/30 to-transparent" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AxesIndicator({ visible }) {
   if (!visible) return null
   return (
-    <GizmoHelper alignment="bottom-left" margin={[80, 80]}>
-      <GizmoViewport axisColors={['#ff4444', '#44ff44', '#4444ff']} labelColor="white" />
+    <GizmoHelper alignment="bottom-left" margin={[30, 30]}>
+      <GizmoViewport
+        axisColors={['#ff4444', '#44ff44', '#4444ff']}
+        labelColor="white"
+        scale={20}
+      />
     </GizmoHelper>
   )
 }
@@ -188,9 +247,20 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     return planes
   }, [geometry, clipping])
 
-  // Handle face click for selection
+  // Track mousedown time to distinguish clicks from drags
+  const mouseDownTime = useRef(0)
+
+  const handlePointerDown = useCallback(() => {
+    mouseDownTime.current = Date.now()
+  }, [])
+
+  // Handle face click for selection - now works without selectionMode
   const handleClick = useCallback((event) => {
-    if (!selectionMode || !meshRef.current || !onFaceSelect) return
+    if (!meshRef.current || !onFaceSelect) return
+
+    // Ignore if this was a drag operation (click held for >200ms)
+    const clickDuration = Date.now() - mouseDownTime.current
+    if (clickDuration > 200) return
 
     event.stopPropagation()
 
@@ -200,13 +270,15 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
       const point = intersects[0].point
       const normal = intersects[0].face?.normal
 
+      // Default to flood fill (logical face selection)
+      const isFloodFill = !event.altKey
       onFaceSelect({
         faceIndex,
         point: { x: point.x, y: point.y, z: point.z },
         normal: normal ? { x: normal.x, y: normal.y, z: normal.z } : null,
-      })
+      }, isFloodFill)
     }
-  }, [selectionMode, onFaceSelect, raycaster])
+  }, [onFaceSelect, raycaster])
 
   // Create highlight geometry for selected faces
   const selectedFaceGeometry = useMemo(() => {
@@ -248,6 +320,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         geometry={activeGeometry}
         frustumCulled={true}
         onClick={handleClick}
+        onPointerDown={handlePointerDown}
       >
         <meshStandardMaterial
           vertexColors={useVertexColors || useGradient}
@@ -259,7 +332,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
           roughness={roughness}
           metalness={metalness}
           opacity={opacity}
-          transparent={opacity < 1}
+          transparent={opacity < 1 || showQuality}
         />
       </mesh>
 
@@ -286,6 +359,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
               opacity={wireframeOpacity}
               transparent={true}
               linewidth={1}
+              clippingPlanes={clippingPlanes}
             />
           </lineSegments>
         </group>
@@ -306,21 +380,23 @@ export default function MeshViewer({
   filename,
   qualityMetrics,
   status,
-  isLoading,
-  loadingProgress,
-  loadingMessage,
-  // Props from App sidebar
+  showHistogram,
+  setShowHistogram,
   showAxes,
   setShowAxes,
-  showWireframe,
-  setShowWireframe,
-  showQuality,
-  setShowQuality,
   qualityMetric,
   setQualityMetric,
-  showHistogram,
-  setShowHistogram
+  colorMode,
+  setColorMode,
+  // Mesh progress from App
+  meshProgress,
+  loadingStartTime
 }) {
+  // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
+  const showWireframe = meshData && !meshData.isPreview && status === 'completed'
+  // Derive quality coloring: ON for completed meshes with quality data
+  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || (meshData?.qualityColors && Object.keys(meshData.qualityColors).length > 0) || meshData?.hasQualityData
+  const showQuality = status === 'completed' && hasQualityData
   const [clipping, setClipping] = useState({
     enabled: false,
     showQualitySlice: true,
@@ -358,7 +434,7 @@ export default function MeshViewer({
       setIsSlicing(true)
       try {
         const token = localStorage.getItem('token')
-        const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/projects/${projectId}/slice`, {
+        const response = await fetch(`${API_BASE}/projects/${projectId}/slice`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -396,51 +472,221 @@ export default function MeshViewer({
 
   // Paint/Color options
   const [meshColor, setMeshColor] = useState('#4a9eff')
-  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
+  // colorMode lifted to App.jsx
   const [opacity, setOpacity] = useState(1.0)
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
   const [gradientColors, setGradientColors] = useState({ start: '#4a9eff', end: '#ff6b6b' })
 
-  // Face selection state
-  const [selectionMode, setSelectionMode] = useState(false)
+  // Face selection state (selectionMode removed - always enabled)
+  const selectionMode = true
   const [selectedFaces, setSelectedFaces] = useState([])
-  const [faceNames, setFaceNames] = useState({}) // { faceIndex: name }
+  const [boundaryZones, setBoundaryZones] = useState({}) // { name: [indices] }
   const [showFacePanel, setShowFacePanel] = useState(false)
   const [pendingFaceName, setPendingFaceName] = useState('')
+  const [isSavingZones, setIsSavingZones] = useState(false)
 
-  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
+
   const isCompleted = status === 'completed'
 
+  // Fetch zones on load
+  useEffect(() => {
+    if (projectId && isCompleted) {
+      const fetchZones = async () => {
+        try {
+          const token = localStorage.getItem('token')
+          const response = await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          })
+          if (response.ok) {
+            const data = await response.json()
+            setBoundaryZones(data)
+          }
+        } catch (err) {
+          console.error("Failed to fetch boundary zones:", err)
+        }
+      }
+      fetchZones()
+    }
+  }, [projectId, isCompleted])
+
+  // Build adjacency map for flood fill
+  const adjacency = useMemo(() => {
+    if (!meshData || !meshData.vertices || meshData.vertices.length === 0) return null
+
+    console.log("[FLOOD-FILL] Building adjacency map...")
+    const startTime = performance.now()
+    const vertices = meshData.vertices
+    const numFaces = vertices.length / 9
+    const nodeToFaces = new Map()
+
+    // 1. Group faces by their vertices
+    for (let i = 0; i < numFaces; i++) {
+      for (let v = 0; v < 3; v++) {
+        const x = vertices[i * 9 + v * 3].toFixed(5)
+        const y = vertices[i * 9 + v * 3 + 1].toFixed(5)
+        const z = vertices[i * 9 + v * 3 + 2].toFixed(5)
+        const key = `${x},${y},${z}`
+
+        if (!nodeToFaces.has(key)) nodeToFaces.set(key, [])
+        nodeToFaces.get(key).push(i)
+      }
+    }
+
+    // 2. Identify neighbors (sharing at least 2 vertices = edge adjacency)
+    const neighbors = Array.from({ length: numFaces }, () => [])
+    const facePairCounts = new Map() // (i,j) -> count
+
+    for (const faces of nodeToFaces.values()) {
+      if (faces.length < 2) continue
+      for (let a = 0; a < faces.length; a++) {
+        for (let b = a + 1; b < faces.length; b++) {
+          const f1 = faces[a]
+          const f2 = faces[b]
+          const pairKey = f1 < f2 ? `${f1}_${f2}` : `${f2}_${f1}`
+          const count = (facePairCounts.get(pairKey) || 0) + 1
+          facePairCounts.set(pairKey, count)
+
+          if (count === 2) { // Shared an edge
+            neighbors[f1].push(f2)
+            neighbors[f2].push(f1)
+          }
+        }
+      }
+    }
+
+    console.log(`[FLOOD-FILL] Adjacency built in ${(performance.now() - startTime).toFixed(1)}ms. ${numFaces} faces.`)
+    return neighbors
+  }, [meshData])
+
+  // Flood fill algorithm
+  const performFloodFill = useCallback((startFaceIndex) => {
+    if (!adjacency || !meshData) return [startFaceIndex]
+
+    const visited = new Set()
+    const queue = [startFaceIndex]
+    visited.add(startFaceIndex)
+
+    // Check for entity tags (CAD faces)
+    const hasTags = meshData.entity_tags && meshData.entity_tags.length > 0
+    const targetEntity = hasTags ? meshData.entity_tags[startFaceIndex] : null
+
+    // For geometric flood fill (if no tags available for this face)
+    // Reuse vectors to avoid GC pressure in loop
+    const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3()
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
+    const n1 = new THREE.Vector3(), n2 = new THREE.Vector3()
+    const CREASE_THRESHOLD = 0.8 // Stop at angles > ~37 deg
+
+    const vertices = meshData.vertices
+    const getNormal = (idx, target) => {
+      const i = idx * 9
+      v1.set(vertices[i], vertices[i + 1], vertices[i + 2])
+      v2.set(vertices[i + 3], vertices[i + 4], vertices[i + 5])
+      v3.set(vertices[i + 6], vertices[i + 7], vertices[i + 8])
+      e1.subVectors(v2, v1)
+      e2.subVectors(v3, v1)
+      target.crossVectors(e1, e2).normalize()
+    }
+
+    let iterations = 0
+    while (queue.length > 0 && iterations < 50000) { // Safety limit
+      const current = queue.shift()
+      iterations++
+
+      // If doing geometric fill, compute current normal
+      if (!hasTags || targetEntity == null) {
+        getNormal(current, n1)
+      }
+
+      const neighbors = adjacency[current]
+      for (const next of neighbors) {
+        if (!visited.has(next)) {
+          let shouldAdd = false
+
+          if (hasTags && targetEntity != null) {
+            // Use Entity Tags if available
+            shouldAdd = (meshData.entity_tags[next] === targetEntity)
+          } else {
+            // Use Geometric Crease Angle
+            getNormal(next, n2)
+            if (n1.dot(n2) >= CREASE_THRESHOLD) {
+              shouldAdd = true
+            }
+          }
+
+          if (shouldAdd) {
+            visited.add(next)
+            queue.push(next)
+          }
+        }
+      }
+    }
+
+    return Array.from(visited)
+  }, [adjacency, meshData])
+
   // Handle face selection
-  const handleFaceSelect = useCallback((faceData) => {
-    if (!selectionMode) return
+  const handleFaceSelect = useCallback((faceData, isFloodFill = false) => {
+    let indicesToSelect = [faceData.faceIndex]
+    if (isFloodFill) {
+      indicesToSelect = performFloodFill(faceData.faceIndex)
+    }
 
     setSelectedFaces(prev => {
-      const exists = prev.find(f => f.faceIndex === faceData.faceIndex)
-      if (exists) {
-        // Deselect if already selected
-        return prev.filter(f => f.faceIndex !== faceData.faceIndex)
+      // For now, toggle the whole group
+      const firstIndex = faceData.faceIndex
+      const alreadySelected = prev.find(f => f.faceIndex === firstIndex)
+
+      if (alreadySelected) {
+        // Deselect the group (complex to find the exact group, just deselect everything for now or the overlap)
+        const toDeselectSet = new Set(indicesToSelect)
+        return prev.filter(f => !toDeselectSet.has(f.faceIndex))
       }
-      // Add new selection
-      return [...prev, faceData]
+
+      // Add new selections
+      const newSelections = indicesToSelect.map(idx => ({
+        faceIndex: idx,
+        // Optional: reconstruct position/normal if needed, or just use idx
+      }))
+
+      return [...prev, ...newSelections]
     })
     setShowFacePanel(true)
-  }, [selectionMode])
+  }, [performFloodFill])
 
-  // Save face name
-  const saveFaceName = useCallback(() => {
+  // Save face name and sync to backend
+  const saveFaceName = useCallback(async () => {
     if (selectedFaces.length > 0 && pendingFaceName.trim()) {
-      const newNames = { ...faceNames }
-      selectedFaces.forEach(face => {
-        newNames[face.faceIndex] = pendingFaceName.trim()
-      })
-      setFaceNames(newNames)
-      setPendingFaceName('')
-      setSelectedFaces([])
-      setShowFacePanel(false)
+      const name = pendingFaceName.trim()
+      const indices = selectedFaces.map(f => f.faceIndex)
+
+      const newZones = { ...boundaryZones }
+      newZones[name] = [...(newZones[name] || []), ...indices]
+
+      setBoundaryZones(newZones)
+      setIsSavingZones(true)
+
+      try {
+        const token = localStorage.getItem('token')
+        await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(newZones)
+        })
+      } catch (err) {
+        console.error("Failed to save boundary zones:", err)
+      } finally {
+        setIsSavingZones(false)
+        setPendingFaceName('')
+        setSelectedFaces([])
+        setShowFacePanel(false)
+      }
     }
-  }, [selectedFaces, pendingFaceName, faceNames])
+  }, [selectedFaces, pendingFaceName, boundaryZones, projectId])
 
   // Clear selection
   const clearSelection = useCallback(() => {
@@ -473,41 +719,8 @@ export default function MeshViewer({
 
   return (
     <div className="w-full h-full relative bg-gradient-to-br from-gray-200 to-gray-300">
-      {/* Loading Overlay - Centered */}
-      {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center z-50 bg-gray-900/60 backdrop-blur-sm">
-          <div className="bg-gray-800 rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
-            {/* Animated Spinner */}
-            <div className="relative w-16 h-16 mx-auto mb-4">
-              <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-10 h-10 rounded-full bg-blue-500/20"></div>
-              </div>
-            </div>
-
-            {/* Loading Message */}
-            <p className="text-white font-medium mb-3">
-              {loadingMessage || 'Loading...'}
-            </p>
-
-            {/* Progress Bar */}
-            {loadingProgress !== undefined && (
-              <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300 ease-out"
-                  style={{ width: `${loadingProgress}%` }}
-                />
-              </div>
-            )}
-            {loadingProgress !== undefined && (
-              <p className="text-gray-400 text-xs mt-2">{loadingProgress}% complete</p>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Empty State */}
-      {!meshData && !isLoading && (
+      {!meshData && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center text-gray-500">
             <Box className="w-16 h-16 mx-auto mb-3 opacity-30" />
@@ -531,19 +744,23 @@ export default function MeshViewer({
               Paint
             </button>
             <button
-              onClick={() => setShowControls(!showControls)}
+              onClick={() => {
+                if (!showControls) {
+                  // Opening panel - auto-enable with X axis
+                  setShowControls(true)
+                  setClipping({ enabled: true, showQualitySlice: true, x: true, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                } else {
+                  // Closing panel - disable clipping
+                  setShowControls(false)
+                  setClipping({ enabled: false, showQualitySlice: true, x: false, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                }
+              }}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showControls ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
             >
               <Scissors className="w-3.5 h-3.5" />
-              Clip
+              Section View
             </button>
-            <button
-              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${selectionMode ? 'bg-green-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
-            >
-              <MousePointer2 className="w-3.5 h-3.5" />
-              Select
-            </button>
+
           </div>
 
           {/* Paint Panel */}
@@ -556,7 +773,7 @@ export default function MeshViewer({
                 <label className="text-gray-400 text-[10px] uppercase">Color Mode</label>
                 <select
                   value={colorMode}
-                  onChange={(e) => { setColorMode(e.target.value); setShowQuality(e.target.value === 'quality'); }}
+                  onChange={(e) => setColorMode(e.target.value)}
                   className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
                 >
                   <option value="solid">Solid Color</option>
@@ -876,10 +1093,11 @@ export default function MeshViewer({
               <div className="flex gap-2">
                 <button
                   onClick={saveFaceName}
-                  disabled={!pendingFaceName.trim()}
-                  className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-[11px] font-medium transition-colors"
+                  disabled={!pendingFaceName.trim() || isSavingZones}
+                  className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-[11px] font-medium transition-colors flex items-center justify-center gap-1"
                 >
-                  Save Name
+                  {isSavingZones ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                  Save Zone
                 </button>
                 <button
                   onClick={clearSelection}
@@ -891,24 +1109,41 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* Named Faces List */}
-          {Object.keys(faceNames).length > 0 && !showFacePanel && (
+          {/* Named Faces List (Boundary Zones) */}
+          {Object.keys(boundaryZones).length > 0 && !showFacePanel && (
             <div className="absolute bottom-3 right-3 bg-gray-900/95 backdrop-blur rounded-lg p-2 z-10 text-xs text-gray-300 max-w-48 shadow-xl border border-gray-700">
               <div className="flex items-center gap-1.5 mb-1.5 text-[10px] text-gray-400">
                 <Tag className="w-3 h-3" />
-                <span>Named Faces ({Object.keys(faceNames).length})</span>
+                <span>Boundary Zones ({Object.keys(boundaryZones).length})</span>
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
-                {Object.entries(faceNames).map(([faceIndex, name]) => (
-                  <div key={faceIndex} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
-                    <span className="text-white truncate">{name}</span>
+                {Object.entries(boundaryZones).map(([name, indices]) => (
+                  <div key={name} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
+                    <div className="flex flex-col overflow-hidden max-w-[100px]">
+                      <span className="text-white truncate" title={name}>{name}</span>
+                      <span className="text-[9px] text-gray-500">{indices.length} faces</span>
+                    </div>
                     <button
-                      onClick={() => {
-                        const newNames = { ...faceNames }
-                        delete newNames[faceIndex]
-                        setFaceNames(newNames)
+                      onClick={async () => {
+                        const newZones = { ...boundaryZones }
+                        delete newZones[name]
+                        setBoundaryZones(newZones)
+
+                        try {
+                          const token = localStorage.getItem('token')
+                          await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                              'Authorization': `Bearer ${token}`
+                            },
+                            body: JSON.stringify(newZones)
+                          })
+                        } catch (err) {
+                          console.error("Failed to delete zone:", err)
+                        }
                       }}
-                      className="text-gray-500 hover:text-red-400 ml-2"
+                      className="text-gray-500 hover:text-red-400 ml-2 flex-shrink-0"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -942,7 +1177,7 @@ export default function MeshViewer({
               dampingFactor={0}
               rotateSpeed={0.8}
               panSpeed={0.8}
-              zoomSpeed={1.2}
+              zoomSpeed={2.4}
               enabled={!selectionMode}
               makeDefault
             />
@@ -976,65 +1211,53 @@ export default function MeshViewer({
             <AxesIndicator visible={showAxes} />
           </Canvas>
 
-          {/* Clipping Controls Panel */}
+          {/* Section View Controls Panel */}
           {showControls && (
             <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur p-3 rounded z-10 text-xs text-gray-300 w-48">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-white">Clipping</span>
-                <input
-                  type="checkbox"
-                  checked={clipping.enabled}
-                  onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
-                  className="accent-blue-500 w-3 h-3"
-                />
+              <div className="font-medium text-white mb-2">Section View</div>
+
+              <div className="mb-3 pb-2 border-b border-gray-800">
+                <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={clipping.showQualitySlice}
+                    onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
+                    className="accent-blue-500 w-3 h-3"
+                  />
+                  View Quality Slice
+                </label>
+                {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
               </div>
 
-              {clipping.enabled && (
-                <div className="mb-3 pb-2 border-b border-gray-800">
-                  <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={clipping.showQualitySlice}
-                      onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
-                      className="accent-blue-500 w-3 h-3"
-                    />
-                    View Quality Slice
-                  </label>
-                  {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
-                </div>
-              )}
-
-              {clipping.enabled && (
-                <div className="space-y-2">
-                  {[
-                    { axis: 'x', label: 'X', color: 'red' },
-                    { axis: 'y', label: 'Y', color: 'green' },
-                    { axis: 'z', label: 'Z', color: 'blue' }
-                  ].map(({ axis, label }) => (
-                    <div key={axis} className="space-y-0.5">
-                      <div className="flex justify-between">
-                        <label className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={clipping[axis]}
-                            onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
-                            className="accent-blue-500 w-3 h-3"
-                          />
-                          {label}
-                        </label>
-                        <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
-                      </div>
-                      <input
-                        type="range" min="-50" max="50"
-                        value={clipping[`${axis}Value`]}
-                        onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
-                        disabled={!clipping[axis]}
-                        className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
-                      />
+              <div className="space-y-2">
+                {[
+                  { axis: 'x', label: 'X', color: 'red' },
+                  { axis: 'y', label: 'Y', color: 'green' },
+                  { axis: 'z', label: 'Z', color: 'blue' }
+                ].map(({ axis, label }) => (
+                  <div key={axis} className="space-y-0.5">
+                    <div className="flex justify-between">
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={clipping[axis]}
+                          onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
+                          className="accent-blue-500 w-3 h-3"
+                        />
+                        {label}
+                      </label>
+                      <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
                     </div>
-                  ))}
-                </div>
-              )}
+                    <input
+                      type="range" min="-50" max="50"
+                      value={clipping[`${axis}Value`]}
+                      onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
+                      disabled={!clipping[axis]}
+                      className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </>

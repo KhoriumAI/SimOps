@@ -5,11 +5,37 @@ import FileUpload from './components/FileUpload'
 import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
-import BlockingModal from './components/BlockingModal'
-import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3 } from 'lucide-react'
+import FeedbackButton from './components/FeedbackButton'
+import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
+import { API_BASE } from './config'
 
-// API base URL - uses proxy in development, full URL in production
-const API_BASE = import.meta.env.VITE_API_URL || '/api'
+// Preset sizes: maps preset names to min/max element sizes
+const presetSizes = {
+  'Coarse': { min: 5.0, max: 25.0 },
+  'Medium': { min: 2.0, max: 10.0 },
+  'Fine': { min: 1.0, max: 5.0 },
+  'Very Fine': { min: 0.5, max: 1.0 },
+  'Ultra Fine': { min: 0.25, max: 0.75 }
+}
+
+// Parse number expressions: supports scientific notation (1e-6) and math (39.26/2)
+function parseNumberExpression(expr) {
+  if (typeof expr === 'number') return expr
+  const trimmed = String(expr).trim()
+  if (!trimmed) return NaN
+  // Handle scientific notation: 1e-6, 2.5E3
+  if (/^-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/.test(trimmed)) {
+    return parseFloat(trimmed)
+  }
+  // Handle simple math: 39.26/2, 10*2, 5+3
+  try {
+    if (/^[\d\s+\-*/().eE]+$/.test(trimmed)) {
+      const result = Function('"use strict"; return (' + trimmed + ')')()
+      return typeof result === 'number' && isFinite(result) ? result : NaN
+    }
+  } catch { }
+  return parseFloat(trimmed) // Fallback
+}
 
 function App() {
   const { user, logout, authFetch } = useAuth()
@@ -18,14 +44,13 @@ function App() {
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
   const [isPolling, setIsPolling] = useState(false)
+  const [isExportingAnsys, setIsExportingAnsys] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
-  const [targetElements, setTargetElements] = useState(2000)
-  const [useTargetElements, setUseTargetElements] = useState(true)
-  const [maxElementSize, setMaxElementSize] = useState(3.0)
-  const [minElementSize, setMinElementSize] = useState(0.1)
+  const [maxElementSize, setMaxElementSize] = useState(10.0)
+  const [minElementSize, setMinElementSize] = useState(2.0)
   const [elementOrder, setElementOrder] = useState('1')
   const [ansysMode, setAnsysMode] = useState('None')
-  const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (Delaunay)')
+  const [meshStrategy, setMeshStrategy] = useState('Tetrahedral (HXT)')
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(false)
   const [geometryInfo, setGeometryInfo] = useState(null)
   const [isUploading, setIsUploading] = useState(false)
@@ -38,20 +63,24 @@ function App() {
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
+  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
+
+  // UX states for input boxes to allow typing (including blank)
+  const [maxSizeStr, setMaxSizeStr] = useState('10.0')
+  const [minSizeStr, setMinSizeStr] = useState('2.0')
 
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
 
   // Visualization toggles (shared with MeshViewer)
   const [showAxes, setShowAxes] = useState(true)
-  const [showWireframe, setShowWireframe] = useState(true)
-  const [showQuality, setShowQuality] = useState(true)
   const [qualityMetric, setQualityMetric] = useState('sicn')
   const [showHistogram, setShowHistogram] = useState(false)
 
-  const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine']
+  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
+  const qualityPresets = ['Coarse', 'Medium', 'Fine', 'Very Fine', 'Ultra Fine', 'Custom']
   const [meshStrategies, setMeshStrategies] = useState([
-    'Tetrahedral (Delaunay)',  // Fallback default
+    'Tetrahedral (Fast)',  // Fallback default
   ])
 
   // Fetch available strategies from backend on mount
@@ -110,6 +139,7 @@ function App() {
           // Always fetch final mesh when completed (replaces preview)
           if (!meshData || meshData.isPreview) {
             fetchMeshData(currentProject)
+            setColorMode('quality') // Auto-switch to quality view on completion
           }
           // Save mesh duration
           if (meshStartTime) {
@@ -186,6 +216,52 @@ function App() {
     }
 
     setMeshProgress(progress)
+  }
+
+  // Update input strings when numeric values change (e.g. from presets)
+  useEffect(() => {
+    setMaxSizeStr(String(maxElementSize))
+  }, [maxElementSize])
+
+  useEffect(() => {
+    setMinSizeStr(String(minElementSize))
+  }, [minElementSize])
+
+  const handleCopyConsole = (e) => {
+    const text = logs.join('\n')
+    const originalText = e.currentTarget.innerText
+
+    const finalize = (success) => {
+      const btn = e.currentTarget
+      const span = btn.querySelector('span')
+      if (span) span.innerText = success ? 'Copied!' : 'Failed'
+      setTimeout(() => {
+        if (span) span.innerText = 'Copy'
+      }, 2000)
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => finalize(true))
+        .catch(err => {
+          console.error('Clipboard error:', err)
+          finalize(false)
+        })
+    } else {
+      // Fallback: simple copy to clipboard for non-secure contexts
+      try {
+        const textArea = document.createElement('textarea')
+        textArea.value = text
+        document.body.appendChild(textArea)
+        textArea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textArea)
+        finalize(true)
+      } catch (err) {
+        console.error('Fallback copy fail:', err)
+        finalize(false)
+      }
+    }
   }
 
   const fetchMeshData = async (projectId) => {
@@ -291,10 +367,25 @@ function App() {
       clearInterval(progressInterval)
 
       if (!response.ok) {
-        const error = await response.json()
+        let errorMessage = 'Failed to upload file'
+        try {
+          const text = await response.text()
+          try {
+            const error = JSON.parse(text)
+            errorMessage = error.error || errorMessage
+          } catch {
+            // Not JSON
+            console.error('Upload error (non-JSON):', text)
+            errorMessage = `Server error (${response.status}): ${response.statusText}`
+          }
+        } catch (e) {
+          console.error('Failed to read error response:', e)
+          errorMessage = `Server error (${response.status}): ${response.statusText}`
+        }
         setIsUploading(false)
         setUploadProgress(0)
-        alert(error.error || 'Failed to upload file')
+        setLogs(prev => [...prev, `[ERROR] ${errorMessage}`])
+        alert(errorMessage)
         return
       }
 
@@ -302,7 +393,8 @@ function App() {
       const data = await response.json()
       setCurrentProject(data.project_id)
       setProjectStatus(data)
-      setLogs([`[INFO] Uploaded ${file.name}`, `[INFO] Loading CAD preview...`])
+      setCurrentJobId(data.job_id)  // Capture Job ID from upload
+      setLogs([`[INFO] Uploaded ${file.name}`, data.job_id ? `[JOB] ${data.job_id}` : '', `[INFO] Loading CAD preview...`].filter(Boolean))
       setIsPolling(false)
 
       // Fetch CAD preview to show geometry before meshing
@@ -334,7 +426,7 @@ function App() {
         method: 'POST',
         body: {
           quality_preset: qualityPreset,
-          target_elements: useTargetElements ? targetElements : null,
+          target_elements: null,
           max_size_mm: maxElementSize,
           min_size_mm: minElementSize,
           element_order: parseInt(elementOrder),
@@ -348,11 +440,13 @@ function App() {
       clearTimeout(timeoutId)
 
       if (response.ok) {
+        const data = await response.json()
+        setCurrentJobId(data.job_id)  // Capture mesh Job ID
         setIsPolling(true)
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
-        setLogs([`[INFO] Starting mesh generation...`])
-        setMeshData(null)
+        setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
+        // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
       } else {
@@ -362,6 +456,36 @@ function App() {
     } catch (error) {
       console.error('Failed to start mesh generation:', error)
       alert('Failed to start mesh generation')
+    }
+  }
+
+  const handleAnsysExport = async () => {
+    if (!currentProject) return
+
+    setIsExportingAnsys(true)
+    try {
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/export/ansys`, {
+        method: 'POST'
+      })
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      } else {
+        const error = await response.json()
+        alert(error.error || 'Failed to export ANSYS mesh')
+      }
+    } catch (error) {
+      console.error('Failed to export ANSYS mesh:', error)
+      alert('Failed to export ANSYS mesh')
+    } finally {
+      setIsExportingAnsys(false)
     }
   }
 
@@ -403,6 +527,24 @@ function App() {
     } catch (error) {
       console.error('Download failed:', error)
       alert('Failed to download mesh')
+    }
+  }
+
+  const handleStopMesh = async () => {
+    if (!currentProject) return
+    try {
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/stop`, {
+        method: 'POST'
+      })
+      if (response.ok) {
+        setIsPolling(false)
+        setLogs(prev => [...prev, `[INFO] Stop command sent to server.`])
+      } else {
+        const err = await response.json()
+        alert(`Failed to stop mesh: ${err.message}`)
+      }
+    } catch (error) {
+      console.error('Stop mesh failed:', error)
     }
   }
 
@@ -478,13 +620,26 @@ function App() {
           )}
 
           {canDownload && (
-            <button
-              onClick={handleDownload}
-              className="flex items-center gap-1.5 px-3 py-1 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Download
-            </button>
+            <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold text-gray-700 bg-white hover:bg-gray-50 rounded shadow-sm transition-colors border border-gray-200"
+              >
+                <Download className="w-3 h-3" />
+                MSH
+              </button>
+              <button
+                onClick={handleAnsysExport}
+                disabled={isExportingAnsys}
+                className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'text-blue-600 hover:text-blue-700'
+                  }`}
+              >
+                {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+                ANSYS
+              </button>
+            </div>
           )}
         </div>
 
@@ -566,7 +721,15 @@ function App() {
                     <label className="text-gray-500 text-[10px] uppercase mb-1 block">Preset</label>
                     <select
                       value={qualityPreset}
-                      onChange={(e) => setQualityPreset(e.target.value)}
+                      onChange={(e) => {
+                        const preset = e.target.value
+                        setQualityPreset(preset)
+                        // Update min/max sizes based on preset
+                        if (presetSizes[preset]) {
+                          setMinElementSize(presetSizes[preset].min)
+                          setMaxElementSize(presetSizes[preset].max)
+                        }
+                      }}
                       className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                       disabled={isGenerating}
                     >
@@ -576,31 +739,24 @@ function App() {
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <div className="flex items-center justify-between">
-                        <label className="text-gray-500 text-[10px] uppercase mb-1 block">Elements</label>
-                        <input
-                          type="checkbox"
-                          checked={useTargetElements}
-                          onChange={(e) => setUseTargetElements(e.target.checked)}
-                          className="w-3 h-3 mb-1 accent-blue-500"
-                        />
-                      </div>
-                      <input
-                        type="number"
-                        value={targetElements}
-                        onChange={(e) => setTargetElements(parseInt(e.target.value) || 2000)}
-                        className={`w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${!useTargetElements ? 'opacity-50' : ''}`}
-                        disabled={isGenerating || !useTargetElements}
-                      />
-                    </div>
-                    <div>
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Max Size</label>
                       <div className="relative">
                         <input
-                          type="number"
-                          step="0.1"
-                          value={maxElementSize}
-                          onChange={(e) => setMaxElementSize(parseFloat(e.target.value) || 3.0)}
+                          type="text"
+                          value={maxSizeStr}
+                          onChange={(e) => setMaxSizeStr(e.target.value)}
+                          onBlur={() => {
+                            const val = parseNumberExpression(maxSizeStr)
+                            if (!isNaN(val) && val > 0) {
+                              setMaxElementSize(val)
+                              setQualityPreset('Custom')
+                            } else {
+                              setMaxSizeStr(String(maxElementSize))
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.target.blur()
+                          }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
                         />
@@ -611,17 +767,29 @@ function App() {
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Min Size</label>
                       <div className="relative">
                         <input
-                          type="number"
-                          step="0.01"
-                          value={minElementSize}
-                          onChange={(e) => setMinElementSize(parseFloat(e.target.value) || 0.1)}
+                          type="text"
+                          value={minSizeStr}
+                          onChange={(e) => setMinSizeStr(e.target.value)}
+                          onBlur={() => {
+                            const val = parseNumberExpression(minSizeStr)
+                            if (!isNaN(val) && val >= 0.01) { // Allow down to 0.01 now
+                              setMinElementSize(val)
+                              setQualityPreset('Custom')
+                            } else {
+                              setMinSizeStr(String(minElementSize))
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.target.blur()
+                          }}
                           className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 pr-8 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           disabled={isGenerating}
+                          placeholder="≥0.01"
                         />
                         <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-[10px]">mm</span>
                       </div>
                     </div>
-                    <div>
+                    <div className="col-span-2">
                       <label className="text-gray-500 text-[10px] uppercase mb-1 block">Order</label>
                       <select
                         value={elementOrder}
@@ -636,20 +804,6 @@ function App() {
                   </div>
 
                   <div>
-                    <label className="text-gray-500 text-[10px] uppercase mb-1 block">Ansys Export</label>
-                    <select
-                      value={ansysMode}
-                      onChange={(e) => setAnsysMode(e.target.value)}
-                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      disabled={isGenerating}
-                    >
-                      <option value="None">None (Only .msh)</option>
-                      <option value="CFD (Fluent)">CFD (Fluent)</option>
-                      <option value="FEA (Mechanical)">FEA (Mechanical)</option>
-                    </select>
-                  </div>
-
-                  <div>
                     <label className="text-gray-500 text-[10px] uppercase mb-1 block">Strategy</label>
                     <select
                       value={meshStrategy}
@@ -659,6 +813,14 @@ function App() {
                     >
                       {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
+                    {meshStrategy.includes('Hex') && meshStrategy.includes('Pure') && (
+                      <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
+                        <span className="text-amber-500 text-sm">⚠️</span>
+                        <div className="text-[10px] text-amber-800 leading-tight">
+                          <strong>Pure Hex Note:</strong> Currently uses subdivision. Cartesian cut-cell hex coming soon.
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
@@ -694,24 +856,6 @@ function App() {
                     <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
                       <input
                         type="checkbox"
-                        checked={showWireframe}
-                        onChange={(e) => setShowWireframe(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Wireframe
-                    </label>
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={showQuality}
-                        onChange={(e) => setShowQuality(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Quality Coloring
-                    </label>
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
                         checked={showHistogram}
                         onChange={(e) => setShowHistogram(e.target.checked)}
                         className="accent-blue-500 w-3.5 h-3.5"
@@ -720,21 +864,19 @@ function App() {
                     </label>
                   </div>
 
-                  {showQuality && (
-                    <div className="pt-2 border-t border-gray-100">
-                      <label className="text-gray-400 text-[10px] uppercase mb-1 block">Metric</label>
-                      <select
-                        value={qualityMetric}
-                        onChange={(e) => setQualityMetric(e.target.value)}
-                        className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      >
-                        <option value="sicn">SICN (Ideal=1)</option>
-                        <option value="gamma">Gamma (Ideal=1)</option>
-                        <option value="skewness">Skewness</option>
-                        <option value="aspectRatio">Aspect Ratio</option>
-                      </select>
-                    </div>
-                  )}
+                  <div className="pt-2 border-t border-gray-100">
+                    <label className="text-gray-400 text-[10px] uppercase mb-1 block">Quality Metric</label>
+                    <select
+                      value={qualityMetric}
+                      onChange={(e) => setQualityMetric(e.target.value)}
+                      className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="sicn">SICN (Ideal=1)</option>
+                      <option value="gamma">Gamma (Ideal=1)</option>
+                      <option value="skewness">Skewness</option>
+                      <option value="aspectRatio">Aspect Ratio</option>
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -754,7 +896,7 @@ function App() {
 
                   {isGenerating && (
                     <button
-                      onClick={() => setIsPolling(false)}
+                      onClick={handleStopMesh}
                       className="w-full px-3 py-1.5 rounded text-xs font-medium bg-red-500 hover:bg-red-600 text-white transition-colors flex items-center justify-center gap-1"
                     >
                       <Square className="w-3 h-3 fill-current" />
@@ -764,39 +906,7 @@ function App() {
                 </div>
               )}
 
-              {/* Progress - Only when generating */}
-              {isGenerating && (
-                <div className="bg-white rounded border border-gray-200 p-2 text-xs">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium text-gray-700">Progress</span>
-                    <MeshTimer
-                      isRunning={isGenerating}
-                      startTime={meshStartTime}
-                      status={projectStatus?.status}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    {[
-                      { key: 'strategy', label: 'Strategy' },
-                      { key: '1d', label: '1D' },
-                      { key: '2d', label: '2D' },
-                      { key: '3d', label: '3D' },
-                      { key: 'optimize', label: 'Optimize' },
-                      { key: 'quality', label: 'Quality' }
-                    ].map(({ key, label }) => (
-                      <div key={key} className="flex items-center gap-2">
-                        <span className="w-14 text-gray-500">{label}</span>
-                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
-                          <div
-                            className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
-                            style={{ width: `${meshProgress[key]}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Progress UI has been moved to FloatingProgress in MeshViewer */}
             </div>
           )}
         </div>
@@ -822,14 +932,15 @@ function App() {
               // Visualization props
               showAxes={showAxes}
               setShowAxes={setShowAxes}
-              showWireframe={showWireframe}
-              setShowWireframe={setShowWireframe}
-              showQuality={showQuality}
-              setShowQuality={setShowQuality}
               qualityMetric={qualityMetric}
               setQualityMetric={setQualityMetric}
               showHistogram={showHistogram}
               setShowHistogram={setShowHistogram}
+              colorMode={colorMode}
+              setColorMode={setColorMode}
+              // Progress props
+              meshProgress={meshProgress}
+              loadingStartTime={meshStartTime}
             />
           </div>
 
@@ -848,37 +959,51 @@ function App() {
                 <span className="text-gray-500">({logs.length} messages)</span>
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(logs.join('\n')); }}
-                className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
-                title="Copy logs"
-              >
-                <Copy className="w-3 h-3" />
-                Copy
-              </button>
-            </div>
-
-            {/* Console Content - Only when open */}
-            {consoleOpen && (
-              <div className="flex-1 overflow-hidden">
-                <Terminal logs={logs} noHeader={true} />
+              <div className="flex items-center gap-3">
+                {(currentJobId || projectStatus?.latest_result?.job_id) && (
+                  <div
+                    className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-900/40 hover:bg-blue-800/60 border border-blue-500/50 rounded text-blue-300 font-mono text-[10px] cursor-pointer transition-all group shadow-sm"
+                    onClick={(e) => {
+                      const idToCopy = currentJobId || projectStatus?.latest_result?.job_id;
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(idToCopy);
+                      const el = e.currentTarget.querySelector('.job-id-text');
+                      if (el) {
+                        const originalText = el.innerText;
+                        el.innerText = 'COPIED';
+                        setTimeout(() => { el.innerText = originalText; }, 1000);
+                      }
+                    }}
+                    title="Click to copy Job ID"
+                  >
+                    <span className="text-blue-400/70 text-[8px] font-bold uppercase tracking-wider">ID:</span>
+                    <span className="job-id-text">{currentJobId || projectStatus?.latest_result?.job_id}</span>
+                    <Copy className="w-2.5 h-2.5 text-blue-400/50 group-hover:text-blue-300 transition-colors" />
+                  </div>
+                )}
+                <button
+                  onClick={handleCopyConsole}
+                  className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
+                  title="Copy logs"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>Copy</span>
+                </button>
               </div>
-            )}
+
+              {/* Console Content - Only when open */}
+              {consoleOpen && (
+                <div className="flex-1 overflow-hidden">
+                  <Terminal logs={logs} noHeader={true} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Blocking Modal - Prevents user interaction during critical operations */}
-      <BlockingModal
-        isOpen={isUploading || isGenerating}
-        title={isUploading ? 'Uploading File...' : 'Generating Mesh...'}
-        message={
-          isUploading
-            ? 'Processing your CAD file. This may take a few minutes for large files.'
-            : 'Meshing geometry. This can take up to 2 minutes for complex models.'
-        }
-        subMessage="⚠️ Please do not refresh or close this page. The process is running on the server."
-      />
+        {/* Feedback Button - Fixed position */}
+        <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
+      </div>
     </div>
   )
 }
