@@ -214,6 +214,46 @@ def fix_db_schema(app):
                     print("[DB-MIGRATE] Added 'output_size' successfully")
             except Exception as e:
                 print(f"[DB-MIGRATE] Error adding output_size: {e}")
+        
+        # 1e. Check for processing_time column
+        if 'processing_time' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN processing_time FLOAT"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'processing_time' to mesh_results")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding processing_time: {e}")
+        
+        # 1f. Check for node_count column
+        if 'node_count' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN node_count INTEGER"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'node_count' to mesh_results")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding node_count: {e}")
+        
+        # 1g. Check for element_count column  
+        if 'element_count' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN element_count INTEGER"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'element_count' to mesh_results")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding element_count: {e}")
+        
+        # 1h. Check for completed_at column
+        if 'completed_at' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE mesh_results ADD COLUMN completed_at DATETIME"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'completed_at' to mesh_results")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding completed_at: {e}")
 
     # 2. Check projects for preview_path (added in a previous session)
     if 'projects' in inspector.get_table_names():
