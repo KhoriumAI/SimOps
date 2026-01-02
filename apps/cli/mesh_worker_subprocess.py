@@ -1179,7 +1179,12 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         Dict with success status and results
     """
     try:
+        import os
         from core.config import Config
+        
+        # Configure Gmsh to use 4 CPU cores for faster meshing
+        # This applies to all strategies (HXT, Delaunay, etc.)
+        os.environ['OMP_NUM_THREADS'] = '4'
         
         # Check mesh strategy - more specific checks first
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
@@ -1201,17 +1206,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # =====================================================================
         
         if 'Pure Hex' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy or 'Direct Hex' in mesh_strategy:
-            from strategies.openfoam_hex import generate_openfoam_hex_mesh, check_any_openfoam_available
-            # Try OpenFOAM (cfMesh or snappy) first
-            if check_any_openfoam_available():
-                print("[DEBUG] OpenFOAM available - using robust hex pipeline")
-                return generate_openfoam_hex_wrapper(cad_file, output_dir, quality_params)
-            else:
-                print("[DEBUG] OpenFOAM not available - cannot run Pure Hex strategy")
-                return {
-                    'success': False, 
-                    'message': 'OpenFOAM is not installed or not found on this server. "Pure Hex" strategy requires OpenFOAM (v2306+ or v2406).'
-                }
+            # TEMPORARY: Pure Hex currently uses subdivision method
+            # Will be replaced with cartesian cut-cell hex meshing in future
+            print("[INFO] Pure Hex: Currently using subdivision-based hex generation")
+            print("[INFO] Cartesian cut-cell hex meshing coming soon")
+            
+            # For now, route to Hex Dominant subdivision strategy
+            print("[DEBUG] Using hex subdivision pipeline as temporary Pure Hex implementation")
+            return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
         # Regular Hex Dominant (subdivision approach)
         if 'Hex Dominant' in mesh_strategy:

@@ -859,10 +859,12 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         """HXT algorithm (good for quality)"""
         self.log_message("Tetrahedral HXT (quality-focused)...")
 
-        # PRODUCTION SETTINGS: Prevent 4-million element explosion
-        diagonal = self.geometry_info.get('diagonal', 100.0)
-        gmsh.option.setNumber("Mesh.MeshSizeMin", diagonal / 200.0)
-        gmsh.option.setNumber("Mesh.MeshSizeMax", diagonal / 10.0)
+        # Apply user's mesh size parameters
+        mesh_params = {
+            'max_size_mm': self.config.mesh_params.max_size_mm,
+            'min_size_mm': self.config.mesh_params.min_size_mm
+        }
+        self.apply_mesh_parameters(mesh_params)
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT (Correct ID is 10)
@@ -908,11 +910,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             surf_tags = [tag for dim, tag in surfaces]
 
             gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
-            gmsh.model.mesh.field.setNumber(field_tag, "Size",
-                                            self.geometry_info.get('diagonal', 1.0) / 200.0)
+            # Use user's min size for boundary layer initial size
+            layer_size = self.config.mesh_params.min_size_mm or 1.0
+            gmsh.model.mesh.field.setNumber(field_tag, "Size", layer_size)
             gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.3)  # Growth rate
-            gmsh.model.mesh.field.setNumber(field_tag, "Thickness",
-                                            self.geometry_info.get('diagonal', 1.0) / 50.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "Thickness", layer_size * 4.0)
             gmsh.model.mesh.field.setNumber(field_tag, "NumLayers", 3)  # 3 layers
 
             gmsh.model.mesh.field.setAsBoundaryLayer(field_tag)
@@ -941,8 +943,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             diagonal = self.geometry_info.get('diagonal', 1.0)
 
             gmsh.model.mesh.field.setNumber(field_tag, "NNodesByEdge", 100)  # High resolution
-            gmsh.model.mesh.field.setNumber(field_tag, "SizeMin", diagonal / 500.0)
-            gmsh.model.mesh.field.setNumber(field_tag, "SizeMax", diagonal / 20.0)
+            # Use user's mesh size parameters
+            size_min = self.config.mesh_params.min_size_mm or diagonal / 500.0
+            size_max = self.config.mesh_params.max_size_mm or diagonal / 20.0
+            gmsh.model.mesh.field.setNumber(field_tag, "SizeMin", size_min)
+            gmsh.model.mesh.field.setNumber(field_tag, "SizeMax", size_max)
 
             gmsh.model.mesh.field.setAsBackgroundMesh(field_tag)
 
@@ -971,11 +976,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
             field_tag = gmsh.model.mesh.field.add("BoundaryLayer")
             gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
-            gmsh.model.mesh.field.setNumber(field_tag, "Size",
-                                            self.geometry_info.get('diagonal', 1.0) / 150.0)
+            # Use user's min size for prism layer initial size
+            layer_size = self.config.mesh_params.min_size_mm or 1.0
+            gmsh.model.mesh.field.setNumber(field_tag, "Size", layer_size)
             gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.2)
-            gmsh.model.mesh.field.setNumber(field_tag, "Thickness",
-                                            self.geometry_info.get('diagonal', 1.0) / 40.0)
+            gmsh.model.mesh.field.setNumber(field_tag, "Thickness", layer_size * 3.0)
             gmsh.model.mesh.field.setNumber(field_tag, "NumLayers", 2)
             gmsh.model.mesh.field.setNumber(field_tag, "CreatePrisms", 1)  # Prisms!
 
