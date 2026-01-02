@@ -214,6 +214,58 @@ def fix_db_schema(app):
                     conn.execute(text("ALTER TABLE projects ADD COLUMN preview_path VARCHAR(500)"))
                     conn.commit()
             except: pass
+        
+        # Check for other missing project columns
+        if 'original_filename' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN original_filename VARCHAR(255)"))
+                    conn.commit()
+            except: pass
+        if 'file_size' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN file_size BIGINT DEFAULT 0"))
+                    conn.commit()
+            except: pass
+        if 'file_hash' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN file_hash VARCHAR(64)"))
+                    conn.commit()
+            except: pass
+        if 'mime_type' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN mime_type VARCHAR(100)"))
+                    conn.commit()
+            except: pass
+
+    # 3. Check users table
+    if 'users' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('users')]
+        if 'storage_quota' not in columns:
+            print("[DB-MIGRATE] Adding 'storage_quota' column to 'users'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN storage_quota BIGINT DEFAULT 1073741824"))
+                    conn.commit()
+            except Exception as e: print(f"[DB-MIGRATE] Failed to add storage_quota: {e}")
+            
+        if 'storage_used' not in columns:
+            print("[DB-MIGRATE] Adding 'storage_used' column to 'users'...")
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN storage_used BIGINT DEFAULT 0"))
+                    conn.commit()
+            except Exception as e: print(f"[DB-MIGRATE] Failed to add storage_used: {e}")
+            
+        if 'last_login' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN last_login DATETIME"))
+                    conn.commit()
+            except: pass
 
 
 
