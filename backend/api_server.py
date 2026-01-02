@@ -242,6 +242,30 @@ def fix_db_schema(app):
                     conn.execute(text("ALTER TABLE projects ADD COLUMN mime_type VARCHAR(100)"))
                     conn.commit()
             except: pass
+        if 'mesh_count' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN mesh_count INTEGER DEFAULT 0"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'mesh_count' to projects")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding mesh_count: {e}")
+        if 'download_count' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN download_count INTEGER DEFAULT 0"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'download_count' to projects")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding download_count: {e}")
+        if 'last_accessed' not in columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN last_accessed DATETIME"))
+                    conn.commit()
+                    print("[DB-MIGRATE] Added 'last_accessed' to projects")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding last_accessed: {e}")
 
     # 3. Check users table
     if 'users' in inspector.get_table_names():
