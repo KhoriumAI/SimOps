@@ -247,30 +247,20 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     return planes
   }, [geometry, clipping])
 
-  // Track mouse movement to distinguish clicks from drags
-  const mouseDownPos = useRef({ x: 0, y: 0 })
-  const hasMoved = useRef(false)
+  // Track mousedown time to distinguish clicks from drags
+  const mouseDownTime = useRef(0)
 
-  const handlePointerDown = useCallback((event) => {
-    mouseDownPos.current = { x: event.clientX, y: event.clientY }
-    hasMoved.current = false
-  }, [])
-
-  const handlePointerMove = useCallback((event) => {
-    const dx = event.clientX - mouseDownPos.current.x
-    const dy = event.clientY - mouseDownPos.current.y
-    const distance = Math.sqrt(dx * dx + dy * dy)
-    if (distance > 5) { // 5px threshold
-      hasMoved.current = true
-    }
+  const handlePointerDown = useCallback(() => {
+    mouseDownTime.current = Date.now()
   }, [])
 
   // Handle face click for selection - now works without selectionMode
   const handleClick = useCallback((event) => {
     if (!meshRef.current || !onFaceSelect) return
 
-    // Ignore if this was a drag operation
-    if (hasMoved.current) return
+    // Ignore if this was a drag operation (click held for >200ms)
+    const clickDuration = Date.now() - mouseDownTime.current
+    if (clickDuration > 200) return
 
     event.stopPropagation()
 
@@ -331,7 +321,6 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         frustumCulled={true}
         onClick={handleClick}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
       >
         <meshStandardMaterial
           vertexColors={useVertexColors || useGradient}

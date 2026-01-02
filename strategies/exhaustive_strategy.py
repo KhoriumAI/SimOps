@@ -1640,6 +1640,24 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.Binary", 1)
         gmsh.write(output_file)
+        
+        # Extract metrics before finalizing
+        try:
+            total_nodes = gmsh.model.mesh.getMaxNodeTag()
+            total_elements = gmsh.model.mesh.getMaxElementTag()
+            
+            # Store in a temporary attribute that generate_mesh can access
+            self.assembly_metrics = {
+                'total_elements': total_elements,
+                'total_nodes': total_nodes,
+                'strategy': 'surgical_isolation',
+                'assembly': True
+            }
+            self.log_message(f"[METRICS] Assembly: {total_elements} elements, {total_nodes} nodes")
+        except Exception as e:
+            self.log_message(f"[WARNING] Failed to extract assembly metrics: {e}")
+            self.assembly_metrics = {}
+        
         gmsh.finalize()
         
         self.log_message(f"[OK] Final mesh saved: {output_file}")

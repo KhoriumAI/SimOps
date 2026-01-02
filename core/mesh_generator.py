@@ -124,9 +124,16 @@ class BaseMeshGenerator(ABC):
                 result.iterations = self.current_iteration
                 result.history = self.quality_history.copy()
 
-                # Final quality metrics
-                if self.quality_history:
+                # Final quality metrics - check for assembly metrics first
+                if hasattr(self, 'assembly_metrics') and self.assembly_metrics:
+                    # Assembly meshing path - use metrics extracted after merge
+                    result.quality_metrics = self.assembly_metrics.copy()
+                    self.log_message(f"[RESULT] Using assembly metrics: {result.quality_metrics.get('total_elements', 0)} elements")
+                elif self.quality_history:
                     result.quality_metrics = self.quality_history[-1]['metrics']
+                else:
+                    result.quality_metrics = {}
+
 
                 result.message = "Mesh generation completed successfully"
 
@@ -1099,8 +1106,17 @@ class BaseMeshGenerator(ABC):
         gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        
+        # Disable legacy sizing options that can also override
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthFromPoints", 0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0)
+        
+        # Reset auto-refinement that can subdivide based on curvature
+        gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 0)
+        gmsh.option.setNumber("Mesh.MinimumCirclePoints", 0)
 
-        self.log_message(f"Applied mesh parameters: min={cl_min:.4f}, max={cl_max:.4f} (all size options set)")
+        self.log_message(f"Applied mesh parameters: min={cl_min:.4f}, max={cl_max:.4f} (all size options set, overrides disabled)")
 
     def set_mesh_algorithm(self, algorithm_2d: Optional[int] = None,
                            algorithm_3d: Optional[int] = None):
