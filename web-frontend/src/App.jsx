@@ -1003,7 +1003,8 @@ function App() {
         {/* Feedback Button - Fixed position */}
         <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
       </div>
-      )
+    </div>
+  )
 }
 
-      export default App
+export default App
