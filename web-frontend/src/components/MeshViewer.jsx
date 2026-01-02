@@ -247,9 +247,30 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     return planes
   }, [geometry, clipping])
 
-  // Handle face click for selection
+  // Track mouse movement to distinguish clicks from drags
+  const mouseDownPos = useRef({ x: 0, y: 0 })
+  const hasMoved = useRef(false)
+
+  const handlePointerDown = useCallback((event) => {
+    mouseDownPos.current = { x: event.clientX, y: event.clientY }
+    hasMoved.current = false
+  }, [])
+
+  const handlePointerMove = useCallback((event) => {
+    const dx = event.clientX - mouseDownPos.current.x
+    const dy = event.clientY - mouseDownPos.current.y
+    const distance = Math.sqrt(dx * dx + dy * dy)
+    if (distance > 5) { // 5px threshold
+      hasMoved.current = true
+    }
+  }, [])
+
+  // Handle face click for selection - now works without selectionMode
   const handleClick = useCallback((event) => {
-    if (!selectionMode || !meshRef.current || !onFaceSelect) return
+    if (!meshRef.current || !onFaceSelect) return
+
+    // Ignore if this was a drag operation
+    if (hasMoved.current) return
 
     event.stopPropagation()
 
@@ -267,7 +288,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         normal: normal ? { x: normal.x, y: normal.y, z: normal.z } : null,
       }, isFloodFill)
     }
-  }, [selectionMode, onFaceSelect, raycaster])
+  }, [onFaceSelect, raycaster])
 
   // Create highlight geometry for selected faces
   const selectedFaceGeometry = useMemo(() => {
@@ -309,6 +330,8 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         geometry={activeGeometry}
         frustumCulled={true}
         onClick={handleClick}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
       >
         <meshStandardMaterial
           vertexColors={useVertexColors || useGradient}
@@ -466,8 +489,7 @@ export default function MeshViewer({
   const [roughness, setRoughness] = useState(0.5)
   const [gradientColors, setGradientColors] = useState({ start: '#4a9eff', end: '#ff6b6b' })
 
-  // Face selection state
-  const [selectionMode, setSelectionMode] = useState(false)
+  // Face selection state (selectionMode removed - always enabled)
   const [selectedFaces, setSelectedFaces] = useState([])
   const [boundaryZones, setBoundaryZones] = useState({}) // { name: [indices] }
   const [showFacePanel, setShowFacePanel] = useState(false)
@@ -616,8 +638,6 @@ export default function MeshViewer({
 
   // Handle face selection
   const handleFaceSelect = useCallback((faceData, isFloodFill = false) => {
-    if (!selectionMode) return
-
     let indicesToSelect = [faceData.faceIndex]
     if (isFloodFill) {
       indicesToSelect = performFloodFill(faceData.faceIndex)
@@ -643,7 +663,7 @@ export default function MeshViewer({
       return [...prev, ...newSelections]
     })
     setShowFacePanel(true)
-  }, [selectionMode, performFloodFill])
+  }, [performFloodFill])
 
   // Save face name and sync to backend
   const saveFaceName = useCallback(async () => {
@@ -750,13 +770,7 @@ export default function MeshViewer({
               <Scissors className="w-3.5 h-3.5" />
               Section View
             </button>
-            <button
-              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${selectionMode ? 'bg-green-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
-            >
-              <MousePointer2 className="w-3.5 h-3.5" />
-              Select
-            </button>
+
           </div>
 
           {/* Paint Panel */}

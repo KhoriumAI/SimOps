@@ -725,7 +725,7 @@ def register_routes(app):
                 'slack_notified': slack_success
             },
             ip_address=request.remote_addr,
-            user_agent=request.user_agent.string[:500] if request.user_agent else None
+            user_agent=str(request.user_agent)[:500] if request.user_agent else None
         )
         
         try:
@@ -877,7 +877,7 @@ def register_routes(app):
                 'preview_generated': preview_path is not None
             },
             ip_address=request.remote_addr,
-            user_agent=request.user_agent.string[:500] if request.user_agent else None
+            user_agent=str(request.user_agent)[:500] if request.user_agent else None
         )
         
         # Update user storage
@@ -917,7 +917,7 @@ def register_routes(app):
                     storage.delete_file(preview_path)
             except:
                 pass
-            return jsonify({"error": "Failed to create project"}), 500
+            return jsonify({"error": "Failed to create project", "details": str(e)}), 500
 
         return jsonify({
             "project_id": project_id,
@@ -1186,7 +1186,7 @@ def register_routes(app):
             file_format='msh',
             file_size=file_size,
             ip_address=request.remote_addr,
-            user_agent=request.user_agent.string[:500] if request.user_agent else None
+            user_agent=str(request.user_agent)[:500] if request.user_agent else None
         )
         
         # Update counters
@@ -1206,7 +1206,7 @@ def register_routes(app):
                 'storage_path': output_path
             },
             ip_address=request.remote_addr,
-            user_agent=request.user_agent.string[:500] if request.user_agent else None
+            user_agent=str(request.user_agent)[:500] if request.user_agent else None
         )
         
         try:
