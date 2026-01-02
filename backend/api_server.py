@@ -213,7 +213,9 @@ def fix_db_schema(app):
                 with engine.connect() as conn:
                     conn.execute(text("ALTER TABLE projects ADD COLUMN preview_path VARCHAR(500)"))
                     conn.commit()
-            except: pass
+                    print("[DB-MIGRATE] Added 'preview_path' successfully")
+            except Exception as e:
+                print(f"[DB-MIGRATE] Error adding preview_path: {e}")
         
         # Check for other missing project columns
         if 'original_filename' not in columns:
