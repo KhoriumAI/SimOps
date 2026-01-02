@@ -676,9 +676,12 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
     """
     try:
         import trimesh
+        import tempfile
+        from strategies.hex_dominant_strategy import HighFidelityDiscretization, ConvexDecomposition
+        
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
+        print(f"[HEX-DOM] Starting hex-dominant meshing pipeline (Input: {cad_file})")
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"

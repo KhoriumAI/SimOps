@@ -814,9 +814,12 @@ function App() {
                       {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                     {meshStrategy.includes('Hex') && meshStrategy.includes('Pure') && (
-                      <p className="text-[10px] text-amber-600 mt-1">
-                        ⚠️ Currently uses subdivision. Cartesian cut-cell hex coming soon.
-                      </p>
+                      <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
+                        <span className="text-amber-500 text-sm">⚠️</span>
+                        <div className="text-[10px] text-amber-800 leading-tight">
+                          <strong>Pure Hex Note:</strong> Currently uses subdivision. Cartesian cut-cell hex coming soon.
+                        </div>
+                      </div>
                     )}
                   </div>
 
@@ -953,36 +956,54 @@ function App() {
               >
                 <TerminalIcon className="w-3.5 h-3.5" />
                 <span className="font-medium">Console</span>
-                {currentJobId && (
-                  <span className="text-blue-400 font-mono text-[10px] bg-gray-700 px-1.5 py-0.5 rounded">{currentJobId}</span>
-                )}
                 <span className="text-gray-500">({logs.length} messages)</span>
                 {consoleOpen ? <ChevronDown className="w-4 h-4 ml-1" /> : <ChevronUp className="w-4 h-4 ml-1" />}
               </div>
-              <button
-                onClick={handleCopyConsole}
-                className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
-                title="Copy logs"
-              >
-                <Copy className="w-3 h-3" />
-                <span>Copy</span>
-              </button>
-            </div>
-
-            {/* Console Content - Only when open */}
-            {consoleOpen && (
-              <div className="flex-1 overflow-hidden">
-                <Terminal logs={logs} noHeader={true} />
+              <div className="flex items-center gap-3">
+                {currentJobId && (
+                  <div
+                    className="flex items-center gap-1.5 px-2 py-0.5 bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded text-blue-400 font-mono text-[10px] cursor-pointer transition-colors group"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(currentJobId);
+                      const el = e.currentTarget.querySelector('.job-id-text');
+                      if (el) {
+                        const originalText = el.innerText;
+                        el.innerText = 'COPIED';
+                        setTimeout(() => { el.innerText = originalText; }, 1000);
+                      }
+                    }}
+                    title="Click to copy Job ID"
+                  >
+                    <span className="text-gray-500 text-[8px] font-bold uppercase tracking-wider">ID:</span>
+                    <span className="job-id-text">{currentJobId}</span>
+                    <Copy className="w-2.5 h-2.5 text-gray-500 group-hover:text-blue-400 transition-colors" />
+                  </div>
+                )}
+                <button
+                  onClick={handleCopyConsole}
+                  className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
+                  title="Copy logs"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>Copy</span>
+                </button>
               </div>
-            )}
+
+              {/* Console Content - Only when open */}
+              {consoleOpen && (
+                <div className="flex-1 overflow-hidden">
+                  <Terminal logs={logs} noHeader={true} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Feedback Button - Fixed position */}
-      <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
-    </div>
-  )
+        {/* Feedback Button - Fixed position */}
+        <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
+      </div>
+      )
 }
 
-export default App
+      export default App

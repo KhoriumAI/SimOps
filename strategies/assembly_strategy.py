@@ -34,7 +34,9 @@ except Exception:
 def _parallel_split_worker(worker_id: int, total_workers: int, step_file: str, 
                            temp_stl_dir: str, triage_mode: bool,
                            cad_density_threshold: float,
-                           max_diag_for_triage: float) -> Tuple[List[str], Set[int]]:
+                           max_diag_for_triage: float,
+                           min_size: float = 1.0, 
+                           max_size: float = 10.0) -> Tuple[List[str], Set[int]]:
     """Worker function for parallel assembly splitting"""
     import gmsh
     import os
@@ -62,8 +64,8 @@ def _parallel_split_worker(worker_id: int, total_workers: int, step_file: str,
         # High-quality surface mesh settings (Clamped)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
         gmsh.option.setNumber("Mesh.MinimumElementsPerTwoPi", 20)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.1)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 10.0)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max_size)
         
         # V6 Immortal Settings
         # Perturb nodes by 1e-8 to avoid symmetric singularities (Mirrored Part Fix)
@@ -243,7 +245,7 @@ def generate_bounding_box_mesh(stl_path: str, output_path: str) -> Tuple[bool, s
         gmsh.finalize()
 
 
-def _volume_mesh_process_safe(stl_path, output_path):
+def _volume_mesh_process_safe(stl_path, output_path, min_size=1.0, max_size=10.0):
     """
     Isolated process: Creates a proper solid volume from STL skin,
     then meshes with Delaunay (Algo 1) to prevent HXT crashes.
@@ -262,9 +264,9 @@ def _volume_mesh_process_safe(stl_path, output_path):
     gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
     gmsh.option.setNumber("Mesh.HighOrderOptimize", 0)
     
-    # --- SIZE CLAMPING (Prevents 85MB files) ---
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.1)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 10.0)
+    # --- SIZE CLAMPING ---
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_size)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max_size)
     
     try:
         # 1. Load STL as discrete surface
@@ -298,7 +300,7 @@ def _volume_mesh_process_safe(stl_path, output_path):
     finally:
         gmsh.finalize()
 
-def _robust_mesh_task(stl_path, output_path, timeout=30):
+def _robust_mesh_task(stl_path, output_path, timeout=30, min_size=1.0, max_size=10.0):
     """
     Supervisor function running in pool.
     Spawns a child process for meshing to contain crashes/hangs.
@@ -315,7 +317,7 @@ def _robust_mesh_task(stl_path, output_path, timeout=30):
         return output_path
 
     # 3. Launch Isolated Process
-    p = multiprocessing.Process(target=_volume_mesh_process_safe, args=(stl_path, output_path))
+    p = multiprocessing.Process(target=_volume_mesh_process_safe, args=(stl_path, output_path, min_size, max_size))
     p.start()
     p.join(timeout)
     
@@ -447,7 +449,9 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
                 self.temp_stl_dir, 
                 self.triage_mode, 
                 CAD_DENSITY_THRESHOLD, 
-                MAX_DIAGONAL_FOR_TRIAGE
+                MAX_DIAGONAL_FOR_TRIAGE,
+                self.config.mesh_params.min_size_mm or 1.0,
+                self.config.mesh_params.max_size_mm or 10.0
             ))
         
         start_time = time.time()
@@ -460,7 +464,7 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
         except Exception as e:
             self.log_message(f"Parallel split failed: {e}. Falling back to sequential.", "WARNING")
             # Sequential fallback (simplified reuse of logic)
-            results = [_parallel_split_worker(0, 1, step_file, self.temp_stl_dir, self.triage_mode, CAD_DENSITY_THRESHOLD, MAX_DIAGONAL_FOR_TRIAGE)]
+            results = [_parallel_split_worker(0, 1, step_file, self.temp_stl_dir, self.triage_mode, CAD_DENSITY_THRESHOLD, MAX_DIAGONAL_FOR_TRIAGE, self.config.mesh_params.min_size_mm or 1.0, self.config.mesh_params.max_size_mm or 10.0)]
         
         # Combine results
         stl_files = []
@@ -490,7 +494,9 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
             out_path = os.path.join(self.temp_mesh_dir, basename)
             # Dynamic timeout: 90s for large/immune parts, 30s for small ones
             timeout = 90 if os.path.exists(stl + ".immune") else 30
-            tasks.append((stl, out_path, timeout))
+            min_s = self.config.mesh_params.min_size_mm or 1.0
+            max_s = self.config.mesh_params.max_size_mm or 10.0
+            tasks.append((stl, out_path, timeout, min_s, max_s))
 
         self.log_message(f"Starting Robust Volume Meshing ({len(tasks)} parts)...")
         start_t = time.time()

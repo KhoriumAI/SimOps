@@ -625,7 +625,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         
         try:
             diagonal = self.geometry_info.get('diagonal', 1.0)
-            base_size = diagonal / 20.0 # Approximate base size
+            base_size = self.config.mesh_params.max_size_mm or (diagonal / 20.0)
             
             fields = []
             
@@ -1111,10 +1111,15 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("Very coarse tetrahedral mesh (low element count)...")
 
         diagonal = self.geometry_info.get('diagonal', 1.0)
+        
+        # User max size, or fall back to diagonal if none
+        base_max = self.config.mesh_params.max_size_mm or (diagonal / 3.0)
+        base_min = self.config.mesh_params.min_size_mm or (diagonal / 10.0)
 
-        # Very coarse
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", diagonal / 10.0)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", diagonal / 3.0)
+        # Scale up slightly for "Very Coarse" effect but stay within user bounds if possible
+        # If user provided sizes, we respect them but use the max value
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", base_max * 0.5)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", base_max)
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
         gmsh.option.setNumber("Mesh.Algorithm3D", 1)
