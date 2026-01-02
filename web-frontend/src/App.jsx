@@ -44,8 +44,8 @@ function App() {
 
   // Visualization toggles (shared with MeshViewer)
   const [showAxes, setShowAxes] = useState(true)
-  const [showWireframe, setShowWireframe] = useState(false)
-  const [showQuality, setShowQuality] = useState(false)
+  const [showWireframe, setShowWireframe] = useState(true)
+  const [showQuality, setShowQuality] = useState(true)
   const [qualityMetric, setQualityMetric] = useState('sicn')
   const [showHistogram, setShowHistogram] = useState(false)
 

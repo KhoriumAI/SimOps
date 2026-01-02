@@ -22,7 +22,10 @@ def migrate():
         ('original_filename', 'VARCHAR(255)'),
         ('file_size', 'BIGINT DEFAULT 0'),
         ('file_hash', 'VARCHAR(64)'),
-        ('mime_type', 'VARCHAR(100)')
+        ('mime_type', 'VARCHAR(100)'),
+        ('mesh_count', 'INTEGER DEFAULT 0'),
+        ('download_count', 'INTEGER DEFAULT 0'),
+        ('last_accessed', 'DATETIME')
     ]
 
     for col_name, col_type in project_migrations:

@@ -547,6 +547,12 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
             all_elements = []   # List of dicts with element data
             boxed_physical_tags = []  # Track which Physical Groups are boxed
             
+            # Aggregated quality data from all components
+            aggregated_quality = {}  # shifted_elem_id -> quality
+            aggregated_gamma = {}
+            aggregated_skewness = {}
+            aggregated_aspect_ratio = {}
+            
             node_offset = 0
             element_offset = 0
             vol_tag_offset = 0
@@ -604,12 +610,46 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
                                 "node_tags": shifted_elem_nodes
                             })
                     
-                    # Update offsets
+                    # Update offsets (capture previous before updating)
                     max_n = gmsh.model.mesh.getMaxNodeTag()
                     max_e = gmsh.model.mesh.getMaxElementTag()
+                    prev_elem_offset = element_offset  # Capture BEFORE updating
                     node_offset += max_n
                     element_offset += max_e
                     vol_tag_offset += len(vol_tags)
+                    
+                    # --- AGGREGATE QUALITY DATA ---
+                    # Load quality file for this component and shift IDs
+                    from pathlib import Path
+                    quality_file = Path(msh_path).with_suffix('.quality.json')
+                    if quality_file.exists():
+                        try:
+                            with open(quality_file, 'r') as f:
+                                comp_quality = json.load(f)
+                            
+                            # per_element_quality (use prev_elem_offset captured above)
+                            for old_id, quality in comp_quality.get('per_element_quality', {}).items():
+                                new_id = str(int(old_id) + prev_elem_offset)
+                                aggregated_quality[new_id] = quality
+                            
+                            # per_element_gamma
+                            for old_id, gamma in comp_quality.get('per_element_gamma', {}).items():
+                                new_id = str(int(old_id) + prev_elem_offset)
+                                aggregated_gamma[new_id] = gamma
+                            
+                            # per_element_skewness
+                            for old_id, skew in comp_quality.get('per_element_skewness', {}).items():
+                                new_id = str(int(old_id) + prev_elem_offset)
+                                aggregated_skewness[new_id] = skew
+                            
+                            # per_element_aspect_ratio
+                            for old_id, ar in comp_quality.get('per_element_aspect_ratio', {}).items():
+                                new_id = str(int(old_id) + prev_elem_offset)
+                                aggregated_aspect_ratio[new_id] = ar
+                            
+                            self.log_message(f"  Loaded quality data: {len(comp_quality.get('per_element_quality', {}))} elements from {basename}")
+                        except Exception as qe:
+                            self.log_message(f"  Warning: Could not load quality for {basename}: {qe}", "WARNING")
                     
                 except Exception as e:
                     self.log_message(f"Warning: Failed to load {os.path.basename(msh_path)}: {e}", "WARNING")
@@ -650,6 +690,38 @@ class AssemblyMeshGenerator(BaseMeshGenerator):
             with open(boxed_json_path, "w") as f:
                 json.dump({"boxed_physical_tags": boxed_physical_tags}, f)
             self.log_message(f"Boxed parts metadata saved: {len(boxed_physical_tags)} boxed volumes")
+            
+            # 7. Export aggregated quality data for viewer coloring
+            if aggregated_quality:
+                quality_json_path = output_file.replace(".msh", ".quality.json")
+                
+                # Calculate combined metrics
+                q_vals = list(aggregated_quality.values())
+                combined_metrics = {
+                    'sicn_min': min(q_vals) if q_vals else 0,
+                    'sicn_max': max(q_vals) if q_vals else 1,
+                    'sicn_avg': sum(q_vals) / len(q_vals) if q_vals else 0.5
+                }
+                
+                # Add gamma metrics if available
+                if aggregated_gamma:
+                    g_vals = list(aggregated_gamma.values())
+                    combined_metrics['gamma_min'] = min(g_vals)
+                    combined_metrics['gamma_max'] = max(g_vals)
+                    combined_metrics['gamma_avg'] = sum(g_vals) / len(g_vals)
+                
+                quality_data = {
+                    'per_element_quality': aggregated_quality,
+                    'per_element_gamma': aggregated_gamma,
+                    'per_element_skewness': aggregated_skewness,
+                    'per_element_aspect_ratio': aggregated_aspect_ratio,
+                    'quality_metrics': combined_metrics,
+                    'quality_threshold_10': 0.1
+                }
+                
+                with open(quality_json_path, "w") as f:
+                    json.dump(quality_data, f)
+                self.log_message(f"Combined quality data saved: {len(aggregated_quality)} elements")
             
             self.finalize_gmsh()
             self.log_message(f"Assembly complete: {len(created_entities)} parts merged")

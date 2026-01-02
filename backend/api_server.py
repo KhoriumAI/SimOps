@@ -1372,18 +1372,32 @@ try:
     fallback_quality = {{}} # tag -> quality
     
     try:
-        # Get all 2D element tags
+        # Get all 2D element tags (triangles)
         tri_tags_all = []
         for et, tags in zip(elem_types, elem_tags_list):
-            if et in [2, 9]: # Triangles
+            if et in [2, 9]: # Triangles (3-node and 6-node)
                  tri_tags_all.extend(tags)
         
         if tri_tags_all:
              min_sicn = gmsh.model.mesh.getElementQualities(tri_tags_all, "minSICN")
              for i, tag in enumerate(tri_tags_all):
                  fallback_quality[int(tag)] = float(min_sicn[i])
-    except:
-        pass
+        
+        # CRITICAL FIX: Also compute quality for tetrahedra
+        # Boundary faces extracted from tets use the parent tet's element ID
+        # So we need tet quality values for those lookups
+        tet_tags_all = []
+        for et, tags in zip(elem_types, elem_tags_list):
+            if et in [4, 11]: # 4-node and 10-node tetrahedra
+                 tet_tags_all.extend(tags)
+        
+        if tet_tags_all:
+             tet_sicn = gmsh.model.mesh.getElementQualities(tet_tags_all, "minSICN")
+             for i, tag in enumerate(tet_tags_all):
+                 fallback_quality[int(tag)] = float(tet_sicn[i])
+             print(f"DEBUG: Computed quality for {{len(tet_tags_all)}} tetrahedra", file=sys.stderr)
+    except Exception as qe:
+        print(f"DEBUG: Quality computation error: {{qe}}", file=sys.stderr)
 
     # Debug: Print found types
     print(f"DEBUG: Found element types: {{list(elem_types)}}", file=sys.stderr)
