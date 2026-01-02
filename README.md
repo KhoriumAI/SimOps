@@ -113,3 +113,30 @@ Always include a `README.md` inside any new folder to document its purpose.
 
 ### 4. Continuous Reference
 Reference the `docs/adr/` folder frequently to understand past decisions and maintain alignment with the project's evolution.
+
+### 5. Git Commit Guidelines
+
+To maintain a clean and searchable history, commit titles must follow this structure: `<type>/<description>` (which results in `<short-hash> - <type>/<description>` in logs).
+
+**Format:**
+`<type>/<short_description_in_snake_case_or_kebab_case>`
+
+**Standard Types:**
+- `feat/`: New feature or functionality
+- `fix/`: Bug fix
+- `debug/`: Debugging changes or temporary logging
+- `refactor/`: Code changes that neither fix a bug nor add a feature
+- `docs/`: Documentation updates
+- `chore/`: Maintenance tasks (dependencies, build configs, etc.)
+- `test/`: Adding or updating tests
+- `perf/`: Performance improvements
+- `style/`: Changes that do not affect the meaning of the code (white-space, formatting, etc.)
+
+**Examples:**
+- `fc995d2a - fix3/requirements-txt`
+- `d5155b72 - fix3/requirements-txt`
+- `e1ebdcb1 - fix/login_Crash`
+- `58aacdc5 - fix/WAF_update`
+- `0e733b26 - fix/mesh_size_hardcoded`
+- `a1b2c3d4 - feat/add_hexa_mesher`
+- `e5f6g7h8 - debug/trace_vtk_errors`

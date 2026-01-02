@@ -1,4 +1,8 @@
 
+import sys
+import os
+sys.path.append(os.getcwd())
+
 from backend.api_server import app
 from backend.models import db, User
 from werkzeug.security import generate_password_hash
