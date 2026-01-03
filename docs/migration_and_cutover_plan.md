@@ -1,31 +1,31 @@
-# Staging Environment Migration and Domain Cutover Plan
+# Promoting Dev (Sandbox) to Staging (Production) Plan
 
 ## Executive Summary
 
-This plan enables you to clone the Dev environment to Staging and perform a seamless domain cutover (app.khorium.ai -> Staging). After execution, Staging will be a hot standby capable of accepting production traffic within 60 seconds.
+This plan outlines the steps to "Promote" your current working state on **Dev (Sandbox)** to the stable **Staging (Production)** environment and perform the final domain cutover (`app.khorium.ai` -> Staging). After execution, Staging will be your official stable Production environment.
 
 ---
 
 ## Current Infrastructure State (Discovered)
 
-| Component | Dev (Production) | Staging | Parity Gap |
+| Component | Dev (Sandbox) | Staging (Production) | Parity Gap |
 |-----------|-----------------|---------|------------|
 | ALB | webdev-alb (HTTP:80) | webdev-alb-stg (HTTP:80) | STOP: No HTTPS listener |
-| CloudFront | E352AHA7L040MU | [x] None | STOP: Missing |
+| CloudFront | E352AHA7L040MU | [x] None | STOP: Missing (Staging needs CF or HTTPS ALB) |
 | SSL Cert (us-east-1) | *.khorium.ai [x] | (Shared) | [x] Ready for CF |
 | SSL Cert (us-west-1) | *.khorium.ai [x] | (Available, not attached) | STOP: Needs HTTPS listener |
-| RDS | khorium-webdev-db | khorium-staging-db (Empty) | STOP: No Data |
-| S3 Frontend | muaz-mesh-web-dev | muaz-mesh-web-staging | STOP: May be stale |
-| S3 Assets | muaz-webdev-assets | (Same bucket?) | TBD |
+| RDS | khorium-webdev-db | khorium-staging-db (Empty) | STOP: No Production Data |
+| S3 Frontend | muaz-mesh-web-dev | muaz-mesh-web-staging | STOP: Needs final build |
+| S3 Assets | muaz-webdev-assets | (Same bucket?) | TBD (Isolation recommended) |
 | EC2 | mesh-gen-web-prod-2 | mesh-gen-web-staging | [x] t3.micro parity |
 
 ---
 
-## Phase 1: RDS Database Migration
+## Phase 1: RDS Production Data Promotion
 
 ### 1.1 Overview
 
-The goal is to create a point-in-time clone of the production database on the staging RDS instance. This ensures users, projects, mesh results, and activity logs are available in staging.
+The goal is to promote a verified snapshot of your **Dev (Sandbox)** database to the **Staging (Production)** RDS instance. This ensures users, projects, and records move to the stable environment.
 
 > [!CAUTION]
 > Data Sensitivity: User passwords (hashed) and email addresses will be copied. Ensure staging access is restricted.

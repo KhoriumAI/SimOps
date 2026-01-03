@@ -1,17 +1,17 @@
-# Staging Environment Emergency Deployment Cheat Sheet
+# Staging (Production) Environment Deployment Cheat Sheet
 
-**Target Time:** <5 minutes to deploy hotfix  
+**Goal:** Promote stable code from Sandbox (Dev) to Production (Staging).  
 **Last Updated:** 2026-01-02
 
 ---
 
 ## Wiki Entry / Quick Reference (Copy-Paste)
 
-**To Deploy to Staging:** git push origin staging (Frontend only; see Backend Manual steps below)
+**To Promote to Production (Staging):** `git push origin staging` (Frontend only; see Backend Manual steps below)
 
-**To View Staging:** http://muaz-mesh-web-staging.s3-website-us-west-1.amazonaws.com
+**Stable Production URL:** http://muaz-mesh-web-staging.s3-website-us-west-1.amazonaws.com
 
-**To Promote Staging to Prod:** "Go to Route53 -> Hosted Zones -> Edit Record 'app' -> Change Alias Target to webdev-alb-stg-699722072.us-west-1.elb.amazonaws.com."
+**Final Cutover:** "Go to Route53 -> Hosted Zones -> Edit Record 'app' -> Change Alias Target to `webdev-alb-stg-699722072.us-west-1.elb.amazonaws.com`."
 
 ---
 

@@ -1,22 +1,21 @@
-# ADR-001: Staging Failover Strategy
+# ADR-001: Environment Topology and Stability Strategy
 
 **Status:** Proposed  
 **Date:** 2026-01-02  
 **Deciders:** CTO, Lead Architect  
-**Technical Story:** Enable CTO to perform emergency domain cutover to Staging without dependency on DevOps.
+**Technical Story:** Define the role of Staging as the stable Production environment and Dev as the experimental Sandbox.
 
 ---
 
 ## Context and Problem Statement
 
-The Khorium MeshGen platform runs on a single production environment (Dev). If the production EC2 instance, ALB, or RDS becomes unavailable, the application is offline with no failover path.
+Currently, the Khorium MeshGen platform live domain (`app.khorium.ai`) points to the **Dev** environment. This is risky because Dev is used for experimental features and can break frequently.
 
-Muaz has provisioned a Staging environment. We need to define:
+The **Staging** environment has been provisioned to serve as the stable **Production** home for the application. We need to formalize:
 
-1. **What level of parity** should Staging maintain with Production?
-2. **What is the failover trigger** and who can execute it?
-3. **What is the Recovery Time Objective (RTO)** and Recovery Point Objective (RPO)?
-4. **What operational procedures** must be documented?
+1. **Environmental Roles:** Staging = Stable Production; Dev = Experimental Sandbox.
+2. **Promotion Mechanism:** How code and data move from Sandbox (Dev) to Production (Staging).
+3. **Data Parity:** How Production (Staging) stays isolated but updated with verified data.
 
 ---
 
@@ -119,22 +118,20 @@ Muaz has provisioned a Staging environment. We need to define:
 
 ## Decision Outcome
 
-**Chosen Option:** **Option 2 - Warm Standby with Periodic Sync**
+**Chosen Option:** **Staging as Permanent Stable Production**
 
 ### Rationale
 
-1. **RTO of 5-10 minutes** is acceptable for a mesh generation service (not a real-time trading platform).
-2. **RPO of 6 hours** means at most 6 hours of projects/meshes could be lost, which is recoverable (users can re-upload).
-3. **Cost is minimal** (~$10/month additional for cron).
-4. **CTO can execute failover** with a single Route53 change.
+1. **Safety:** By moving the main domain to Staging, experimental work on Dev can continue without causing downtime for users.
+2. **Isolation:** Production (Staging) uses its own RDS, preventing experimental database schema changes from corrupting live user data.
+3. **Promotion Workflow:** Dev serves as the staging ground for features; once verified, they are "promoted" to Staging (Production).
 
 ### Implementation Requirements
 
-1. **Periodic Database Sync:** cron job on Production EC2 runs `pg_dump` -> S3 -> `pg_restore` to Staging every 6 hours.
-2. **Shared S3 Bucket:** Both environments use `muaz-webdev-assets` for user files (acceptable risk for failover scenario).
-3. **CORS Pre-Configuration:** Staging `.env` must include `https://app.khorium.ai` in `CORS_ORIGINS` before any incident.
-4. **SSL Readiness:** Staging must have either a CloudFront distribution or HTTPS ALB listener pre-configured.
-5. **Runbook:** CTO has documented commands for DNS cutover.
+1. **Promotion Sync:** A controlled process (manual or automated) to move verified data and code from Dev to Staging.
+2. **Production DNS:** The `app.khorium.ai` domain must be pointed to the Staging ALB.
+3. **SSL at Edge:** Staging must terminate SSL (`*.khorium.ai`) via ALB or CloudFront.
+4. **Environment Variables:** Staging config must be finalized for Production (RDS endpoints, S3 buckets, CORS).
 
 ---
 

@@ -1,13 +1,17 @@
-
 import sys
 import os
-sys.path.append(os.getcwd())
+from pathlib import Path
 
-from backend.api_server import app
-from backend.models import db, User
+# Add project root to path
+root_dir = Path(__file__).parent.parent
+sys.path.append(str(root_dir))
+
+from api_server import create_app
+from models import db, User
 from werkzeug.security import generate_password_hash
 
 def add_user():
+    app = create_app()
     with app.app_context():
         email = "mark@khorium.ai"
         existing_user = User.query.filter_by(email=email).first()
