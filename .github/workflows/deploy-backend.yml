@@ -29,98 +29,13 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
-          # Removed set -e to ensure we see all output even if a command fails
           script: |
-            echo "[DEBUG] Current user: $(whoami)"
-            echo "[DEBUG] Home directory: $HOME"
-            echo "[DEBUG] Listing /home content:"
-            ls -la /home || true
-            
-            echo "[DEPLOY] Searching for project directory..."
-            PROJECT_ROOT=""
-            for dir in "/home/ec2-user/backend" "/home/ec2-user/MeshPackageLean" "/home/ubuntu/backend" "/home/ubuntu/MeshPackageLean"; do
-              if [ -d "$dir" ]; then
-                PROJECT_ROOT="$dir"
-                break
-              fi
-            done
-            
-            if [ -z "$PROJECT_ROOT" ]; then
-              echo "[ERROR] Could not find any project directory. Tried: /home/ec2-user/backend, /home/ec2-user/MeshPackageLean, /home/ubuntu/backend, /home/ubuntu/MeshPackageLean"
-              ls -la $HOME || true
-              exit 1
-            fi
-            
-            echo "[DEPLOY] Found project root: $PROJECT_ROOT"
-            cd "$PROJECT_ROOT"
-            
-            echo "[DEPLOY] Pulling latest code..."
-            git fetch --all && git reset --hard origin/main
-            if [ $? -ne 0 ]; then echo "[ERROR] Git reset failed"; exit 1; fi
-            git log --oneline -1
-            
-            echo "[DEPLOY] Activating virtual environment..."
-            ACTIVATE_PATH=""
-            for p in "venv/bin/activate" "backend/venv/bin/activate" "../venv/bin/activate"; do
-              if [ -f "$p" ]; then
-                ACTIVATE_PATH="$p"
-                break
-              fi
-            done
-            
-            if [ -z "$ACTIVATE_PATH" ]; then
-              echo "[ERROR] Could not find venv/bin/activate"
-              find . -maxdepth 3 -name activate
-              exit 1
-            fi
-            
-            source "$ACTIVATE_PATH"
-            echo "[DEBUG] Python path: $(which python)"
-            
-            echo "[DEPLOY] Installing dependencies..."
-            REQS=""
-            for r in "backend/requirements.txt" "requirements.txt"; do
-              if [ -f "$r" ]; then
-                REQS="$r"
-                break
-              fi
-            done
-            
-            if [ -n "$REQS" ]; then
-              pip install -r "$REQS" 2>&1
-              if [ $? -ne 0 ]; then echo "[ERROR] pip install failed"; exit 1; fi
-            else
-              echo "[WARNING] No requirements.txt found"
-            fi
-            
-            echo "[DEPLOY] Restarting services..."
-            # Try both possible service names found in docs
-            for svc in "gunicorn" "meshgen"; do
-              if sudo systemctl list-unit-files | grep -q "^$svc.service"; then
-                echo "[DEPLOY] Restarting $svc.service..."
-                sudo systemctl restart "$svc"
-              fi
-            done
-            
-            echo "[OK] Deployment sequence finished!"
-
-      - name: Health Check
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "[HEALTH] Check on port 3000..."
-            if curl -sf http://localhost:3000/api/health; then
-              echo "[OK] Port 3000 healthy"
-            else
-              echo "[HEALTH] Check on port 5000..."
-              if curl -sf http://localhost:5000/api/health; then
-                echo "[OK] Port 5000 healthy"
-              else
-                echo "[ERROR] Both 3000 and 5000 failed"
-                sudo journalctl -u gunicorn -n 20 --no-pager || sudo journalctl -u meshgen -n 20 --no-pager
-                exit 1
-              fi
-            fi
+            echo "--- BASIC CONNECTIVITY TEST ---"
+            echo "Current User: $(whoami)"
+            echo "Hostname: $(hostname)"
+            echo "PWD: $(pwd)"
+            echo "--- LISTING HOME ---"
+            ls -la /home
+            echo "--- LISTING CURRENT DIR ---"
+            ls -la
+            echo "--- END BASIC TEST ---"
