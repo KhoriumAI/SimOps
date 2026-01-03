@@ -1435,14 +1435,13 @@ def parse_msh_file(msh_filepath: str):
         try:
             with open(data_file, 'r') as f:
                 qdata = json.load(f)
-                # Metrics might be nested under quality_metrics or at root
-                metrics_container = qdata.get('quality_metrics', qdata)
-                
-                per_element_quality = {int(k): v for k, v in metrics_container.get('per_element_quality', {}).items()}
-                per_element_gamma = {int(k): v for k, v in metrics_container.get('per_element_gamma', {}).items()}
-                per_element_skewness = {int(k): v for k, v in metrics_container.get('per_element_skewness', {}).items()}
-                per_element_aspect_ratio = {int(k): v for k, v in metrics_container.get('per_element_aspect_ratio', {}).items()}
-                per_element_min_angle = {int(k): v for k, v in metrics_container.get('per_element_min_angle', {}).items()}
+                # per_element_* arrays are stored at root level in quality.json
+                # (quality_metrics is a separate key with summary stats only)
+                per_element_quality = {int(k): v for k, v in qdata.get('per_element_quality', {}).items()}
+                per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
+                per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
+                per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
+                per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
                 print(f"[MESH PARSE] Loaded quality data from {data_file.name} for {len(per_element_quality)} elements")
         except Exception as e:
             print(f"[MESH PARSE] Failed to load quality data from {data_file}: {e}")
