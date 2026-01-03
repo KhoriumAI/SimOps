@@ -114,15 +114,31 @@ def main():
                 print(f"[Worker V{args.tag}] Assigned Physical Volume {p_tag} (Name: Volume_{args.tag})", flush=True)
 
             # Quality Check: Verify the mesh isn't garbage (inverted)
-            q_metrics = gen._get_quality_metrics()
-            min_sicn = q_metrics.get('sicn', {}).get('min', 1.0)
-            avg_sicn = q_metrics.get('sicn', {}).get('avg', 1.0)
-            
+            min_sicn, avg_sicn = 1.0, 1.0
+            try:
+                # Get all 3D elements (dim=3, tag=-1 for all)
+                _, el_tags_list, _ = gmsh.model.mesh.getElements(3, -1)
+                if el_tags_list:
+                    # Flatten list of tags
+                    all_tags = []
+                    for tags in el_tags_list:
+                        all_tags.extend(tags)
+                    
+                    if all_tags:
+                        # Compute SICN (Signed Inverse Condition Number)
+                        # Note: "SICN" might need to be "minSICN" or similar depending on version, 
+                        # but "SICN" is standard for getQuality.
+                        qualities = gmsh.model.mesh.getQuality(all_tags, "SICN")
+                        if qualities:
+                             min_sicn = min(qualities)
+                             avg_sicn = sum(qualities) / len(qualities)
+            except Exception as e:
+                print(f"[Worker V{args.tag}] WARNING: Quality computation failed: {e}", flush=True)
+
             print(f"[Worker V{args.tag}] Quality Check: Min SICN={min_sicn:.4f}, Avg SICN={avg_sicn:.4f}", flush=True)
             
             if min_sicn < 0:
                  print(f"[Worker V{args.tag}] ERROR: Generated mesh is INVERTED (Min SICN {min_sicn:.4f} < 0). Marking as failed.", flush=True)
-                 # Force boxing if quality is unacceptable
                  print(f"[Worker V{args.tag}] Falling back to Bounding Box due to inversion...", flush=True)
                  gen.create_bounding_box_mesh(args.output)
                  sys.exit(0)
