@@ -812,35 +812,76 @@ def register_routes(app):
             db.session.add(feedback)
             db.session.commit()
             
-            # Send email notification to admin?
             # Send Slack notification
             slack_webhook = app.config.get('SLACK_WEBHOOK_URL') or os.environ.get('SLACK_WEBHOOK_URL')
             if slack_webhook:
                 try:
                     import requests
+                    
+                    # Formatting helpers
+                    f_type = data.get('type', 'feedback').lower()
+                    f_email = data.get('userEmail') or 'Anonymous'
+                    f_msg = data.get('message')
+                    f_url = data.get('url')
+                    f_job = data.get('jobId') or 'N/A'
+                    
+                    # Style based on type
+                    if 'bug' in f_type:
+                        color = "#dd2e44" # Red
+                        icon = ":bug:"
+                        title = "New Bug Report"
+                    elif 'feature' in f_type:
+                        color = "#ffcc4d" # Yellow
+                        icon = ":bulb:"
+                        title = "New Feature Request"
+                    else:
+                        color = "#3b88c3" # Blue
+                        icon = ":speech_balloon:"
+                        title = "New Feedback"
+                        
+                    # Construct rich payload
                     slack_msg = {
-                        "text": f"New {data.get('type', 'feedback').upper()} from {data.get('userEmail') or 'Anonymous'}",
-                        "blocks": [
+                        "text": "Attention: @Aaron Wu @Mark Mukminov", # Restoring mention line
+                        "attachments": [
                             {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": f"*New {data.get('type', 'feedback').upper()}*\nFrom: {data.get('userEmail') or 'Anonymous'}"
-                                }
-                            },
-                            {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": f"*{data.get('message')}*"
-                                }
-                            },
-                            {
-                                "type": "context",
-                                "elements": [
+                                "color": color,
+                                "blocks": [
                                     {
-                                        "type": "mrkdwn",
-                                        "text": f"URL: {data.get('url')}\nJob ID: {data.get('jobId') or 'N/A'}"
+                                        "type": "header",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": f"{icon} {title}",
+                                            "emoji": True
+                                        }
+                                    },
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {
+                                                "type": "mrkdwn",
+                                                "text": f"*From:*\n{f_email}"
+                                            },
+                                            {
+                                                "type": "mrkdwn",
+                                                "text": f"*Type:*\n{f_type.title()}"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "section",
+                                        "text": {
+                                            "type": "mrkdwn",
+                                            "text": f"*Message:*\n{f_msg}"
+                                        }
+                                    },
+                                    {
+                                        "type": "context",
+                                        "elements": [
+                                            {
+                                                "type": "mrkdwn",
+                                                "text": f":calendar: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}  |  :globe_with_meridians: <{f_url}|View Page>  |  :label: `{f_job}`"
+                                            }
+                                        ]
                                     }
                                 ]
                             }
@@ -849,6 +890,7 @@ def register_routes(app):
                     requests.post(slack_webhook, json=slack_msg, timeout=5)
                 except Exception as slack_err:
                     print(f"[SLACK ERROR] Failed to send notification: {slack_err}")
+
             
             return jsonify({"success": True, "id": feedback.id})
 

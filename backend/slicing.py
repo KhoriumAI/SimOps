@@ -190,11 +190,16 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
     vertex_count = 0
     for key, data in face_map.items():
         neighbors = data["neighbors"]
-        # Keep only neighbors that are in the 'kept' set
-        kept_neighbors = [n_idx for n_idx in neighbors if is_kept[n_idx]]
         
-        # If exactly 1 neighbor is kept, this face is part of the shell of the cut volume
-        if len(kept_neighbors) == 1:
+        # For crinkle cut: show faces that are NEWLY exposed by the cut
+        # This means faces where one neighbor is kept and the other is discarded
+        # (i.e., internal faces that became exposed at the cut plane)
+        kept_neighbors = [n_idx for n_idx in neighbors if is_kept[n_idx]]
+        discarded_neighbors = [n_idx for n_idx in neighbors if not is_kept[n_idx]]
+        
+        # Only include faces that are at the CUT boundary (one kept, one discarded)
+        # This excludes original external faces (which have only 1 neighbor total)
+        if len(kept_neighbors) == 1 and len(discarded_neighbors) >= 1:
             quality = quality_map.get(str(data["tag"]), quality_map.get(int(data["tag"]), 1.0))
             color = get_color(quality)
             
