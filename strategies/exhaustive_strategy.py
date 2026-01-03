@@ -1381,12 +1381,20 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             if os.path.exists(worker_msh):
                 return tag, True, "cached"
             
+            # Retrieve current strategy from config or default to HXT (fastest)
+            current_strategy = "tet_hxt_optimized"
+            try:
+                if self.config and self.config.mesh_params and self.config.mesh_params.mesh_strategy:
+                    current_strategy = self.config.mesh_params.mesh_strategy
+            except: pass
+
             cmd = [
                 sys.executable,
                 worker_script,
                 "--input", input_file,
                 "--output", worker_msh,
-                "--tag", str(tag)
+                "--tag", str(tag),
+                "--strategy", str(current_strategy)
             ]
             
             try:
