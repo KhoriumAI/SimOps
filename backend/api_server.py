@@ -217,111 +217,111 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             try:
                 line_count = 0
                 for line in process.stdout:
-                line = line.strip()
-                if line:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    log_line = f"[{timestamp}] {line}"
-                    logs.append(log_line)
-                    print(f"[MESH GEN] {log_line}")
-                    line_count += 1
-                    
-                    # Update logs in database every 5 lines
-                    if line_count % 5 == 0:
-                        mesh_result = db.session.get(MeshResult, result_id)
-                        if mesh_result:
-                            mesh_result.logs = logs.copy()
-                            db.session.commit()
-
-                    if line.startswith('{') and '"success"' in line:
-                        try:
-                            result = json.loads(line)
+                    line = line.strip()
+                    if line:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        log_line = f"[{timestamp}] {line}"
+                        logs.append(log_line)
+                        print(f"[MESH GEN] {log_line}")
+                        line_count += 1
+                        
+                        # Update logs in database every 5 lines
+                        if line_count % 5 == 0:
                             mesh_result = db.session.get(MeshResult, result_id)
-                            if result.get('success'):
-                                mesh_result.strategy = result.get('strategy')
-                                mesh_result.score = result.get('score')
-                                local_output_path = result.get('output_file')
-                                mesh_result.quality_metrics = result.get('quality_metrics', {})
-                                mesh_result.completed_at = datetime.utcnow()
-                                mesh_result.processing_time = time.time() - start_time
-                                mesh_result.node_count = result.get('total_nodes')
-                                mesh_result.element_count = result.get('total_elements')
-                                
-                                # Get output file size
-                                if local_output_path and Path(local_output_path).exists():
-                                    mesh_result.output_size = Path(local_output_path).stat().st_size
-                                    
-                                    # Try to load full results from the _result.json file if available
-                                    # (Contains heavy arrays that are sanitized from the stdout JSON)
-                                    full_result_path = Path(local_output_path).with_name(Path(local_output_path).stem + "_result.json")
-                                    if full_result_path.exists():
-                                        try:
-                                            with open(full_result_path, 'r') as f:
-                                                full_data = json.load(f)
-                                                # Merge quality data back into result for processing
-                                                for key in ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio']:
-                                                    if key in full_data and (not result.get(key)):
-                                                        result[key] = full_data[key]
-                                            print(f"[MESH GEN] Loaded quality data from {full_result_path.name}")
-                                        except Exception as e:
-                                            print(f"[MESH GEN] Warning: Could not load full result JSON: {e}")
+                            if mesh_result:
+                                mesh_result.logs = logs.copy()
+                                db.session.commit()
 
-                                    # Save quality data to a JSON file alongside the mesh
-                                    per_element_quality = result.get('per_element_quality', {})
-                                    per_element_gamma = result.get('per_element_gamma', {})
-                                    per_element_skewness = result.get('per_element_skewness', {})
-                                    per_element_aspect_ratio = result.get('per_element_aspect_ratio', {})
-                                    quality_metrics = result.get('quality_metrics', {})
+                        if line.startswith('{') and '"success"' in line:
+                            try:
+                                result = json.loads(line)
+                                mesh_result = db.session.get(MeshResult, result_id)
+                                if result.get('success'):
+                                    mesh_result.strategy = result.get('strategy')
+                                    mesh_result.score = result.get('score')
+                                    local_output_path = result.get('output_file')
+                                    mesh_result.quality_metrics = result.get('quality_metrics', {})
+                                    mesh_result.completed_at = datetime.utcnow()
+                                    mesh_result.processing_time = time.time() - start_time
+                                    mesh_result.node_count = result.get('total_nodes')
+                                    mesh_result.element_count = result.get('total_elements')
                                     
-                                    if per_element_quality:
-                                        quality_filepath = Path(local_output_path).with_suffix('.quality.json')
-                                        quality_data = {
-                                            'per_element_quality': per_element_quality,
-                                            'per_element_gamma': per_element_gamma,
-                                            'per_element_skewness': per_element_skewness,
-                                            'per_element_aspect_ratio': per_element_aspect_ratio,
-                                            'quality_metrics': quality_metrics,
-                                            'quality_threshold_10': 0.1,  # 10% threshold
-                                        }
-                                        with open(quality_filepath, 'w') as f:
-                                            json.dump(quality_data, f)
-                                        print(f"[MESH GEN] Saved quality data: {len(per_element_quality)} elements")
-                                    
-                                    # If using S3, upload mesh result to S3
-                                    if use_s3 and user:
-                                        mesh_filename = Path(local_output_path).name
-                                        s3_path = storage.save_local_file(
-                                            local_path=local_output_path,
-                                            filename=mesh_filename,
-                                            user_email=user.email,
-                                            file_type='mesh'
-                                        )
-                                        mesh_result.output_path = s3_path
-                                        print(f"[MESH GEN] Uploaded mesh to S3: {s3_path}")
+                                    # Get output file size
+                                    if local_output_path and Path(local_output_path).exists():
+                                        mesh_result.output_size = Path(local_output_path).stat().st_size
                                         
-                                        # Also upload quality file to S3
+                                        # Try to load full results from the _result.json file if available
+                                        # (Contains heavy arrays that are sanitized from the stdout JSON)
+                                        full_result_path = Path(local_output_path).with_name(Path(local_output_path).stem + "_result.json")
+                                        if full_result_path.exists():
+                                            try:
+                                                with open(full_result_path, 'r') as f:
+                                                    full_data = json.load(f)
+                                                    # Merge quality data back into result for processing
+                                                    for key in ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio']:
+                                                        if key in full_data and (not result.get(key)):
+                                                            result[key] = full_data[key]
+                                                print(f"[MESH GEN] Loaded quality data from {full_result_path.name}")
+                                            except Exception as e:
+                                                print(f"[MESH GEN] Warning: Could not load full result JSON: {e}")
+
+                                        # Save quality data to a JSON file alongside the mesh
+                                        per_element_quality = result.get('per_element_quality', {})
+                                        per_element_gamma = result.get('per_element_gamma', {})
+                                        per_element_skewness = result.get('per_element_skewness', {})
+                                        per_element_aspect_ratio = result.get('per_element_aspect_ratio', {})
+                                        quality_metrics = result.get('quality_metrics', {})
+                                        
                                         if per_element_quality:
-                                            quality_filename = quality_filepath.name
-                                            storage.save_local_file(
-                                                local_path=str(quality_filepath),
-                                                filename=quality_filename,
+                                            quality_filepath = Path(local_output_path).with_suffix('.quality.json')
+                                            quality_data = {
+                                                'per_element_quality': per_element_quality,
+                                                'per_element_gamma': per_element_gamma,
+                                                'per_element_skewness': per_element_skewness,
+                                                'per_element_aspect_ratio': per_element_aspect_ratio,
+                                                'quality_metrics': quality_metrics,
+                                                'quality_threshold_10': 0.1,  # 10% threshold
+                                            }
+                                            with open(quality_filepath, 'w') as f:
+                                                json.dump(quality_data, f)
+                                            print(f"[MESH GEN] Saved quality data: {len(per_element_quality)} elements")
+                                        
+                                        # If using S3, upload mesh result to S3
+                                        if use_s3 and user:
+                                            mesh_filename = Path(local_output_path).name
+                                            s3_path = storage.save_local_file(
+                                                local_path=local_output_path,
+                                                filename=mesh_filename,
                                                 user_email=user.email,
                                                 file_type='mesh'
                                             )
-                                    else:
-                                        mesh_result.output_path = local_output_path
-                                
-                                project.status = 'completed'
-                                project.last_accessed = datetime.utcnow()
-                                logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
-                            else:
-                                error = result.get('error', 'Unknown error')
-                                project.status = 'error'
-                                project.error_message = error
-                                logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {error}")
-                            mesh_result.logs = logs
-                            db.session.commit()
-                        except json.JSONDecodeError:
-                            pass
+                                            mesh_result.output_path = s3_path
+                                            print(f"[MESH GEN] Uploaded mesh to S3: {s3_path}")
+                                            
+                                            # Also upload quality file to S3
+                                            if per_element_quality:
+                                                quality_filename = quality_filepath.name
+                                                storage.save_local_file(
+                                                    local_path=str(quality_filepath),
+                                                    filename=quality_filename,
+                                                    user_email=user.email,
+                                                    file_type='mesh'
+                                                )
+                                        else:
+                                            mesh_result.output_path = local_output_path
+                                    
+                                    project.status = 'completed'
+                                    project.last_accessed = datetime.utcnow()
+                                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
+                                else:
+                                    error = result.get('error', 'Unknown error')
+                                    project.status = 'error'
+                                    project.error_message = error
+                                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {error}")
+                                mesh_result.logs = logs
+                                db.session.commit()
+                            except json.JSONDecodeError:
+                                pass
             finally:
                 with generation_lock:
                     if project_id in running_processes:
