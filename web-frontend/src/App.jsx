@@ -148,10 +148,9 @@ function App() {
 
         if (data.status === 'completed') {
           // Always fetch final mesh when completed (replaces preview)
-          if (!meshData || meshData.isPreview) {
-            fetchMeshData(currentProject)
-            setColorMode('quality') // Auto-switch to quality view on completion
-          }
+          // Always fetch final mesh when completed (replaces preview or old mesh)
+          fetchMeshData(currentProject)
+          setColorMode('quality') // Auto-switch to quality view on completion
           // Save mesh duration
           if (meshStartTime) {
             setLastMeshDuration(Date.now() - meshStartTime)
@@ -461,7 +460,7 @@ function App() {
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
         setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
-        setMeshData(null) // Clear existing mesh to show generation is starting
+        // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
       } else {

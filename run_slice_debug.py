@@ -11,7 +11,7 @@ from slicing import parse_msh_for_slicing, generate_slice_mesh
 
 def test_slicing():
     # Adjust path to where I am running
-    msh_path = Path(r"c:\Users\markm\Downloads\MeshPackageLean\apps\cli\generated_meshes\Cube_mesh.msh")
+    msh_path = Path(r"c:\Users\markm\Downloads\MeshPackageLean\apps\cli\generated_meshes\core_sample_mesh.msh")
     
     if not msh_path.exists():
         print(f"Error: {msh_path} not found")

@@ -775,6 +775,9 @@ def register_routes(app):
             center = (bbox_min + bbox_max) / 2.0
             size = bbox_max - bbox_min
             
+            print(f"[SLICE DEBUG] Mesh Bounds: Min={bbox_min}, Max={bbox_max}")
+            print(f"[SLICE DEBUG] Center={center}, Size={size}")
+            
             # Define plane
             plane_origin = center.tolist()
             if axis == 'x':
@@ -786,7 +789,9 @@ def register_routes(app):
             else: # z
                 plane_normal = [0, 0, 1]
                 plane_origin[2] = bbox_max[2] - (offset_percent / 100.0) * size[2]
-                
+            
+            print(f"[SLICE DEBUG] Cut Plane: Normal={plane_normal}, Origin={plane_origin}")
+            
             # Generate slice
             print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
             slice_data = generate_slice_mesh(nodes, elements, quality_map, plane_origin, plane_normal)

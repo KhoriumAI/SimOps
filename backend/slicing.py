@@ -254,104 +254,92 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
 def parse_msh_for_slicing(msh_path):
     """
     Robustly parses Gmsh (2.2 or 4.1) files for volume elements and nodes.
-    Supports ASCII files.
+    Uses meshio for full binary/ASCII support.
     """
-    nodes = {}
-    vol_elements = [] # (type, tag, node_ids)
-    
-    # Gmsh volume element types and their node counts
-    VOL_TYPES = {
-        4: 4,   # Tet4
-        11: 10, # Tet10
-        29: 20, # Tet20
-        5: 8,   # Hex8
-        12: 27, # Hex27
-        6: 6,   # Prism6
-        13: 18, # Prism18
-        7: 5,   # Pyramid5
-        14: 14, # Pyramid14
-    }
-    
+    import meshio
+    import numpy as np
+
     try:
-        with open(msh_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        mesh = meshio.read(msh_path)
     except Exception as e:
-        print(f"Error reading Msh: {e}")
+        print(f"Error reading Msh with meshio: {e}")
         return {}, []
 
-    # Detect Version
-    msh_version = "4.1"
-    if '$MeshFormat' in content:
-        try:
-            fmt = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0].split()
-            msh_version = fmt[0]
-        except: pass
-
-    # Parse Nodes
-    if '$Nodes' in content:
-        try:
-            nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
-            if msh_version.startswith('4'):
-                # MSH 4.x
-                header = nodes_section[0].split()
-                num_blocks = int(header[0])
-                curr_line = 1
-                for _ in range(num_blocks):
-                    block_info = nodes_section[curr_line].split()
-                    curr_line += 1
-                    num_nodes_in_block = int(block_info[3])
-                    
-                    node_tags = [int(nodes_section[curr_line + i]) for i in range(num_nodes_in_block)]
-                    curr_line += num_nodes_in_block
-                    
-                    for i in range(num_nodes_in_block):
-                        coords = list(map(float, nodes_section[curr_line + i].split()))
-                        nodes[node_tags[i]] = coords[:3]
-                    curr_line += num_nodes_in_block
-            else:
-                # MSH 2.x
-                total_nodes = int(nodes_section[0])
-                for i in range(1, total_nodes + 1):
-                    parts = nodes_section[i].split()
-                    nodes[int(parts[0])] = [float(parts[1]), float(parts[2]), float(parts[3])]
-        except Exception as e:
-            print(f"Error parsing nodes: {e}")
-
-    # Parse Elements
-    if '$Elements' in content:
-        try:
-            elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
-            if msh_version.startswith('4'):
-                # MSH 4.x
-                header = elements_section[0].split()
-                num_blocks = int(header[0])
-                curr_line = 1
-                for _ in range(num_blocks):
-                    block_info = elements_section[curr_line].split()
-                    if not block_info: break
-                    entity_dim = int(block_info[0])
-                    el_type = int(block_info[2])
-                    num_els = int(block_info[3])
-                    curr_line += 1
-                    
-                    if entity_dim == 3 and el_type in VOL_TYPES:
-                        for i in range(num_els):
-                            parts = list(map(int, elements_section[curr_line + i].split()))
-                            vol_elements.append((el_type, parts[0], parts[1:]))
-                    curr_line += num_els
-            else:
-                # MSH 2.x
-                total_els = int(elements_section[0])
-                for i in range(1, total_els + 1):
-                    parts = list(map(int, elements_section[i].split()))
-                    el_type = parts[1]
-                    num_tags = parts[2]
-                    if el_type in VOL_TYPES:
-                        el_tag = parts[0]
-                        node_ids = parts[3 + num_tags:]
-                        vol_elements.append((el_type, el_tag, node_ids))
-        except Exception as e:
-            print(f"Error parsing elements: {e}")
+    # Extract nodes
+    # mesh.points is simple [N, 3] array
+    # Node IDs in meshio are usually sequential 0-indexed if not explicitly provided.
+    # However, Gmsh I/O in meshio tries to preserve original tags if possible, 
+    # but mesh.points is just coordinates.
+    # We will assume 0-based indexing for internal usage, 
+    # but we need to match element connectivity.
+    
+    # Meshio elements are stored in mesh.cells: [('tetra', [[n1,n2,n3,n4], ...]), ...]
+    # The node indices in mesh.cells are 0-based indices into mesh.points.
+    
+    nodes = {i: pt for i, pt in enumerate(mesh.points)}
+    
+    vol_elements = [] # (type, tag, node_ids)
+    
+    # Gmsh volume element types mapping to meshio cell types
+    # Tet4 -> 'tetra'
+    # Tet10 -> 'tetra10'
+    # Hex8 -> 'hexahedron'
+    # Hex27 -> 'hexahedron27'
+    # Prism6 -> 'wedge'
+    # Pyramid5 -> 'pyramid'
+    
+    # We map back to Gmsh element type codes for consistency with generate_slice_mesh
+    TYPE_MAP = {
+        'tetra': 4,
+        'tetra10': 11,
+        'hexahedron': 5,
+        'hexahedron20': 17, # meshio name might vary
+        'hexahedron27': 12,
+        'wedge': 6,
+        'pyramid': 7
+    }
+    
+    count = 0
+    for cell_block in mesh.cells:
+        cell_type = cell_block.type
+        data = cell_block.data # Array of node indices
+        
+        if cell_type in TYPE_MAP:
+            gmsh_type = TYPE_MAP[cell_type]
             
+            # We don't have original element tags easily via meshio unless we look at cell_data
+            # But for slicing we just need *a* tag (can be sequential).
+            # If we want quality colors, we need the original tag if the quality map uses original tags.
+            # API Server parses quality using mesh.cell_data['gmsh:element_id'] if available.
+            # We should try to do the same to align colors.
+            
+            real_ids = None
+            # meshio >= 4.0 stores cell_data as dict of lists (one per block)
+            if hasattr(mesh, 'cell_data') and 'gmsh:physical' in mesh.cell_data:
+                # Actually we need element IDs, typically 'gmsh:geometrical' or just implicit
+                # 'gmsh:element_id' is sometimes present
+                pass
+                
+            # Try to find element IDs
+            if 'gmsh:element_id' in mesh.cell_data:
+                 # Check if we have data for this block (mesh.cell_data is dict: name -> list of arrays)
+                 # We need to find the index of this cell_block
+                 # meshio < 5: cell_data keys point to list of arrays matching cells list order
+                 # Let's try to match by index
+                 try:
+                     block_idx = mesh.cells.index(cell_block)
+                     real_ids = mesh.cell_data['gmsh:element_id'][block_idx]
+                 except: pass
+
+            for i, node_indices in enumerate(data):
+                tag = int(real_ids[i]) if real_ids is not None else (count + i + 1)
+                
+                # meshio returns 0-based indices, which matches our new 'nodes' dict keys
+                # So we can just use them directly.
+                vol_elements.append((gmsh_type, tag, node_indices.tolist()))
+            
+            count += len(data)
+            
+    print(f"[PARSER] Loaded {len(nodes)} nodes and {len(vol_elements)} volume elements via meshio")
     return nodes, vol_elements
 
