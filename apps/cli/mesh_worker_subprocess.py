@@ -1246,11 +1246,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 return generate_conformal_hex_test(cad_file, output_dir, quality_params)
         
         # Regular Hex Dominant (subdivision approach)
-        if 'Hex Dominant' in mesh_strategy:
+        if 'Hex Dominant' in mesh_strategy or 'Hex-Dominant' in mesh_strategy or 'hex_dominant' in mesh_strategy:
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
-        if 'GPU Delaunay' in mesh_strategy:
+        if 'GPU Delaunay' in mesh_strategy or 'gpu_delaunay' in mesh_strategy:
             vprint("[INIT] Loading GPU mesher...", flush=True)
             try:
                 from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE
@@ -1262,12 +1262,12 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
             
         # Polyhedral (Dual)
-        if 'Polyhedral' in mesh_strategy:
+        if 'Polyhedral' in mesh_strategy or 'polyhedral' in mesh_strategy:
             print("[DEBUG] Polyhedral strategy detected - using Dual Graph pipeline")
             return generate_polyhedral_mesh(cad_file, output_dir, quality_params)
         
         # Fast Tet Delaunay - single-pass HXT, skips exhaustive search
-        if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy:
+        if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy or 'fast_tet' in mesh_strategy:
             print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT pipeline")
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         

@@ -491,11 +491,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 pass
             
             # Finalize the result metadata
-            result.history = self.all_attempts.copy()
-            if self.all_attempts:
-                # Set latest metrics as default if not already set
-                best_attempt = min(self.all_attempts, key=lambda x: x.get('score', float('inf')))
-                result.quality_metrics = best_attempt.get('metrics', {})
+            # Finalize the result metadata
+            self.quality_history = self.all_attempts.copy()
 
             self._generate_exhaustive_report(output_file)
             self._save_detailed_report_to_file(output_file, success=True)

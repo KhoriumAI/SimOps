@@ -260,7 +260,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     // Use smooth normals for preview meshes (preserves chamfers, smooths coarse tessellation)
     // Use standard vertex normals for completed meshes (shows mesh structure)
     if (meshData.isPreview) {
-      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 30)
+      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 60)
       geo.setAttribute('normal', new THREE.BufferAttribute(smoothNormals, 3))
     } else {
       geo.computeVertexNormals()

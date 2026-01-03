@@ -4,11 +4,21 @@ import { Terminal as TerminalIcon, Copy } from 'lucide-react'
 export default function Terminal({ logs, compact = false, noHeader = false }) {
   const scrollRef = useRef(null)
 
+  const isAutoScroll = useRef(true)
+
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && isAutoScroll.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [logs])
+
+  const handleScroll = () => {
+    if (scrollRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = scrollRef.current
+      const atBottom = scrollHeight - scrollTop - clientHeight < 50
+      isAutoScroll.current = atBottom
+    }
+  }
 
   const getLogClass = (log) => {
     if (log.includes('[ERROR]')) return 'text-red-400'
@@ -39,7 +49,7 @@ export default function Terminal({ logs, compact = false, noHeader = false }) {
             <Copy className="w-3 h-3" />
           </button>
         </div>
-        <div ref={scrollRef} className="flex-1 overflow-auto p-2">
+        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-2">
           <div className="space-y-0.5 font-mono text-[10px]">
             {logs.length === 0 ? (
               <p className="text-gray-500">Waiting...</p>
@@ -75,7 +85,7 @@ export default function Terminal({ logs, compact = false, noHeader = false }) {
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-auto p-4">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4">
         <div className="space-y-0.5 font-mono text-xs">
           {logs.length === 0 ? (
             <p className="text-gray-500">Waiting for mesh generation...</p>

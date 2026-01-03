@@ -140,6 +140,7 @@ def create_app(config_class=None):
 
 
 generation_lock = Lock()
+running_processes = {}
 
 
 def run_mesh_generation(app, project_id: str, quality_params: dict = None):
@@ -208,9 +209,14 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                 text=True,
                 bufsize=1
             )
+            
+            # Track running process
+            with generation_lock:
+                running_processes[project_id] = process
 
-            line_count = 0
-            for line in process.stdout:
+            try:
+                line_count = 0
+                for line in process.stdout:
                 line = line.strip()
                 if line:
                     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -316,6 +322,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                             db.session.commit()
                         except json.JSONDecodeError:
                             pass
+            finally:
+                with generation_lock:
+                    if project_id in running_processes:
+                        del running_processes[project_id]
 
             process.wait()
             print(f"[MESH GEN] Process exited with code {process.returncode}")
@@ -609,6 +619,46 @@ def register_routes(app):
         thread.start()
 
         return jsonify({"message": "Mesh generation started", "project_id": project_id})
+
+@app.route('/api/projects/<project_id>/stop', methods=['POST'])
+@jwt_required()
+def stop_mesh(project_id: str):
+    current_user_id = int(get_jwt_identity())
+    project = Project.query.get(project_id)
+
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    if project.user_id != current_user_id:
+        return jsonify({"error": "Access denied"}), 403
+    
+    # Try to find and kill the process
+    process_killed = False
+    with generation_lock:
+        if project_id in running_processes:
+            try:
+                print(f"[API] Stopping process for project {project_id}")
+                running_processes[project_id].terminate()
+                # Give it a tiny bit of time to cleanup?
+                process_killed = True
+            except Exception as e:
+                print(f"[API] Error stopping process: {e}")
+                # Try kill if terminate failed
+                try:
+                    running_processes[project_id].kill()
+                    process_killed = True
+                except Exception as e2:
+                    print(f"[API] Error killing process: {e2}")
+
+    # Force status update
+    if project.status == 'processing':
+        project.status = 'stopped'
+        db.session.commit()
+        return jsonify({"message": "Mesh generation stopped", "process_killed": process_killed})
+    else:
+        # It might have already finished or been stopped
+        return jsonify({"message": f"Project is already in state {project.status}", "process_killed": process_killed})
+
 
     @app.route('/api/projects/<project_id>/status', methods=['GET'])
     @jwt_required()
@@ -1349,8 +1399,30 @@ def parse_msh_file(msh_filepath: str):
             print(f"[MESH PARSE] Failed to load quality data: {e}")
 
     try:
-        with open(msh_filepath, 'r') as f:
+        with open(msh_filepath, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
+
+        # Detect MSH format version from header
+        msh_version = "2.2"  # Default
+        if '$MeshFormat' in content:
+            format_line = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0]
+            version_parts = format_line.split()
+            if version_parts:
+                msh_version = version_parts[0]
+        
+        print(f"[MESH PARSE] Detected MSH version: {msh_version}")
+        
+        # Check for binary format (second field = 1)
+        is_binary = False
+        if '$MeshFormat' in content:
+            format_line = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0]
+            parts = format_line.split()
+            if len(parts) >= 2 and parts[1] == '1':
+                is_binary = True
+                print(f"[MESH PARSE] Binary format detected - falling back to GMSH subprocess")
+                # For binary files, use the old GMSH subprocess method
+                return parse_msh_file_via_gmsh(msh_filepath, per_element_quality, per_element_gamma, 
+                                               per_element_skewness, per_element_aspect_ratio, per_element_min_angle)
 
         # --- Parse Nodes ---
         if '$Nodes' not in content:
@@ -1358,36 +1430,45 @@ def parse_msh_file(msh_filepath: str):
             
         nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
         
-        # Check format (ascii usually): numEntityBlocks(int) numNodes(int) minNodeTag(int) maxNodeTag(int)
+        nodes = {}  # node_tag -> [x, y, z]
+        node_id_to_index = {}  # node_tag -> sequential_index
+        
+        # Detect format based on first line structure
         header = nodes_section[0].split()
-        num_blocks = int(header[0])
-        total_nodes = int(header[1])
         
-        nodes = {} # node_tag -> [x, y, z]
-        node_id_to_index = {} # node_tag -> sequential_index (0, 1, 2...) for three.js buffers
-        
-        curr_line = 1
-        for _ in range(num_blocks):
-            # entityDim(int) entityTag(int) parametric(int; 0 or 1) numNodesInBlock(int)
-            block_header = nodes_section[curr_line].split()
-            curr_line += 1
-            num_nodes_in_block = int(block_header[3])
+        if msh_version.startswith('4'):
+            # MSH 4.x format: numEntityBlocks numNodes minNodeTag maxNodeTag
+            num_blocks = int(header[0])
+            total_nodes = int(header[1])
             
-            # Read node tags
-            node_tags = []
-            for i in range(num_nodes_in_block):
-                tag = int(nodes_section[curr_line + i])
-                node_tags.append(tag)
-            curr_line += num_nodes_in_block
+            curr_line = 1
+            for _ in range(num_blocks):
+                block_header = nodes_section[curr_line].split()
+                curr_line += 1
+                num_nodes_in_block = int(block_header[3])
+                
+                node_tags = []
+                for i in range(num_nodes_in_block):
+                    tag = int(nodes_section[curr_line + i])
+                    node_tags.append(tag)
+                curr_line += num_nodes_in_block
+                
+                for i in range(num_nodes_in_block):
+                    coords = list(map(float, nodes_section[curr_line + i].split()))
+                    node_tag = node_tags[i]
+                    nodes[node_tag] = coords[:3]
+                    node_id_to_index[node_tag] = len(node_id_to_index)
+                curr_line += num_nodes_in_block
+        else:
+            # MSH 2.x format: numNodes on first line, then "id x y z" per line
+            total_nodes = int(header[0])
             
-            # Read coords
-            for i in range(num_nodes_in_block):
-                coords = list(map(float, nodes_section[curr_line + i].split()))
-                node_tag = node_tags[i]
-                # Only keep x,y,z (ignore parametric u,v,w if present, though usually just 3)
-                nodes[node_tag] = coords[:3]
-                node_id_to_index[node_tag] = len(node_id_to_index) # Assign next sequential index
-            curr_line += num_nodes_in_block
+            for i in range(1, total_nodes + 1):
+                parts = nodes_section[i].split()
+                node_tag = int(parts[0])
+                coords = [float(parts[1]), float(parts[2]), float(parts[3])]
+                nodes[node_tag] = coords
+                node_id_to_index[node_tag] = len(node_id_to_index)
 
         print(f"[MESH PARSE] Parsed {len(nodes)} nodes")
 
@@ -1396,23 +1477,15 @@ def parse_msh_file(msh_filepath: str):
             return {"error": "Invalid MSH file: No $Elements section"}
             
         elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
-        
-        # numEntityBlocks(int) numElements(int) minElementTag(int) maxElementTag(int)
         header = elements_section[0].split()
-        num_blocks = int(header[0])
         
-        # Element types mapping (MSH 4.1)
-        # 2: 3-node triangle
-        # 4: 4-node tet
-        # 11: 10-node tet
-        # 5: 8-node hex
-        # 12: 27-node hex
+        # Element types mapping (same for MSH 2.x and 4.x)
+        # 2: 3-node triangle, 4: 4-node tet, 11: 10-node tet, 5: 8-node hex, 12: 27-node hex
         
-        vertices = []       # Flat list of x,y,z
-        element_tags = []   # Parallel element ID per triangle
-        entity_tags = []    # Parallel entity ID per triangle
+        vertices = []
+        element_tags = []
+        entity_tags = []
         
-        # Quality color arrays
         colors_sicn = []
         colors_gamma = []
         colors_skewness = []
@@ -1421,8 +1494,7 @@ def parse_msh_file(msh_filepath: str):
         
         def get_color(q, metric='sicn'):
             if q is None:
-                return 0.29, 0.56, 0.89  # Default blue
-                
+                return 0.29, 0.56, 0.89
             val = q
             if metric == 'skewness':
                 val = max(0.0, min(1.0, 1.0 - q))
@@ -1432,100 +1504,72 @@ def parse_msh_file(msh_filepath: str):
                 val = max(0.0, min(1.0, q / 60.0))
             else:
                 val = max(0.0, min(1.0, q))
-                
             if val <= 0.1: return 0.8, 0.0, 0.0
             elif val < 0.3: return 1.0, 0.3 * (val - 0.1)/0.2, 0.0
             elif val < 0.5: return 1.0, 0.3 + 0.7 * (val - 0.3)/0.2, 0.0
             elif val < 0.7: return 1.0 - 0.5 * (val - 0.5)/0.2, 1.0, 0.0
             else: return 0.5 - 0.5 * min(1.0, (val - 0.7)/0.3), 0.8 + 0.2 * min(1.0, (val - 0.7)/0.3), 0.2 * min(1.0, (val - 0.7)/0.3)
 
-        curr_line = 1
+        face_map = {}
         
-        # We need to process volume elements (Tets/Hexes) to extract their surfaces
-        # AND surface elements (Triangles) that are explicitly defined.
-        
-        # Storage for faces from valid elements
-        # face_key (sorted tuple of mapped indices) -> {
-        #   'nodes': [mapped_idx1, mapped_idx2, mapped_idx3], 
-        #   'count': int,
-        #   'element_tag': tag,
-        #   'entity_tag': tag
-        # }
-        face_map = {} 
-        
-        for _ in range(num_blocks):
-            # entityDim(int) entityTag(int) elementType(int) numElementsInBlock(int)
-            line_parts = elements_section[curr_line].split()
-            curr_line += 1
-            
-            if not line_parts: continue
-            
-            entity_dim = int(line_parts[0])
-            entity_tag_block = int(line_parts[1])
-            el_type = int(line_parts[2])
-            num_els = int(line_parts[3])
-            
-            # Process block
-            for i in range(num_els):
-                el_line = list(map(int, elements_section[curr_line + i].split()))
-                el_tag = el_line[0]
-                node_ids = el_line[1:]
-                
-                # Check for 3D elements (Tet4=4, Tet10=11, Hex8=5, Hex27=12)
-                if el_type in [4, 11]: # Tetrahedra
-                    # Extract 4 faces
-                    try:
-                        # Use first 4 nodes (linear part) for visualization
-                        n = [node_id_to_index[nid] for nid in node_ids[:4]]
-                        faces = [
-                            (n[0], n[2], n[1]), # Reorder for outward normal
-                            (n[0], n[1], n[3]),
-                            (n[0], n[3], n[2]),
-                            (n[1], n[2], n[3])
-                        ]
-                        for face in faces:
-                            # Use sorted key for identification, but keep 'face' order for rendering
-                            key = tuple(sorted(face))
+        def process_element(el_tag, el_type, node_ids, entity_tag=0):
+            """Process a single element and add faces to face_map"""
+            if el_type in [4, 11]:  # Tetrahedra
+                try:
+                    n = [node_id_to_index[nid] for nid in node_ids[:4]]
+                    faces = [(n[0], n[2], n[1]), (n[0], n[1], n[3]), (n[0], n[3], n[2]), (n[1], n[2], n[3])]
+                    for face in faces:
+                        key = tuple(sorted(face))
+                        if key not in face_map:
+                            face_map[key] = {'nodes': face, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag}
+                        face_map[key]['count'] += 1
+                except KeyError: pass
+            elif el_type in [5, 12]:  # Hexahedra
+                try:
+                    n = [node_id_to_index[nid] for nid in node_ids[:8]]
+                    qs = [(n[0], n[3], n[2], n[1]), (n[4], n[5], n[6], n[7]),
+                          (n[0], n[1], n[5], n[4]), (n[2], n[3], n[7], n[6]),
+                          (n[1], n[2], n[6], n[5]), (n[4], n[7], n[3], n[0])]
+                    for q in qs:
+                        for tri in [(q[0], q[1], q[2]), (q[0], q[2], q[3])]:
+                            key = tuple(sorted(tri))
                             if key not in face_map:
-                                face_map[key] = {'nodes': face, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
+                                face_map[key] = {'nodes': tri, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag}
                             face_map[key]['count'] += 1
-                    except KeyError: pass # Node missing?
-                    
-                elif el_type in [5, 12]: # Hexahedra
-                    # Extract 6 faces (as 12 triangles)
-                    try:
-                        n = [node_id_to_index[nid] for nid in node_ids[:8]]
-                        # 6 Quads -> 12 Tris
-                        qs = [
-                            (n[0], n[3], n[2], n[1]), # Bottom
-                            (n[4], n[5], n[6], n[7]), # Top
-                            (n[0], n[1], n[5], n[4]), # Front
-                            (n[2], n[3], n[7], n[6]), # Back
-                            (n[1], n[2], n[6], n[5]), # Right
-                            (n[4], n[7], n[3], n[0])  # Left
-                        ]
-                        for q in qs:
-                            # Split quad into 2 tris
-                            tris = [(q[0], q[1], q[2]), (q[0], q[2], q[3])]
-                            for tri in tris:
-                                key = tuple(sorted(tri))
-                                if key not in face_map:
-                                    face_map[key] = {'nodes': tri, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
-                                face_map[key]['count'] += 1
-                    except KeyError: pass
+                except KeyError: pass
+            elif el_type in [2, 9]:  # Triangles (surface mesh)
+                try:
+                    n = [node_id_to_index[nid] for nid in node_ids[:3]]
+                    key = tuple(sorted(n))
+                    face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag}
+                except KeyError: pass
 
-                elif el_type in [2, 9]: # Triangles (explicit surface mesh)
-                    # Support linear (3 nodes) for vis
-                    try:
-                        n = [node_id_to_index[nid] for nid in node_ids[:3]]
-                        key = tuple(sorted(n))
-                        # Explicit surface triangles are always kept, verify winding?
-                        # Just mark count as 1 to treat as boundary
-                        face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
-                    except KeyError: pass
-
-            curr_line += num_els
-            
+        if msh_version.startswith('4'):
+            # MSH 4.x: numEntityBlocks numElements minTag maxTag
+            num_blocks = int(header[0])
+            curr_line = 1
+            for _ in range(num_blocks):
+                line_parts = elements_section[curr_line].split()
+                curr_line += 1
+                if not line_parts: continue
+                entity_tag_block = int(line_parts[1])
+                el_type = int(line_parts[2])
+                num_els = int(line_parts[3])
+                for i in range(num_els):
+                    el_line = list(map(int, elements_section[curr_line + i].split()))
+                    process_element(el_line[0], el_type, el_line[1:], entity_tag_block)
+                curr_line += num_els
+        else:
+            # MSH 2.x: numElements on first line, then "id type numTags tags... nodes..."
+            num_elements = int(header[0])
+            for i in range(1, num_elements + 1):
+                parts = elements_section[i].split()
+                el_tag = int(parts[0])
+                el_type = int(parts[1])
+                num_tags = int(parts[2])
+                # Skip tags, node IDs start after tags
+                node_ids = [int(x) for x in parts[3 + num_tags:]]
+                entity_tag = int(parts[3]) if num_tags > 0 else 0
         print(f"[MESH PARSE] Processed faces, extracting boundary...")
         
         # Reconstruct nodes list from dict for fast access by index
