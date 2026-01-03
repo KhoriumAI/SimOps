@@ -25,10 +25,15 @@ jobs:
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
+        env:
+          DB_URL: ${{ secrets.DATABASE_URL }}
+          SECRET: ${{ secrets.SECRET_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET_KEY }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DB_URL,SECRET,JWT_SECRET
           script: |
             set -e
             
@@ -75,19 +80,28 @@ jobs:
             fi
             pip install -r "$REQS" 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
             
-            echo "[DEPLOY] Creating .env file from secrets..."
-            cd backend
-            cat > .env << 'EOF'
+            echo "[DEPLOY] Creating .env file..."
+            # Determine backend directory
+            if [ -d "backend/backend" ]; then
+              BACKEND_DIR="backend/backend"
+            elif [ -d "backend" ]; then
+              BACKEND_DIR="backend"
+            else
+              BACKEND_DIR="."
+            fi
+            
+            cat > "$BACKEND_DIR/.env" << ENVEOF
             FLASK_ENV=production
-            DATABASE_URL=${{ secrets.DATABASE_URL }}
-            SECRET_KEY=${{ secrets.SECRET_KEY }}
-            JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+            DATABASE_URL=${DB_URL}
+            SECRET_KEY=${SECRET}
+            JWT_SECRET_KEY=${JWT_SECRET}
             USE_S3=true
             S3_BUCKET_NAME=muaz-webdev-assets
             AWS_REGION=us-west-1
             CORS_ORIGINS=https://app.khorium.ai,http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com
-            EOF
-            cd ..
+            ENVEOF
+            
+            echo "[DEPLOY] .env file created at $BACKEND_DIR/.env"
             
             echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
