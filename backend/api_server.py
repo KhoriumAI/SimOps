@@ -202,6 +202,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             db.session.commit()
             result_id = mesh_result.id
 
+            # TIMING: Track subprocess dispatch and acknowledgement latency
+            dispatch_time = time.time()
+            print(f"[COMPUTE] Dispatching subprocess at {dispatch_time:.3f}s (setup took {dispatch_time - start_time:.3f}s)")
+            
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -210,20 +214,35 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                 bufsize=1
             )
             
+            subprocess_started = time.time()
+            print(f"[COMPUTE] Subprocess PID {process.pid} started in {(subprocess_started - dispatch_time)*1000:.1f}ms")
+            
             # Track running process
             with generation_lock:
                 running_processes[project_id] = process
+
+            # Track first output (acknowledgement latency)
+            first_output_received = False
+
 
             try:
                 line_count = 0
                 for line in process.stdout:
                     line = line.strip()
                     if line:
+                        # TIMING: Log acknowledgement latency on first output
+                        if not first_output_received:
+                            first_output_received = True
+                            ack_time = time.time()
+                            ack_latency_ms = (ack_time - subprocess_started) * 1000
+                            print(f"[COMPUTE] First output received in {ack_latency_ms:.1f}ms (total from start: {ack_time - start_time:.2f}s)")
+                        
                         timestamp = datetime.now().strftime("%H:%M:%S")
                         log_line = f"[{timestamp}] {line}"
                         logs.append(log_line)
                         print(f"[MESH GEN] {log_line}")
                         line_count += 1
+
                         
                         # Update logs in database every 5 lines
                         if line_count % 5 == 0:
