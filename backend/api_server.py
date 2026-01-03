@@ -1412,25 +1412,41 @@ def parse_msh_file(msh_filepath: str):
 
     def get_color(q, metric='sicn'):
         if q is None:
-            return 0.29, 0.56, 0.89  # Blue default
+            return 0.29, 0.56, 0.89  # Blue default (Quality missing)
+        
+        # Mapping quality values to vivid colors
+        # Red (0.0/Bad) -> Yellow (0.5/Ok) -> Green (1.0/Excellent)
         val = q
-        if metric == 'skewness':
+        
+        if metric == 'sicn':
+            if val < 0: return 0.9, 0.1, 0.1 # VIVID RED for inverted!
+            # Scale from 0 (Red) to 1 (Green)
+            # Use a slightly sharper transition for visibility
+            if val < 0.3:
+                # 0..0.3 maps to Red..Yellow
+                t = val / 0.3
+                return 0.9, 0.1 + 0.8 * t, 0.1
+            else:
+                # 0.3..1.0 maps to Yellow..Green
+                t = (val - 0.3) / 0.7
+                return 0.9 - 0.8 * t, 0.9, 0.1
+        elif metric == 'skewness':
             val = max(0.0, min(1.0, 1.0 - q))
         elif metric == 'aspect_ratio':
             val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
         elif metric == 'minAngle':
             val = max(0.0, min(1.0, q / 60.0))
-        else:
+        else: # Default for other metrics if not explicitly handled above
             val = max(0.0, min(1.0, q))
-        
-        # Vivid Red -> Yellow -> Green scale
-        if val <= 0.1: return 0.8, 0.0, 0.0
-        if val <= 0.5:
-            t = (val - 0.1) / 0.4
-            return 1.0, t, 0.0
+            
+        # Generic vivid scale for other metrics
+        t = max(0.0, min(1.0, val))
+        if t < 0.5:
+            # Red to Yellow
+            return 1.0, t * 2, 0.0
         else:
-            t = min(1.0, (val - 0.5) / 0.5)
-            return 1.0 - t, 1.0, 0.0
+            # Yellow to Green
+            return 1.0 - (t - 0.5) * 2, 1.0, 0.0
 
     def get_q_value(tag, data_dict):
         if not data_dict: return None
@@ -1769,9 +1785,9 @@ def parse_msh_file(msh_filepath: str):
         for nid, idx in node_id_to_index.items():
             indexed_nodes[idx] = nodes[nid]
             
-        # Extract boundary faces (count == 1) or explicit surface triangles
+        # Extract boundary faces (count == 1)
         for key, data in face_map.items():
-            if data.get('is_surface') or data['count'] == 1:
+            if data['count'] == 1:
                 # This is a boundary face
                 face_nodes = data['nodes']
                 el_tag = data['element_tag']

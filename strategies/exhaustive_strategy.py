@@ -1444,6 +1444,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         for msh_file in msh_files:
             try:
                 gmsh.merge(msh_file)
+                # CRITICAL: Renumber after each merge to prevent tag collisions.
+                # If we don't do this, multiple parts will share the same element tags (1, 2, 3...),
+                # which causes quality mapping to only save data for the last part merged.
+                gmsh.model.mesh.renumberNodes()
+                gmsh.model.mesh.renumberElements()
             except Exception as e:
                 self.log_message(f"  [!] Failed to merge {os.path.basename(msh_file)}: {e}")
         
@@ -1452,6 +1457,10 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # which causes errors during global quality analysis and rendering.
         self.log_message("Cleaning assembly topology (removing duplicate nodes)...")
         gmsh.model.mesh.removeDuplicateNodes()
+        
+        # Final renumbering to ensure a perfectly contiguous, unique tag space
+        gmsh.model.mesh.renumberNodes()
+        gmsh.model.mesh.renumberElements()
         
         # Ensure model is synchronized for analysis
         # gmsh.model.mesh.synchronize() # Not strictly necessary for mesh-only models but good practice
@@ -1463,22 +1472,22 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         else:
             self.log_message("[WARNING] No physical groups found after merge! Mesh may not export correctly.")
         
-        # Analyze the merged assembly mesh before finalization to capture metrics/counts
+        # Analyze current assembly (Surgical)
+        self.log_message("Analyzing final assembly quality...")
+        # Reduce complexity for large assemblies to fix 15s+ slowness
         try:
-            metrics = self.analyze_current_mesh()
+            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
+            
             if metrics:
-                self.log_message(f"[SURGICAL] Final assembly metrics: {metrics.get('total_elements', 0)} elements, {metrics.get('total_nodes', 0)} nodes")
-                # Add as a pseudo-attempt so the worker picks up the metrics
-                attempt_data = {
-                    'strategy': 'surgical_assembly',
-                    'success': True,
-                    'metrics': metrics,
-                    'score': self._calculate_quality_score(metrics)
-                }
-                self.all_attempts.append(attempt_data)
-                self.quality_history = self.all_attempts.copy()
+                self.log_message(f"[SURGICAL] Final assembly metrics: {metrics['total_elements']} elements, {metrics['total_nodes']} nodes")
+                # Store metrics for worker retrieval
+                self.quality_history.append({'iteration': 99, 'params': {'surgical': True}, 'metrics': metrics})
+                
+                # Check for inverted elements
+                if metrics.get('gmsh_sicn') and metrics['gmsh_sicn']['min'] < 0:
+                    self.log_message("[!] WARNING: Merged assembly contains inverted elements. This may be due to overlapping volumes in the source CAD.")
         except Exception as e:
-            self.log_message(f"[!] Failed to analyze final surgical assembly: {e}")
+            self.log_message(f"[!] Analysis failed: {e}")
 
         # Write the merged mesh
         gmsh.option.setNumber("Mesh.SaveAll", 1)  # Ensure all elements are saved
