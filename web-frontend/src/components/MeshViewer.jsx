@@ -837,13 +837,13 @@ export default function MeshViewer({
             <button
               onClick={() => {
                 if (!showControls) {
-                  // Opening panel - auto-enable with X axis
+                  // Opening panel - auto-enable with X axis at 50% (midplane)
                   setShowControls(true)
-                  setClipping({ enabled: true, showQualitySlice: true, x: true, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                  setClipping({ enabled: true, showQualitySlice: true, x: true, y: false, z: false, xValue: 50, yValue: 50, zValue: 50 })
                 } else {
                   // Closing panel - disable clipping
                   setShowControls(false)
-                  setClipping({ enabled: false, showQualitySlice: true, x: false, y: false, z: false, xValue: 0, yValue: 0, zValue: 0 })
+                  setClipping({ enabled: false, showQualitySlice: true, x: false, y: false, z: false, xValue: 50, yValue: 50, zValue: 50 })
                 }
               }}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showControls ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}

@@ -92,6 +92,16 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
     origin_arr = np.array(plane_origin)
     normal_arr = np.array(plane_normal)
     
+    # CRITICAL FIX: Create node ID -> sequential index mapping for assemblies
+    # When volumes are meshed individually and merged via gmsh.merge(), node IDs 
+    # are non-contiguous (e.g. Vol1: 1-500, Vol2: 501-1000), but visualization
+    # expects indices 0, 1, 2, 3, ... This mapping ensures correct face connectivity.
+    node_id_to_index = {}
+    node_coords_list = []
+    for idx, (node_id, coords) in enumerate(mesh_nodes.items()):
+        node_id_to_index[node_id] = idx
+        node_coords_list.append(coords)
+    
     # 1. Determine kept status for all volume elements
     is_kept = []
     element_faces_list = []
@@ -112,19 +122,21 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
         kept = (dist < 0)
         is_kept.append(kept)
         
-        # Define faces (triangles)
+        # Define faces (triangles) using MAPPED indices instead of raw node IDs
         faces = []
         if el_type in [4, 11]: # Tet4, Tet10
-            # Order: 0, 1, 2, 3
-            # Faces with outward winding: (0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)
+            # Map node IDs to sequential indices for visualization
+            mapped_nodes = [node_id_to_index[nid] for nid in node_ids]
+            # Faces with outward winding
             faces = [
-                (node_ids[0], node_ids[2], node_ids[1]),
-                (node_ids[0], node_ids[1], node_ids[3]),
-                (node_ids[0], node_ids[3], node_ids[2]),
-                (node_ids[1], node_ids[2], node_ids[3])
+                (mapped_nodes[0], mapped_nodes[2], mapped_nodes[1]),
+                (mapped_nodes[0], mapped_nodes[1], mapped_nodes[3]),
+                (mapped_nodes[0], mapped_nodes[3], mapped_nodes[2]),
+                (mapped_nodes[1], mapped_nodes[2], mapped_nodes[3])
             ]
         elif el_type in [5, 12]: # Hex8, Hex27
-            f = node_ids
+            mapped_nodes = [node_id_to_index[nid] for nid in node_ids]
+            f = mapped_nodes
             # Hex faces (6 quads -> 12 triangles)
             faces = [
                 (f[0], f[2], f[1]), (f[0], f[3], f[2]), # bottom
@@ -171,9 +183,9 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
             quality = quality_map.get(str(data["tag"]), 1.0)
             color = get_color(quality)
             
-            # Add vertices and colors
-            for nid in data["nodes"]:
-                output_vertices.extend(mesh_nodes[nid])
+            # Use mapped indices to look up coordinates from sequential list
+            for mapped_idx in data["nodes"]:
+                output_vertices.extend(node_coords_list[mapped_idx])
                 output_colors.extend(color)
             
             output_indices.extend([vertex_count, vertex_count + 1, vertex_count + 2])
