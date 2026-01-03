@@ -1369,14 +1369,14 @@ class BaseMeshGenerator(ABC):
 
         return targets_met
 
-    def save_mesh(self, output_file: str) -> bool:
+    def save_mesh(self, output_file: str, save_all: bool = True) -> bool:
         """Save mesh to file"""
         try:
             # Force ASCII format (easier to parse, more robust for our native parser)
             gmsh.option.setNumber("Mesh.Binary", 0)
             # CRITICAL: Always save all elements (including surface triangles)
-            # otherwise physical groups will filter them out and viewer will be empty.
-            gmsh.option.setNumber("Mesh.SaveAll", 1)
+            # unless explicitly requested otherwise (e.g. for assembly parts)
+            gmsh.option.setNumber("Mesh.SaveAll", 1 if save_all else 0)
             gmsh.write(output_file)
             self.log_message(f"[OK] Mesh saved to: {output_file}")
             return True

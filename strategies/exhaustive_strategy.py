@@ -1430,7 +1430,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # Each individual .msh file already has physical groups assigned ("Volume_N").
         # We need to merge them while preserving their individual identities.
         self.log_message("Merging all isolated meshes...")
-        gmsh.initialize()
+        
+        # Safely ensure Gmsh is initialized
+        if not gmsh.isInitialized():
+            gmsh.initialize()
+            
         gmsh.model.add("Surgical_Assembly")
         
         msh_files = sorted(glob.glob(os.path.join(temp_dir, "vol_*.msh")))
@@ -1442,6 +1446,15 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 gmsh.merge(msh_file)
             except Exception as e:
                 self.log_message(f"  [!] Failed to merge {os.path.basename(msh_file)}: {e}")
+        
+        # CRITICAL: For assemblies, we must remove duplicate nodes at the interfaces
+        # between volumes. Otherwise, the mesh is just a collection of disjoint parts,
+        # which causes errors during global quality analysis and rendering.
+        self.log_message("Cleaning assembly topology (removing duplicate nodes)...")
+        gmsh.model.mesh.removeDuplicateNodes()
+        
+        # Ensure model is synchronized for analysis
+        # gmsh.model.mesh.synchronize() # Not strictly necessary for mesh-only models but good practice
         
         # Verify physical groups were preserved
         phys_groups = gmsh.model.getPhysicalGroups(3)

@@ -78,10 +78,9 @@ def main():
                 gmsh.model.setPhysicalName(3, p_tag, f"Volume_{args.tag}")
                 print(f"[Worker V{args.tag}] Assigned Physical Volume {p_tag} (Name: Volume_{args.tag})", flush=True)
             
-            # CRITICAL: Set Mesh.SaveAll to 0 to only save the Physical Volume (tets).
-            # If set to 1, we save duplicate surface meshes which cause self-intersections when merged.
-            gmsh.option.setNumber("Mesh.SaveAll", 0)
-            gen.save_mesh(args.output)
+            # CRITICAL: Set save_all=False to only save the Physical Volume (tets).
+            # If set to True, we save duplicate surface meshes which cause self-intersections when merged.
+            gen.save_mesh(args.output, save_all=False)
             print(f"[Worker V{args.tag}] SUCCESS", flush=True)
             sys.exit(0)
         else:

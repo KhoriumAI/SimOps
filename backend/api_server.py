@@ -1378,25 +1378,37 @@ def parse_msh_file(msh_filepath: str):
     print(f"[MESH PARSE] Parsing mesh file (native): {msh_filepath}")
     
     # Load quality data if available
+    # The worker saves detailed metrics to _result.json, while legacy saves to .quality.json
     quality_filepath = Path(msh_filepath).with_suffix('.quality.json')
+    result_filepath = Path(str(msh_filepath).replace('.msh', '_result.json'))
+    
     per_element_quality = {}
     per_element_gamma = {}
     per_element_skewness = {}
     per_element_aspect_ratio = {}
     per_element_min_angle = {}
     
-    if quality_filepath.exists():
+    data_file = None
+    if result_filepath.exists():
+        data_file = result_filepath
+    elif quality_filepath.exists():
+        data_file = quality_filepath
+        
+    if data_file:
         try:
-            with open(quality_filepath, 'r') as f:
+            with open(data_file, 'r') as f:
                 qdata = json.load(f)
-                per_element_quality = {int(k): v for k, v in qdata.get('per_element_quality', {}).items()}
-                per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
-                per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
-                per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
-                per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
-                print(f"[MESH PARSE] Loaded quality data for {len(per_element_quality)} elements")
+                # Metrics might be nested under quality_metrics or at root
+                metrics_container = qdata.get('quality_metrics', qdata)
+                
+                per_element_quality = {int(k): v for k, v in metrics_container.get('per_element_quality', {}).items()}
+                per_element_gamma = {int(k): v for k, v in metrics_container.get('per_element_gamma', {}).items()}
+                per_element_skewness = {int(k): v for k, v in metrics_container.get('per_element_skewness', {}).items()}
+                per_element_aspect_ratio = {int(k): v for k, v in metrics_container.get('per_element_aspect_ratio', {}).items()}
+                per_element_min_angle = {int(k): v for k, v in metrics_container.get('per_element_min_angle', {}).items()}
+                print(f"[MESH PARSE] Loaded quality data from {data_file.name} for {len(per_element_quality)} elements")
         except Exception as e:
-            print(f"[MESH PARSE] Failed to load quality data: {e}")
+            print(f"[MESH PARSE] Failed to load quality data from {data_file}: {e}")
 
     def get_color(q, metric='sicn'):
         if q is None:
