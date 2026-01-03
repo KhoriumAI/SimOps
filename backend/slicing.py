@@ -93,11 +93,10 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
     normal_arr = np.array(plane_normal)
     
     # CRITICAL FIX: Create node ID -> sequential index mapping for assemblies
-    # When volumes are meshed individually and merged via gmsh.merge(), node IDs 
-    # are non-contiguous (e.g. Vol1: 1-500, Vol2: 501-1000), but visualization
-    # expects indices 0, 1, 2, 3, ... This mapping ensures correct face connectivity.
     node_id_to_index = {}
     node_coords_list = []
+    # Use sorted IDs to ensure deterministic mapping if needed, 
+    # but insertion order (current nodes dict) is generally fine.
     for idx, (node_id, coords) in enumerate(mesh_nodes.items()):
         node_id_to_index[node_id] = idx
         node_coords_list.append(coords)
@@ -115,42 +114,53 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
             continue
             
         centroid = np.mean(coords, axis=0)
-        # Keep if centroid is behind the plane (keeping tets on the 'negative' side of normal)
-        # to match the clipping direction in the viewer.
+        # Keep if centroid is behind the plane
         dist = np.dot(centroid - origin_arr, normal_arr)
-        # We use a small epsilon to avoid numerical issues
         kept = (dist < 0)
         is_kept.append(kept)
         
         # Define faces (triangles) using MAPPED indices instead of raw node IDs
         faces = []
-        if el_type in [4, 11]: # Tet4, Tet10
-            # Map node IDs to sequential indices for visualization
-            mapped_nodes = [node_id_to_index[nid] for nid in node_ids]
-            # Faces with outward winding
-            faces = [
-                (mapped_nodes[0], mapped_nodes[2], mapped_nodes[1]),
-                (mapped_nodes[0], mapped_nodes[1], mapped_nodes[3]),
-                (mapped_nodes[0], mapped_nodes[3], mapped_nodes[2]),
-                (mapped_nodes[1], mapped_nodes[2], mapped_nodes[3])
-            ]
-        elif el_type in [5, 12]: # Hex8, Hex27
-            mapped_nodes = [node_id_to_index[nid] for nid in node_ids]
-            f = mapped_nodes
-            # Hex faces (6 quads -> 12 triangles)
-            faces = [
-                (f[0], f[2], f[1]), (f[0], f[3], f[2]), # bottom
-                (f[4], f[5], f[6]), (f[4], f[6], f[7]), # top
-                (f[0], f[1], f[5]), (f[0], f[5], f[4]), # front
-                (f[1], f[2], f[6]), (f[1], f[6], f[5]), # right
-                (f[2], f[3], f[7]), (f[2], f[7], f[6]), # back
-                (f[3], f[0], f[4]), (f[3], f[4], f[7])  # left
-            ]
-        element_face_data = faces
-        element_faces_list.append(element_face_data)
+        try:
+            m = [node_id_to_index[nid] for nid in node_ids]
+            
+            if el_type in [4, 11]: # Tet4, Tet10
+                # Corner nodes are always 0,1,2,3
+                faces = [
+                    (m[0], m[2], m[1]), (m[0], m[1], m[3]),
+                    (m[0], m[3], m[2]), (m[1], m[2], m[3])
+                ]
+            elif el_type in [5, 12]: # Hex8, Hex27
+                # Hex faces (6 quads -> 12 triangles)
+                faces = [
+                    (m[0], m[3], m[2]), (m[0], m[2], m[1]), # bottom
+                    (m[4], m[5], m[6]), (m[4], m[6], m[7]), # top
+                    (m[0], m[1], m[5]), (m[0], m[5], m[4]), # front
+                    (m[1], m[2], m[6]), (m[1], m[6], m[5]), # right
+                    (m[2], m[3], m[7]), (m[2], m[7], m[6]), # back
+                    (m[3], m[0], m[4]), (m[3], m[4], m[7])  # left
+                ]
+            elif el_type == 6: # Prism6
+                # 2 triangles, 3 quads (6 triangles)
+                faces = [
+                    (m[0], m[1], m[2]), (m[3], m[5], m[4]), # bottom, top
+                    (m[0], m[3], m[4]), (m[0], m[4], m[1]), # side 1
+                    (m[1], m[4], m[5]), (m[1], m[5], m[2]), # side 2
+                    (m[2], m[5], m[3]), (m[2], m[3], m[0])  # side 3
+                ]
+            elif el_type == 7: # Pyramid5
+                # 1 quad (2 tris), 4 triangles
+                faces = [
+                    (m[0], m[3], m[2]), (m[0], m[2], m[1]), # base
+                    (m[0], m[1], m[4]), (m[1], m[2], m[4]),
+                    (m[2], m[3], m[4]), (m[3], m[0], m[4])
+                ]
+        except (KeyError, IndexError):
+            pass
+            
+        element_faces_list.append(faces)
 
     # 2. Map faces to their neighbor elements for boundary extraction
-    # key is sorted tuple of node IDs to identify shared faces
     face_map = {} 
     
     for i, faces in enumerate(element_faces_list):
@@ -161,29 +171,33 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
             face_map[key]["neighbors"].append(i)
             
     # 3. Identify boundary faces of the KEPT volume
-    # A face is on the boundary of the kept volume if exactly one of its neighbors is kept.
     output_vertices = []
     output_colors = []
     output_indices = []
     
     def get_color(q):
-        # q is 0 to 1 (0=bad, 1=good)
-        r = 1.0 - q
-        g = q
-        b = 0.2
-        return [r, g, b]
+        # Vivid quality scale: Red (bad) -> Yellow -> Green (good)
+        if q is None: return [0.3, 0.6, 0.9]
+        val = max(0.0, min(1.0, q))
+        if val <= 0.1: return [0.8, 0.0, 0.0]
+        elif val < 0.5:
+            t = (val - 0.1) / 0.4
+            return [1.0, t, 0.0]
+        else:
+            t = min(1.0, (val - 0.5) / 0.5)
+            return [1.0 - t, 1.0, 0.0]
 
     vertex_count = 0
     for key, data in face_map.items():
         neighbors = data["neighbors"]
+        # Keep only neighbors that are in the 'kept' set
         kept_neighbors = [n_idx for n_idx in neighbors if is_kept[n_idx]]
         
         # If exactly 1 neighbor is kept, this face is part of the shell of the cut volume
         if len(kept_neighbors) == 1:
-            quality = quality_map.get(str(data["tag"]), 1.0)
+            quality = quality_map.get(str(data["tag"]), quality_map.get(int(data["tag"]), 1.0))
             color = get_color(quality)
             
-            # Use mapped indices to look up coordinates from sequential list
             for mapped_idx in data["nodes"]:
                 output_vertices.extend(node_coords_list[mapped_idx])
                 output_colors.extend(color)
@@ -200,66 +214,105 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
 
 def parse_msh_for_slicing(msh_path):
     """
-    Parses a Gmsh 4.1 file specifically for volume elements and nodes.
-    Returns: (nodes_dict, vol_elements)
-    nodes_dict: {id: [x,y,z]}
-    vol_elements: [(type, tag, [node_ids])]
+    Robustly parses Gmsh (2.2 or 4.1) files for volume elements and nodes.
+    Supports ASCII files.
     """
     nodes = {}
     vol_elements = [] # (type, tag, node_ids)
     
-    # Volume element types in Gmsh
+    # Gmsh volume element types and their node counts
     VOL_TYPES = {
         4: 4,   # Tet4
         11: 10, # Tet10
+        29: 20, # Tet20
         5: 8,   # Hex8
         12: 27, # Hex27
-        29: 20, # Prism15
-        30: 21, # Prism21
+        6: 6,   # Prism6
+        13: 18, # Prism18
+        7: 5,   # Pyramid5
+        14: 14, # Pyramid14
     }
     
-    with open(msh_path, 'r') as f:
-        content = f.read()
-        
-    # Parse Nodes
     try:
-        nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
-        num_blocks, total_nodes, _, _ = map(int, nodes_section[0].split())
-        
-        curr_line = 1
-        for _ in range(num_blocks):
-            dim, tag, parametric, num_nodes_in_block = map(int, nodes_section[curr_line].split())
-            curr_line += 1
-            node_ids = [int(nodes_section[curr_line + i]) for i in range(num_nodes_in_block)]
-            curr_line += num_nodes_in_block
-            for i in range(num_nodes_in_block):
-                coords = list(map(float, nodes_section[curr_line + i].split()))
-                nodes[node_ids[i]] = coords
-            curr_line += num_nodes_in_block
+        with open(msh_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
     except Exception as e:
-        print(f"Error parsing nodes: {e}")
+        print(f"Error reading Msh: {e}")
+        return {}, []
+
+    # Detect Version
+    msh_version = "4.1"
+    if '$MeshFormat' in content:
+        try:
+            fmt = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0].split()
+            msh_version = fmt[0]
+        except: pass
+
+    # Parse Nodes
+    if '$Nodes' in content:
+        try:
+            nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
+            if msh_version.startswith('4'):
+                # MSH 4.x
+                header = nodes_section[0].split()
+                num_blocks = int(header[0])
+                curr_line = 1
+                for _ in range(num_blocks):
+                    block_info = nodes_section[curr_line].split()
+                    curr_line += 1
+                    num_nodes_in_block = int(block_info[3])
+                    
+                    node_tags = [int(nodes_section[curr_line + i]) for i in range(num_nodes_in_block)]
+                    curr_line += num_nodes_in_block
+                    
+                    for i in range(num_nodes_in_block):
+                        coords = list(map(float, nodes_section[curr_line + i].split()))
+                        nodes[node_tags[i]] = coords[:3]
+                    curr_line += num_nodes_in_block
+            else:
+                # MSH 2.x
+                total_nodes = int(nodes_section[0])
+                for i in range(1, total_nodes + 1):
+                    parts = nodes_section[i].split()
+                    nodes[int(parts[0])] = [float(parts[1]), float(parts[2]), float(parts[3])]
+        except Exception as e:
+            print(f"Error parsing nodes: {e}")
 
     # Parse Elements
-    try:
-        elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
-        num_blocks, total_elements, _, _ = map(int, elements_section[0].split())
-        
-        curr_line = 1
-        for _ in range(num_blocks):
-            line = elements_section[curr_line].split()
-            if not line: break
-            entity_dim, entity_tag, el_type, num_els_in_block = map(int, line)
-            curr_line += 1
+    if '$Elements' in content:
+        try:
+            elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
+            if msh_version.startswith('4'):
+                # MSH 4.x
+                header = elements_section[0].split()
+                num_blocks = int(header[0])
+                curr_line = 1
+                for _ in range(num_blocks):
+                    block_info = elements_section[curr_line].split()
+                    if not block_info: break
+                    entity_dim = int(block_info[0])
+                    el_type = int(block_info[2])
+                    num_els = int(block_info[3])
+                    curr_line += 1
+                    
+                    if entity_dim == 3 and el_type in VOL_TYPES:
+                        for i in range(num_els):
+                            parts = list(map(int, elements_section[curr_line + i].split()))
+                            vol_elements.append((el_type, parts[0], parts[1:]))
+                    curr_line += num_els
+            else:
+                # MSH 2.x
+                total_els = int(elements_section[0])
+                for i in range(1, total_els + 1):
+                    parts = list(map(int, elements_section[i].split()))
+                    el_type = parts[1]
+                    num_tags = parts[2]
+                    if el_type in VOL_TYPES:
+                        el_tag = parts[0]
+                        node_ids = parts[3 + num_tags:]
+                        vol_elements.append((el_type, el_tag, node_ids))
+        except Exception as e:
+            print(f"Error parsing elements: {e}")
             
-            if entity_dim == 3 and el_type in VOL_TYPES:
-                nodes_per_el = VOL_TYPES[el_type]
-                for i in range(num_els_in_block):
-                    el_line = list(map(int, elements_section[curr_line + i].split()))
-                    el_tag = el_line[0]
-                    node_ids = el_line[1:]
-                    vol_elements.append((el_type, el_tag, node_ids))
-            curr_line += num_els_in_block
-    except Exception as e:
-        print(f"Error parsing elements: {e}")
-        
     return nodes, vol_elements
+

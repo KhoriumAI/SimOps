@@ -1372,6 +1372,8 @@ class BaseMeshGenerator(ABC):
     def save_mesh(self, output_file: str) -> bool:
         """Save mesh to file"""
         try:
+            # Force ASCII format (easier to parse, more robust for our native parser)
+            gmsh.option.setNumber("Mesh.Binary", 0)
             # CRITICAL: Always save all elements (including surface triangles)
             # otherwise physical groups will filter them out and viewer will be empty.
             gmsh.option.setNumber("Mesh.SaveAll", 1)

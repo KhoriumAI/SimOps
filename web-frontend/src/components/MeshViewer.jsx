@@ -100,7 +100,7 @@ function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30)
   return smoothNormals
 }
 
-function SliceMesh({ sliceData, clippingPlanes, renderOffset }) {
+function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
   const geometry = useMemo(() => {
     if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
     const geo = new THREE.BufferGeometry()
@@ -119,6 +119,23 @@ function SliceMesh({ sliceData, clippingPlanes, renderOffset }) {
     return geo
   }, [sliceData, renderOffset])
 
+  // Filter out the plane that corresponds to the activeAxis
+  // Backend already clipped this mesh along that axis. 
+  // Applying it again in frontend causes Z-fighting/clipping of the cut surface itself.
+  const filteredPlanes = useMemo(() => {
+    if (!clippingPlanes || !activeAxis) return clippingPlanes
+
+    return clippingPlanes.filter(plane => {
+      // X plane has normal (-1, 0, 0)
+      if (activeAxis === 'x' && Math.abs(plane.normal.x + 1) < 0.01) return false
+      // Y plane has normal (0, 0, -1) in World space (original Y)
+      if (activeAxis === 'y' && Math.abs(plane.normal.z + 1) < 0.01) return false
+      // Z plane has normal (0, -1, 0) in World space (original Z)
+      if (activeAxis === 'z' && Math.abs(plane.normal.y + 1) < 0.01) return false
+      return true
+    })
+  }, [clippingPlanes, activeAxis])
+
   if (!geometry) return null
 
   return (
@@ -128,7 +145,7 @@ function SliceMesh({ sliceData, clippingPlanes, renderOffset }) {
         side={THREE.DoubleSide}
         transparent={true}
         opacity={0.9}
-        clippingPlanes={clippingPlanes}
+        clippingPlanes={filteredPlanes}
       />
     </mesh>
   )
@@ -260,7 +277,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     // Use smooth normals for preview meshes (preserves chamfers, smooths coarse tessellation)
     // Use standard vertex normals for completed meshes (shows mesh structure)
     if (meshData.isPreview) {
-      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 60)
+      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 30)
       geo.setAttribute('normal', new THREE.BufferAttribute(smoothNormals, 3))
     } else {
       geo.computeVertexNormals()
@@ -365,18 +382,21 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
 
     if (clipping.x) {
       // X plane: Normal (-1, 0, 0) to cut from right (max -> min)
+      // World X matches Original X
       const xPos = (center.x + size.x / 2) - (clipping.xValue / 100) * size.x
       planes.push(new THREE.Plane(new THREE.Vector3(-1, 0, 0), xPos))
     }
     if (clipping.y) {
-      // Y plane: Normal (0, -1, 0)
-      const yPos = (center.y + size.y / 2) - (clipping.yValue / 100) * size.y
-      planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), yPos))
+      // Original Y is World Z in the view (due to -PI/2 X rotation)
+      // Normal (0, 0, -1) clips against Original Y
+      const yPos = (center.z + size.z / 2) - (clipping.yValue / 100) * size.z
+      planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), yPos))
     }
     if (clipping.z) {
-      // Z plane: Normal (0, 0, -1)
-      const zPos = (center.z + size.z / 2) - (clipping.zValue / 100) * size.z
-      planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), zPos))
+      // Original Z is World Y in the view (due to -PI/2 X rotation)
+      // Normal (0, -1, 0) clips against Original Z
+      const zPos = (center.y + size.y / 2) - (clipping.zValue / 100) * size.y
+      planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), zPos))
     }
 
     return planes
@@ -543,7 +563,12 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
 
       {/* Volumetric Quality Slice */}
       {clipping.enabled && clipping.showQualitySlice && sliceData && (
-        <SliceMesh sliceData={sliceData} clippingPlanes={clippingPlanes} renderOffset={renderOffset} />
+        <SliceMesh
+          sliceData={sliceData}
+          clippingPlanes={clippingPlanes}
+          renderOffset={renderOffset}
+          activeAxis={clipping.x ? 'x' : clipping.y ? 'y' : clipping.z ? 'z' : null}
+        />
       )}
 
       {/* Sharp Edges Overlay */}

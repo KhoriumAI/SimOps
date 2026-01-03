@@ -1458,24 +1458,37 @@ def parse_msh_file(msh_filepath: str):
                         face_map[key] = {'nodes': face_nodes, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag}
                     face_map[key]['count'] += 1
                 
-                el_tag = 0
-                for cell_block in mesh.cells:
+                el_tag_seq = 0
+                for cell_block_idx, cell_block in enumerate(mesh.cells):
                     cell_type = cell_block.type
                     cells = cell_block.data
                     
-                    # Attempt to get global tag if available in cell_data
-                    # This is tricky with meshio, but necessary for quality mapping.
-                    # For now, we'll use the index as a placeholder.
+                    # Try to find real Gmsh IDs in cell_data
+                    real_ids = None
+                    if hasattr(mesh, 'cell_data') and 'gmsh:element_id' in mesh.cell_data:
+                        try:
+                            # gmsh:element_id is a list of arrays (one per cell block)
+                            real_ids = mesh.cell_data['gmsh:element_id'][cell_block_idx]
+                            print(f"[MESH PARSE] Found {len(real_ids)} real Gmsh IDs for block {cell_block_idx}")
+                        except Exception as e:
+                            print(f"[MESH PARSE] Warning: Could not get Gmsh IDs for block {cell_block_idx}: {e}")
                     
+                    def get_elem_id(i):
+                        if real_ids is not None and i < len(real_ids):
+                            return int(real_ids[i])
+                        return el_tag_seq + i + 1  # Fallback to 1-indexed sequential
+                        
                     if cell_type == 'tetra':  # Tet4
                         for i, cell in enumerate(cells):
+                            tag = get_elem_id(i)
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:4]]
-                            add_face((n[0], n[2], n[1]), el_tag + i)
-                            add_face((n[0], n[1], n[3]), el_tag + i)
-                            add_face((n[0], n[3], n[2]), el_tag + i)
-                            add_face((n[1], n[2], n[3]), el_tag + i)
+                            add_face((n[0], n[2], n[1]), tag)
+                            add_face((n[0], n[1], n[3]), tag)
+                            add_face((n[0], n[3], n[2]), tag)
+                            add_face((n[1], n[2], n[3]), tag)
                     elif cell_type == 'hexahedron':  # Hex8
                         for i, cell in enumerate(cells):
+                            tag = get_elem_id(i)
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:8]]
                             quads = [
                                 (n[0], n[3], n[2], n[1]), (n[4], n[5], n[6], n[7]),
@@ -1483,15 +1496,16 @@ def parse_msh_file(msh_filepath: str):
                                 (n[1], n[2], n[6], n[5]), (n[4], n[7], n[3], n[0])
                             ]
                             for q in quads:
-                                add_face((q[0], q[1], q[2]), el_tag + i)
-                                add_face((q[0], q[2], q[3]), el_tag + i)
+                                add_face((q[0], q[1], q[2]), tag)
+                                add_face((q[0], q[2], q[3]), tag)
                     elif cell_type == 'triangle':  # Surface triangle
                         for i, cell in enumerate(cells):
+                            tag = get_elem_id(i)
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:3]]
                             key = tuple(sorted(n))
-                            face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag + i, 'entity_tag': 0, 'is_surface': True}
+                            face_map[key] = {'nodes': n, 'count': 1, 'element_tag': tag, 'entity_tag': 0, 'is_surface': True}
                     
-                    el_tag += len(cells)
+                    el_tag_seq += len(cells)
                 
                 print(f"[MESH PARSE] Processed {len(face_map)} unique faces")
                 
