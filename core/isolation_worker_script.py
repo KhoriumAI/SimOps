@@ -39,6 +39,17 @@ def main():
     gmsh.option.setNumber("General.Terminal", 1)
     gmsh.option.setNumber("General.Verbosity", 3)
     
+    # CRITICAL FIX: Ensure unique Node/Element IDs to prevent collisions during Assembly Merge
+    # By offsetting each worker's tags by 1,000,000 * volume_id, we guarantee no overlap.
+    # This solves the "Inverted Elements" issue caused by merging conflicting IDs.
+    tag_offset = args.tag * 1000000
+    try:
+        gmsh.option.setNumber("Mesh.FirstNodeTag", tag_offset)
+        gmsh.option.setNumber("Mesh.FirstElementTag", tag_offset)
+        print(f"[Worker V{args.tag}] Applied Tag Offset: {tag_offset}", flush=True)
+    except Exception as e:
+        print(f"[Worker V{args.tag}] WARNING: Failed to set Tag Offset: {e}. Merge collisions may occur.", flush=True)
+
     print(f"[Worker V{args.tag}] Loading CAD file...", flush=True)
     try:
         if not gen.load_cad_file(args.input):
