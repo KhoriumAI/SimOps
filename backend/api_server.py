@@ -620,44 +620,44 @@ def register_routes(app):
 
         return jsonify({"message": "Mesh generation started", "project_id": project_id})
 
-@app.route('/api/projects/<project_id>/stop', methods=['POST'])
-@jwt_required()
-def stop_mesh(project_id: str):
-    current_user_id = int(get_jwt_identity())
-    project = Project.query.get(project_id)
+    @app.route('/api/projects/<project_id>/stop', methods=['POST'])
+    @jwt_required()
+    def stop_mesh(project_id: str):
+        current_user_id = int(get_jwt_identity())
+        project = Project.query.get(project_id)
 
-    if not project:
-        return jsonify({"error": "Project not found"}), 404
+        if not project:
+            return jsonify({"error": "Project not found"}), 404
 
-    if project.user_id != current_user_id:
-        return jsonify({"error": "Access denied"}), 403
-    
-    # Try to find and kill the process
-    process_killed = False
-    with generation_lock:
-        if project_id in running_processes:
-            try:
-                print(f"[API] Stopping process for project {project_id}")
-                running_processes[project_id].terminate()
-                # Give it a tiny bit of time to cleanup?
-                process_killed = True
-            except Exception as e:
-                print(f"[API] Error stopping process: {e}")
-                # Try kill if terminate failed
+        if project.user_id != current_user_id:
+            return jsonify({"error": "Access denied"}), 403
+        
+        # Try to find and kill the process
+        process_killed = False
+        with generation_lock:
+            if project_id in running_processes:
                 try:
-                    running_processes[project_id].kill()
+                    print(f"[API] Stopping process for project {project_id}")
+                    running_processes[project_id].terminate()
+                    # Give it a tiny bit of time to cleanup?
                     process_killed = True
-                except Exception as e2:
-                    print(f"[API] Error killing process: {e2}")
+                except Exception as e:
+                    print(f"[API] Error stopping process: {e}")
+                    # Try kill if terminate failed
+                    try:
+                        running_processes[project_id].kill()
+                        process_killed = True
+                    except Exception as e2:
+                        print(f"[API] Error killing process: {e2}")
 
-    # Force status update
-    if project.status == 'processing':
-        project.status = 'stopped'
-        db.session.commit()
-        return jsonify({"message": "Mesh generation stopped", "process_killed": process_killed})
-    else:
-        # It might have already finished or been stopped
-        return jsonify({"message": f"Project is already in state {project.status}", "process_killed": process_killed})
+        # Force status update
+        if project.status == 'processing':
+            project.status = 'stopped'
+            db.session.commit()
+            return jsonify({"message": "Mesh generation stopped", "process_killed": process_killed})
+        else:
+            # It might have already finished or been stopped
+            return jsonify({"message": f"Project is already in state {project.status}", "process_killed": process_killed})
 
 
     @app.route('/api/projects/<project_id>/status', methods=['GET'])
