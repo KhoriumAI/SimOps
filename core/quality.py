@@ -63,7 +63,10 @@ class MeshQualityAnalyzer:
                 return None
 
             total_elements = sum(len(tags) for tags in element_tags)
-            total_nodes = len(set(node for nodes in node_tags for node in nodes))
+            
+            # Fast node counting using NumPy
+            all_node_tags = np.concatenate(node_tags) if node_tags else np.array([], dtype=int)
+            total_nodes = len(np.unique(all_node_tags))
 
             quality_metrics = {
                 'total_elements': total_elements,

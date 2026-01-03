@@ -1410,24 +1410,22 @@ def parse_msh_file(msh_filepath: str):
         except Exception as e:
             print(f"[MESH PARSE] Failed to load quality data from {data_file}: {e}")
 
+    # Unified Vivid Color Scale used by all parsing paths
     def get_color(q, metric='sicn'):
         if q is None:
             return 0.29, 0.56, 0.89  # Blue default (Quality missing)
         
-        # Mapping quality values to vivid colors
-        # Red (0.0/Bad) -> Yellow (0.5/Ok) -> Green (1.0/Excellent)
         val = q
         
         if metric == 'sicn':
             if val < 0: return 0.9, 0.1, 0.1 # VIVID RED for inverted!
-            # Scale from 0 (Red) to 1 (Green)
-            # Use a slightly sharper transition for visibility
+            # Sharper transition for SICN [0..1]
             if val < 0.3:
-                # 0..0.3 maps to Red..Yellow
+                # 0..0.3 maps Red -> Yellow
                 t = val / 0.3
                 return 0.9, 0.1 + 0.8 * t, 0.1
             else:
-                # 0.3..1.0 maps to Yellow..Green
+                # 0.3..1.0 maps Yellow -> Green
                 t = (val - 0.3) / 0.7
                 return 0.9 - 0.8 * t, 0.9, 0.1
         elif metric == 'skewness':
@@ -1436,24 +1434,20 @@ def parse_msh_file(msh_filepath: str):
             val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
         elif metric == 'minAngle':
             val = max(0.0, min(1.0, q / 60.0))
-        else: # Default for other metrics if not explicitly handled above
-            val = max(0.0, min(1.0, q))
             
-        # Generic vivid scale for other metrics
         t = max(0.0, min(1.0, val))
         if t < 0.5:
-            # Red to Yellow
             return 1.0, t * 2, 0.0
         else:
-            # Yellow to Green
             return 1.0 - (t - 0.5) * 2, 1.0, 0.0
 
     def get_q_value(tag, data_dict):
         if not data_dict: return None
-        # JSON keys were converted to int above, but some might be strings
-        v = data_dict.get(int(tag))
-        if v is None: v = data_dict.get(str(tag))
-        return v
+        try:
+            v = data_dict.get(int(tag))
+            if v is None: v = data_dict.get(str(tag))
+            return v
+        except: return None
 
     try:
         # Try to detect format
@@ -1696,24 +1690,6 @@ def parse_msh_file(msh_filepath: str):
         colors_aspect_ratio = []
         colors_min_angle = []
         
-        def get_color(q, metric='sicn'):
-            if q is None:
-                return 0.29, 0.56, 0.89
-            val = q
-            if metric == 'skewness':
-                val = max(0.0, min(1.0, 1.0 - q))
-            elif metric == 'aspect_ratio':
-                val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
-            elif metric == 'minAngle':
-                val = max(0.0, min(1.0, q / 60.0))
-            else:
-                val = max(0.0, min(1.0, q))
-            if val <= 0.1: return 0.8, 0.0, 0.0
-            elif val < 0.3: return 1.0, 0.3 * (val - 0.1)/0.2, 0.0
-            elif val < 0.5: return 1.0, 0.3 + 0.7 * (val - 0.3)/0.2, 0.0
-            elif val < 0.7: return 1.0 - 0.5 * (val - 0.5)/0.2, 1.0, 0.0
-            else: return 0.5 - 0.5 * min(1.0, (val - 0.7)/0.3), 0.8 + 0.2 * min(1.0, (val - 0.7)/0.3), 0.2 * min(1.0, (val - 0.7)/0.3)
-
         face_map = {}
         
         def process_element(el_tag, el_type, node_ids, entity_tag=0):
@@ -1743,10 +1719,14 @@ def parse_msh_file(msh_filepath: str):
                 except KeyError: pass
             elif el_type in [2, 9]:  # Triangles (surface mesh)
                 try:
+                    # Assembly logic: Triangles are often redundant or internal.
+                    # We only include them if they are NOT clearly part of a volume-only assembly.
+                    # For now, let's treat them as surfaces but don't force 'is_surface' if we have volumes.
                     n = [node_id_to_index[nid] for nid in node_ids[:3]]
                     key = tuple(sorted(n))
-                    # Mark as explicit surface to prevent it being hidden by volume sharing
-                    face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag, 'is_surface': True}
+                    if key not in face_map:
+                        face_map[key] = {'nodes': n, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag, 'is_surface': True}
+                    face_map[key]['is_surface'] = True
                 except KeyError: pass
 
         if msh_version.startswith('4'):
