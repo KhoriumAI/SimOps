@@ -29,25 +29,36 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /home/ec2-user/backend
+            set -e
             
-            # Pull latest code (Force sync to avoid conflicts)
+            echo "[DEPLOY] Navigating to backend directory..."
+            cd /home/ec2-user/backend || { echo "[ERROR] Failed to cd to /home/ec2-user/backend"; exit 1; }
+            
+            echo "[DEPLOY] Pulling latest code..."
             git fetch --all
             git reset --hard origin/main
+            git log --oneline -1
             
-            # Activate virtual environment
-            source venv/bin/activate
+            echo "[DEPLOY] Activating virtual environment..."
+            source venv/bin/activate || { echo "[ERROR] Failed to activate venv"; exit 1; }
+            which python
             
-            # Install/update dependencies
-            pip install -r backend/requirements.txt
+            echo "[DEPLOY] Installing dependencies..."
+            pip install -r backend/requirements.txt 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
             
-            # Kill any running processes on port 3000
+            echo "[DEPLOY] Killing any processes on port 3000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
             
-            # Restart the application
+            echo "[DEPLOY] Restarting gunicorn service..."
             sudo systemctl restart gunicorn || sudo systemctl start gunicorn
             
-            echo "✅ Backend deployed successfully!"
+            echo "[DEPLOY] Waiting for service to start..."
+            sleep 3
+            
+            echo "[DEPLOY] Checking gunicorn status..."
+            sudo systemctl status gunicorn --no-pager || true
+            
+            echo "[OK] Backend deployed successfully!"
 
       - name: Health Check
         uses: appleboy/ssh-action@v1
@@ -56,8 +67,19 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Wait for service to start
+            echo "[HEALTH] Waiting for service to fully start..."
             sleep 5
             
-            # Check if API is responding (Fail properly if not)
-            curl -f http://localhost:3000/api/health
+            echo "[HEALTH] Checking what is listening on port 3000..."
+            sudo netstat -tlnp | grep 3000 || echo "[WARNING] Nothing listening on port 3000!"
+            
+            echo "[HEALTH] Running health check..."
+            if curl -sf http://localhost:3000/api/health; then
+              echo ""
+              echo "[OK] Health check passed!"
+            else
+              echo "[ERROR] Health check failed!"
+              echo "[DEBUG] Recent gunicorn logs:"
+              sudo journalctl -u gunicorn -n 20 --no-pager || true
+              exit 1
+            fi
