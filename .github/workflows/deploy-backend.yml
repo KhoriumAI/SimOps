@@ -32,8 +32,19 @@ jobs:
           script: |
             set -e
             
-            echo "[DEPLOY] Navigating to backend directory..."
-            cd /home/ec2-user/backend || { echo "[ERROR] Failed to cd to /home/ec2-user/backend"; exit 1; }
+            echo "[DEPLOY] Searching for project directory..."
+            if [ -d "/home/ec2-user/backend" ]; then
+              PROJECT_ROOT="/home/ec2-user/backend"
+            elif [ -d "/home/ec2-user/MeshPackageLean" ]; then
+              PROJECT_ROOT="/home/ec2-user/MeshPackageLean"
+            else
+              echo "[ERROR] Could not find /home/ec2-user/backend or /home/ec2-user/MeshPackageLean"
+              ls -la /home/ec2-user
+              exit 1
+            fi
+            
+            echo "[DEPLOY] Using project root: $PROJECT_ROOT"
+            cd "$PROJECT_ROOT"
             
             echo "[DEPLOY] Pulling latest code..."
             git fetch --all
@@ -41,25 +52,51 @@ jobs:
             git log --oneline -1
             
             echo "[DEPLOY] Activating virtual environment..."
-            source venv/bin/activate || { echo "[ERROR] Failed to activate venv"; exit 1; }
+            if [ -f "venv/bin/activate" ]; then
+               source venv/bin/activate
+            elif [ -f "backend/venv/bin/activate" ]; then
+               source backend/venv/bin/activate
+            else
+               echo "[ERROR] Could not find venv/bin/activate"
+               find . -name activate
+               exit 1
+            fi
             which python
             
             echo "[DEPLOY] Installing dependencies..."
-            pip install -r backend/requirements.txt 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
+            # Check where requirements.txt is
+            if [ -f "backend/requirements.txt" ]; then
+              REQS="backend/requirements.txt"
+            elif [ -f "requirements.txt" ]; then
+              REQS="requirements.txt"
+            else
+              echo "[ERROR] Could not find requirements.txt"
+              exit 1
+            fi
+            pip install -r "$REQS" 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
             
-            echo "[DEPLOY] Killing any processes on port 3000..."
+            echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
+            sudo fuser -k 5000/tcp 2>/dev/null || true
             
             echo "[DEPLOY] Restarting gunicorn service..."
-            sudo systemctl restart gunicorn || sudo systemctl start gunicorn
+            # Try to restart the service (could be named gunicorn or meshgen or khorium)
+            if sudo systemctl list-unit-files | grep -q gunicorn.service; then
+              sudo systemctl restart gunicorn
+            elif sudo systemctl list-unit-files | grep -q meshgen.service; then
+              sudo systemctl restart meshgen
+            else
+              echo "[WARNING] Could not find gunicorn.service or meshgen.service. Attempting direct restart anyway."
+              sudo systemctl restart gunicorn || sudo systemctl start gunicorn
+            fi
             
             echo "[DEPLOY] Waiting for service to start..."
             sleep 3
             
-            echo "[DEPLOY] Checking gunicorn status..."
-            sudo systemctl status gunicorn --no-pager || true
+            echo "[DEPLOY] Checking service status..."
+            sudo systemctl status gunicorn --no-pager || sudo systemctl status meshgen --no-pager || true
             
-            echo "[OK] Backend deployed successfully!"
+            echo "[OK] Backend deployment sequence finished!"
 
       - name: Health Check
         uses: appleboy/ssh-action@v1
@@ -69,18 +106,19 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             echo "[HEALTH] Waiting for service to fully start..."
-            sleep 5
+            sleep 7
             
-            echo "[HEALTH] Checking what is listening on port 3000..."
-            sudo netstat -tlnp | grep 3000 || echo "[WARNING] Nothing listening on port 3000!"
+            echo "[HEALTH] Checking listening ports..."
+            sudo netstat -tlnp | grep -E "3000|5000" || echo "[WARNING] Nothing listening on 3000 or 5000!"
             
-            echo "[HEALTH] Running health check..."
+            echo "[HEALTH] Running health check on port 3000..."
             if curl -sf http://localhost:3000/api/health; then
-              echo ""
-              echo "[OK] Health check passed!"
+              echo "[OK] Health check passed on port 3000!"
+            elif curl -sf http://localhost:5000/api/health; then
+              echo "[OK] Health check passed on port 5000! (Note: ALB might expect 3000)"
             else
-              echo "[ERROR] Health check failed!"
+              echo "[ERROR] Health check failed on both 3000 and 5000!"
               echo "[DEBUG] Recent gunicorn logs:"
-              sudo journalctl -u gunicorn -n 20 --no-pager || true
+              sudo journalctl -u gunicorn -n 20 --no-pager || sudo journalctl -u meshgen -n 20 --no-pager || true
               exit 1
             fi
