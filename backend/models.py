@@ -198,6 +198,34 @@ class TokenBlocklist(db.Model):
     expires_at = db.Column(db.DateTime, nullable=False)
 
 
+class Feedback(db.Model):
+    """User feedback storage"""
+    __tablename__ = 'feedbacks'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Nullable for anonymous if needed
+    user_email = db.Column(db.String(120), nullable=True)  # Capture email even if not logged in
+    
+    type = db.Column(db.String(50), default='feedback')  # feedback, bug, feature
+    message = db.Column(db.Text, nullable=False)
+    
+    # Context
+    url = db.Column(db.String(500), nullable=True)
+    user_agent = db.Column(db.String(500), nullable=True)
+    job_id = db.Column(db.String(50), nullable=True)  # Related job context
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'type': self.type,
+            'message': self.message,
+            'url': self.url,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
 # ============================================================================
 # BATCH PROCESSING MODELS
 # ============================================================================

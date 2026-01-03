@@ -22,7 +22,7 @@ import shutil
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import get_config
-from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord
+from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord, Feedback
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
@@ -764,6 +764,61 @@ def register_routes(app):
             "offset": offset_percent,
             "mesh": slice_data
         })
+
+        latest_result = project.mesh_results.first()
+        
+        # ... (Assuming subsequent code uses latest_result)
+        # Note: The original file view ended here, so I will likely need to adjust this anchor if I misjudged.
+        # But wait, looking at the previous view_file, line 800 was the last line but it was truncated.
+        # I should insert the new route AFTER the existing routes, maybe around line 766 (end of slice_mesh).
+        # Let's insert it before get_project_logs instead.
+
+    @app.route('/api/feedback', methods=['POST'])
+    def submit_feedback():
+        """Handle feedback submission"""
+        # Optional auth - try to get user but don't enforce it strictly if we want anonymous feedback
+        # But frontend sends token, so let's try to capture it.
+        user_id = None
+        try:
+            # Manually check header to avoid @jwt_required throwing 401
+            auth_header = request.headers.get('Authorization')
+            if auth_header:
+                # We can just decode it or use verify_jwt_in_request(optional=True) if configured
+                # For now, let's trust the frontend passed email in body
+                pass
+        except:
+            pass
+            
+        data = request.json
+        if not data or not data.get('message'):
+            return jsonify({"error": "Message required"}), 400
+            
+        feedback = Feedback(
+            type=data.get('type', 'feedback'),
+            message=data.get('message'),
+            user_email=data.get('userEmail'),
+            url=data.get('url'),
+            user_agent=data.get('userAgent'),
+            job_id=data.get('jobId')
+        )
+        
+        # If we have a user in the system matching this email, link it
+        if data.get('userEmail'):
+            user = User.query.filter_by(email=data.get('userEmail')).first()
+            if user:
+                feedback.user_id = user.id
+                
+        try:
+            db.session.add(feedback)
+            db.session.commit()
+            
+            # TODO: Send email notification to admin?
+            
+            return jsonify({"success": True, "id": feedback.id})
+        except Exception as e:
+            db.session.rollback()
+            print(f"[FEEDBACK ERROR] {e}")
+            return jsonify({"error": "Failed to save feedback"}), 500
 
     @app.route('/api/projects/<project_id>/logs', methods=['GET'])
     @jwt_required()

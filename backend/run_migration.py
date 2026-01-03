@@ -120,6 +120,18 @@ def migrate():
                     except Exception as e:
                         print(f"Error adding {col_name}: {e}")
 
+
+        # 4. Feedback table
+        if not inspector.has_table('feedbacks'):
+             print("Creating 'feedbacks' table...")
+             try:
+                 # We can use the model to create the table
+                 from models import Feedback
+                 Feedback.__table__.create(engine)
+                 print("Successfully created 'feedbacks' table")
+             except Exception as e:
+                 print(f"Error creating feedbacks table: {e}")
+
     print("Migration check complete.")
 
 if __name__ == "__main__":

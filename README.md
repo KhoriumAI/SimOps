@@ -11,6 +11,7 @@ Advanced 3D mesh generation toolkit with intelligent strategy selection and qual
 - **VTK Visualization**: Real-time 3D mesh preview with quality coloring
 - **Paintbrush Refinement**: Selectively refine specific regions
 - **Multiple Algorithms**: Tetrahedral, hexahedral, hybrid meshing strategies
+- **HPC Profiling**: Detailed compute latency and sub-process timing logs for Threadripper/EPYC systems
 
 ## Installation
 
