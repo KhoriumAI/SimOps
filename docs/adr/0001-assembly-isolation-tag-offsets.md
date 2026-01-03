@@ -29,9 +29,18 @@ We enforced unique numeric ranges for every volume's entities by setting `Mesh.F
 ### Secondary Decision: Dynamic Meshing Strategy
 * *Mechanism:* The isolation worker now accepts a `--strategy` argument. It defaults to the fast **HXT** algorithm (`tet_hxt_optimized`) but can fallback to **Delaunay** (`Mesh.Algorithm3D=1`) if requested by the user or if HXT fails.
 
+### Secondary Decision: Non-Conformal Assembly Merging
+* *The Problem:* Even with unique tags, `gmsh.model.mesh.removeDuplicateNodes()` was forcing nodes to merge at interfaces between volumes. Since the volumes are meshed in isolation (non-conformal), their surface triangulations do not match. Merging these mismatched nodes twisted elements, causing inversion (negative SICN).
+* *The Fix:* We explicitly **DISABLED** `removeDuplicateNodes()` for surgical assemblies.
+* *Result:* The final assembly is a collection of valid, touching, but **discontinuous** (non-conformal) meshes.
+* *Trade-off:* 
+  - **Pros:** Guarantees valid geometry (Positive SICN).
+  - **Cons:** Solvers must use contact interfaces (standard for assemblies) as nodes are not shared across boundaries.
+
 ## 3. Mathematical & Physical Implications
 * *Validity:* Crucial. Without unique tags, the mesh topology is mathematically invalid (negative Jacobian/SICN) and unusable for FEA/CFD.
 * *Stability:* The offset of 1M allows for volumes with up to 1M nodes/elements. If a single part exceeds this, collisions resume. (Current typical parts are <100k nodes).
+* *Conformality:* The mesh is now non-conformal. Loads will not transfer across boundaries without explicit contact definitions in the solver.
 
 ## 4. Performance Trade-offs
 * *Compute Cost:* Negligible. Setting the offset is instantaneous.
