@@ -10,6 +10,7 @@ on:
       - "backend/**"
       - "apps/**"
       - "core/**"
+      - ".github/workflows/deploy-backend.yml"
   
   # Allow manual trigger from Actions tab
   workflow_dispatch:
