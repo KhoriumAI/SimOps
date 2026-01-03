@@ -284,6 +284,7 @@ class S3Storage(StorageBackend):
         """Download S3 file to local filesystem (for mesh processing)"""
         bucket, key = self._parse_s3_uri(s3_path)
         
+        print(f"[S3 DEBUG] Downloading from Bucket='{bucket}', Key='{key}'")
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
         self.s3_client.download_file(bucket, key, local_path)
         print(f"[S3] Downloaded {s3_path} to {local_path}")

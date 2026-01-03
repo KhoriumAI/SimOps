@@ -715,66 +715,97 @@ def register_routes(app):
             return jsonify({"error": "No mesh available for this project"}), 404
             
         msh_path = Path(result.output_path)
-        if not msh_path.exists():
-            return jsonify({"error": "Mesh file not found on disk"}), 404
+        
+        # Handle S3 paths
+        use_s3 = app.config.get('USE_S3', False)
+        is_s3 = str(result.output_path).startswith('s3://')
+        
+        temp_dir = None
+        try:
+            if use_s3 and is_s3:
+                # Download to temp
+                storage = get_storage()
+                import tempfile
+                import shutil
+                temp_dir = tempfile.mkdtemp()
+                local_msh_path = Path(temp_dir) / msh_path.name
+                print(f"[SLICE] Downloading mesh from S3: {result.output_path}")
+                try:
+                    storage.download_to_local(str(result.output_path), str(local_msh_path))
+                    msh_path = local_msh_path
+                except Exception as e:
+                     print(f"[SLICE ERROR] Failed to download from S3: {e}")
+                     return jsonify({"error": f"Failed to retrieve mesh: {e}"}), 500
             
-        # Quality file
-        quality_path = msh_path.with_name(msh_path.stem + "_result.json")
-        quality_map = {}
-        if quality_path.exists():
-            try:
-                with open(quality_path, 'r') as f:
-                    res_data = json.load(f)
-                    quality_map = res_data.get('per_element_quality', {})
-            except: pass
+            if not msh_path.exists():
+                return jsonify({"error": "Mesh file not found on disk"}), 404
+                
+            # Quality file
+            quality_path = msh_path.with_name(msh_path.stem + "_result.json")
             
-        # Parse mesh for volume elements
-        print(f"[SLICE] Parsing mesh for slice: {msh_path.name}...")
-        nodes, elements = parse_msh_for_slicing(msh_path)
-        
-        if not nodes or not elements:
-            return jsonify({"error": "Could not parse volume elements from mesh"}), 400
+            # If S3, we need to try to download the quality file too if we want it
+            if use_s3 and is_s3:
+                 s3_quality_path = str(result.output_path).replace('.msh', '_result.json')
+                 local_quality_path = Path(temp_dir) / Path(s3_quality_path).name
+                 try:
+                     storage.download_to_local(s3_quality_path, str(local_quality_path))
+                     quality_path = local_quality_path
+                 except:
+                     print(f"[SLICE] Quality file not found on S3 or download failed: {s3_quality_path}")
             
-        # Calculate bounds for plane positioning
-        pts = np.array(list(nodes.values()))
-        bbox_min = pts.min(axis=0)
-        bbox_max = pts.max(axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        size = bbox_max - bbox_min
-        
-        # Define plane
-        plane_origin = center.tolist()
-        if axis == 'x':
-            plane_normal = [1, 0, 0]
-            plane_origin[0] = bbox_max[0] - (offset_percent / 100.0) * size[0]
-        elif axis == 'y':
-            plane_normal = [0, 1, 0]
-            plane_origin[1] = bbox_max[1] - (offset_percent / 100.0) * size[1]
-        else: # z
-            plane_normal = [0, 0, 1]
-            plane_origin[2] = bbox_max[2] - (offset_percent / 100.0) * size[2]
+            quality_map = {}
+            if quality_path.exists():
+                try:
+                    with open(quality_path, 'r') as f:
+                        res_data = json.load(f)
+                        quality_map = res_data.get('per_element_quality', {})
+                except: pass
+                
+            # Parse mesh for volume elements
+            print(f"[SLICE] Parsing mesh for slice: {msh_path.name}...")
+            nodes, elements = parse_msh_for_slicing(str(msh_path))
             
-        # Generate slice
-        print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
-        slice_data = generate_slice_mesh(nodes, elements, quality_map, plane_origin, plane_normal)
-        
-        v_count = len(slice_data.get('vertices', [])) // 3
-        print(f"[SLICE] Generated {v_count} vertices")
-        
-        return jsonify({
-            "success": True,
-            "axis": axis,
-            "offset": offset_percent,
-            "mesh": slice_data
-        })
-
-        latest_result = project.mesh_results.first()
-        
-        # ... (Assuming subsequent code uses latest_result)
-        # Note: The original file view ended here, so I will likely need to adjust this anchor if I misjudged.
-        # But wait, looking at the previous view_file, line 800 was the last line but it was truncated.
-        # I should insert the new route AFTER the existing routes, maybe around line 766 (end of slice_mesh).
-        # Let's insert it before get_project_logs instead.
+            if not nodes or not elements:
+                return jsonify({"error": "Could not parse volume elements from mesh"}), 400
+                
+            # Calculate bounds for plane positioning
+            pts = np.array(list(nodes.values()))
+            bbox_min = pts.min(axis=0)
+            bbox_max = pts.max(axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            size = bbox_max - bbox_min
+            
+            # Define plane
+            plane_origin = center.tolist()
+            if axis == 'x':
+                plane_normal = [1, 0, 0]
+                plane_origin[0] = bbox_max[0] - (offset_percent / 100.0) * size[0]
+            elif axis == 'y':
+                plane_normal = [0, 1, 0]
+                plane_origin[1] = bbox_max[1] - (offset_percent / 100.0) * size[1]
+            else: # z
+                plane_normal = [0, 0, 1]
+                plane_origin[2] = bbox_max[2] - (offset_percent / 100.0) * size[2]
+                
+            # Generate slice
+            print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
+            slice_data = generate_slice_mesh(nodes, elements, quality_map, plane_origin, plane_normal)
+            
+            v_count = len(slice_data.get('vertices', [])) // 3
+            print(f"[SLICE] Generated {v_count} vertices")
+            
+            return jsonify({
+                "success": True,
+                "axis": axis,
+                "offset": offset_percent,
+                "mesh": slice_data
+            })
+        finally:
+            if temp_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except: pass
 
     @app.route('/api/feedback', methods=['POST'])
     def submit_feedback():
