@@ -42,9 +42,17 @@ def migrate():
     columns = [c[1] for c in cursor.fetchall()]
     
     mesh_results_migrations = [
+        ('score', 'FLOAT'),
+        ('output_size', 'BIGINT DEFAULT 0'),
+        ('quality_metrics', 'JSON'),
+        ('logs', 'JSON'),
         ('boundary_zones', 'JSON'),
         ('params', 'JSON'),
-        ('job_id', 'VARCHAR(50)')
+        ('job_id', 'VARCHAR(50)'),
+        ('processing_time', 'FLOAT'),
+        ('node_count', 'INTEGER'),
+        ('element_count', 'INTEGER'),
+        ('completed_at', 'DATETIME')
     ]
 
     for col_name, col_type in mesh_results_migrations:
@@ -62,7 +70,10 @@ def migrate():
     user_migrations = [
         ('storage_quota', 'BIGINT DEFAULT 1073741824'),
         ('storage_used', 'BIGINT DEFAULT 0'),
-        ('last_login', 'DATETIME')
+        ('last_login', 'DATETIME'),
+        ('name', 'VARCHAR(100)'),
+        ('role', 'VARCHAR(20) DEFAULT "user"'),
+        ('is_active', 'BOOLEAN DEFAULT 1')
     ]
 
     for col_name, col_type in user_migrations:

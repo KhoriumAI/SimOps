@@ -1564,17 +1564,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                             
                             # Find candidate volume elements using the first corner node
                             first_node = int(enodes[start])
-                            candidates = node_to_vol.get(first_node, [])
                             
                             worst_sicn = 1.0
                             worst_gamma = 1.0
                             worst_skew = 0.0
                             worst_ar = 1.0
+                            worst_angle = 60.0
                             found_adj = False
                             
-                            for vol_tag in candidates:
-                                # We'd need the volume nodes to be 100% sure, but this is a heuristic:
-                                # if all triangle corners are in the tet corners, they are definitely adjacent.
                             # ROBUST INTERSECTION:
                             adj_vols = None
                             for nid in element_corners:
