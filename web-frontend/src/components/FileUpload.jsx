@@ -24,7 +24,7 @@ export default function FileUpload({ onFileUpload, compact = false }) {
       setSelectedFile(file)
       onFileUpload(file)
     } else {
-      alert('Please upload a valid CAD file (.step, .stp, or .stl)')
+      alert('Please upload a valid CAD or mesh file (.step, .stp, .stl, .msh, etc.)')
     }
   }
 
@@ -37,28 +37,27 @@ export default function FileUpload({ onFileUpload, compact = false }) {
   }
 
   const isValidFile = (file) => {
-    const validExtensions = ['.step', '.stp', '.stl']
+    const validExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk']
     const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0]
     return validExtensions.includes(extension)
   }
 
   if (compact) {
-  return (
+    return (
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`border-2 border-dashed rounded-lg px-3 py-3 cursor-pointer transition-all ${
-          isDragging
-            ? 'border-blue-500 bg-blue-50'
-            : 'border-gray-300 bg-white hover:border-blue-400 hover:bg-gray-50'
-        }`}
+        className={`border-2 border-dashed rounded-lg px-3 py-3 cursor-pointer transition-all ${isDragging
+          ? 'border-blue-500 bg-blue-50'
+          : 'border-gray-300 bg-white hover:border-blue-400 hover:bg-gray-50'
+          }`}
       >
         <input
           ref={fileInputRef}
           type="file"
-          accept=".step,.stp,.stl"
+          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
           onChange={handleFileSelect}
           className="hidden"
         />
@@ -78,38 +77,37 @@ export default function FileUpload({ onFileUpload, compact = false }) {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onClick={() => fileInputRef.current?.click()}
-      className={`border-2 border-dashed rounded-lg p-6 cursor-pointer transition-all bg-white ${
-        isDragging
-          ? 'border-blue-500 bg-blue-50'
-          : 'border-gray-300 hover:border-gray-400'
+      className={`border-2 border-dashed rounded-lg p-6 cursor-pointer transition-all bg-white ${isDragging
+        ? 'border-blue-500 bg-blue-50'
+        : 'border-gray-300 hover:border-gray-400'
         }`}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".step,.stp,.stl"
-          onChange={handleFileSelect}
-          className="hidden"
-        />
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
 
-        <div className="text-center">
-          {selectedFile ? (
-            <>
+      <div className="text-center">
+        {selectedFile ? (
+          <>
             <File className="w-8 h-8 mx-auto mb-2 text-blue-500" />
-            <p className="text-sm font-medium text-blue-600">{selectedFile.name}</p>
-              <p className="text-xs text-gray-500 mt-1">
-                {(selectedFile.size / 1024).toFixed(1)} KB
-              </p>
-            </>
-          ) : (
-            <>
+            <p className="text-sm font-medium text-blue-600 line-clamp-3 break-all">{selectedFile.name}</p>
+            <p className="text-xs text-gray-500 mt-1">
+              {(selectedFile.size / 1024).toFixed(1)} KB
+            </p>
+          </>
+        ) : (
+          <>
             <p className="text-sm text-gray-700 font-medium">Drag and drop file here</p>
             <p className="text-xs text-gray-500 mt-1">Limit 200MB per file • STEP, STP</p>
             <button className="mt-3 px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 transition-colors">
               Browse files
             </button>
-            </>
-          )}
+          </>
+        )}
       </div>
     </div>
   )

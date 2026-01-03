@@ -7,11 +7,11 @@ import { Upload, File, X, FolderOpen, CheckCircle, AlertCircle, Loader2 } from '
  * Multi-file dropzone for batch mesh generation.
  * Supports drag & drop of multiple files or folder selection.
  */
-export default function BatchUpload({ 
-  onFilesSelected, 
-  maxFiles = 10, 
+export default function BatchUpload({
+  onFilesSelected,
+  maxFiles = 10,
   maxFileSize = 500 * 1024 * 1024,  // 500MB
-  disabled = false 
+  disabled = false
 }) {
   const [isDragging, setIsDragging] = useState(false)
   const [selectedFiles, setSelectedFiles] = useState([])
@@ -19,19 +19,19 @@ export default function BatchUpload({
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
-  const allowedExtensions = ['.step', '.stp', '.stl']
+  const allowedExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk']
 
   const validateFile = useCallback((file) => {
     const ext = file.name.toLowerCase().slice(file.name.lastIndexOf('.'))
-    
+
     if (!allowedExtensions.includes(ext)) {
       return { valid: false, error: `Invalid type: ${ext}` }
     }
-    
+
     if (file.size > maxFileSize) {
       return { valid: false, error: `Too large: ${(file.size / (1024 * 1024)).toFixed(1)}MB` }
     }
-    
+
     return { valid: true }
   }, [maxFileSize])
 
@@ -173,7 +173,7 @@ export default function BatchUpload({
           ref={fileInputRef}
           type="file"
           multiple
-          accept=".step,.stp,.stl"
+          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
           onChange={handleFileSelect}
           className="hidden"
           disabled={disabled}
@@ -243,7 +243,7 @@ export default function BatchUpload({
               >
                 {getStatusIcon(item.status)}
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-gray-800 truncate">
+                  <p className="text-xs font-medium text-gray-800 line-clamp-3 break-all">
                     {item.name}
                   </p>
                   <p className="text-[10px] text-gray-500">

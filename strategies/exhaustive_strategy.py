@@ -1485,7 +1485,31 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 
                 # Check for inverted elements
                 if metrics.get('gmsh_sicn') and metrics['gmsh_sicn']['min'] < 0:
-                    self.log_message("[!] WARNING: Merged assembly contains inverted elements. This may be due to overlapping volumes in the source CAD.")
+                    self.log_message("[!] WARNING: Merged assembly contains inverted elements. Attempting auto-repair...")
+                    
+                    # Select all volume elements (dim=3)
+                    # We can't easily valid-check individual elements via Python API rapidly,
+                    # but reverse() on 3D entities often fixes orientation issues from merging.
+                    # A more robust way is to re-orient based on volume.
+                    
+                    try:
+                        # Get all 3D entities
+                        vol_tags = [t[1] for t in gmsh.model.getEntities(3)]
+                        if vol_tags:
+                            # Re-orient elements in all volumes
+                            gmsh.model.mesh.reverse([(3, t) for t in vol_tags])
+                            self.log_message(f"  > Applied orientation fix to {len(vol_tags)} volumes")
+                            
+                            # Re-analyze to check if it worked
+                            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
+                            if metrics.get('gmsh_sicn') and metrics['gmsh_sicn']['min'] >= 0:
+                                self.log_message("  > [SUCCESS] Auto-repair fixed inverted elements!")
+                                # Update stored metrics
+                                self.quality_history[-1]['metrics'] = metrics
+                            else:
+                                self.log_message("  > [FAILED] Auto-repair could not fix all inverted elements. CAD geometry may be self-intersecting.")
+                    except Exception as repair_err:
+                         self.log_message(f"  > [ERROR] Repair failed: {repair_err}")
         except Exception as e:
             self.log_message(f"[!] Analysis failed: {e}")
 

@@ -182,7 +182,7 @@ def upload_cad_file():
         return jsonify({"error": "No file selected"}), 400
 
     # Check file extension
-    allowed_extensions = {'.step', '.stp', '.stl'}
+    allowed_extensions = {'.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk'}
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in allowed_extensions:
         return jsonify({"error": f"Invalid file type. Allowed: {allowed_extensions}"}), 400
