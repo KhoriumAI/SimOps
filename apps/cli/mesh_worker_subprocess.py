@@ -1444,27 +1444,15 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             absolute_output_file = str(Path(result.output_file).resolve().absolute())
 
             # Extract per-element quality for visualization
-            # For now, create a simple quality mapping based on aggregate metrics
-            # In future: extract this directly from gmsh before finalization
+            print("[DEBUG] Attempting to extract per-element quality...")
+            quality_metrics = metrics.copy()
             per_element_quality = {}
             per_element_gamma = {}
             per_element_skewness = {}
             per_element_aspect_ratio = {}
             per_element_min_angle = {}
-            quality_metrics = {}
             
-            #Try to get quality metrics from best attempt
-            if 'gmsh_sicn' in metrics:
-                quality_metrics['sicn_min'] = metrics['gmsh_sicn'].get('min', 0)
-                quality_metrics['sicn_avg'] = metrics['gmsh_sicn'].get('avg', 0)
-                quality_metrics['sicn_max'] = metrics['gmsh_sicn'].get('max', 1)
-                quality_metrics['sicn_10_percentile'] = metrics.get('quality_10_percentile', 0.3)
-            
-            if 'gmsh_gamma' in metrics:
-                quality_metrics['gamma_min'] = metrics['gmsh_gamma'].get('min', 0)
-                quality_metrics['gamma_avg'] = metrics['gmsh_gamma'].get('avg', 0)
-                quality_metrics['gamma_max'] = metrics['gmsh_gamma'].get('max', 1)
-            
+            # Additional metrics summary
             if 'skewness' in metrics:
                 quality_metrics['skewness_min'] = metrics['skewness'].get('min', 0)
                 quality_metrics['skewness_avg'] = metrics['skewness'].get('avg', 0)
@@ -1476,8 +1464,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 quality_metrics['aspect_ratio_max'] = metrics['aspect_ratio'].get('max', 1)
 
             # Extract per-element quality by re-opening the saved mesh
-            # This needs to be done AFTER gmsh.finalize() in the mesh generator
             try:
+
                 import gmsh as gmsh_reload
                 import numpy as np
                 
@@ -1654,6 +1642,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                     quality_metrics['aspect_ratio_max'] = float(max(vals))
                     quality_metrics['aspect_ratio_avg'] = float(np.mean(vals))
                 
+                if not quality_metrics:
+                    quality_metrics = {}
+                
+                # Ensure element counts are in quality_metrics for the GUI
+                quality_metrics['total_elements'] = metrics.get('total_elements', 0)
+                quality_metrics['element_count'] = metrics.get('total_elements', 0)
+                quality_metrics['total_nodes'] = metrics.get('total_nodes', 0)
+
                 gmsh_reload.finalize()
             except Exception as e:
                 import traceback

@@ -28,3 +28,17 @@ Use `diagnose_auth.py` to verify database connectivity and environment setup:
 ```bash
 python diagnose_auth.py
 ```
+
+## Database Migrations
+
+When updating SQLAlchemy models in `models.py`, the production PostgreSQL RDS instance must be updated to match.
+
+### Local Development
+In development (SQLite), you can usually just delete the `backend/instance/mesh_app.db` file and restart the server, but for PostgreSQL:
+
+### Production (AWS RDS)
+1. **Prepare a Patch Script**: Create a script using `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+2. **Execute via SSM**: If direct access is limited, use AWS Systems Manager (SSM) to run the script on the application instance.
+3. **Verify**: Use the diagnostic scripts to ensure the schema is in sync.
+
+Refer to **ADR-0015** for the specific procedure followed during the Jan 2026 schema update.

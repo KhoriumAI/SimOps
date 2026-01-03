@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Environment Management**: Migrated to GitHub Secrets-driven `.env` generation for secure production configuration.
 
 ### Fixed
+- **Database Schema Mismatch**: Resolved `UndefinedColumn` error (missing `job_id`) by performing a comprehensive schema update on the AWS RDS PostgreSQL instance. Verified that `mesh_results`, `projects`, and `users` tables are now in sync with the current Python models.
 - **Registration 504 Error**: Resolved backend service hangs caused by a missing RDS Security Group (blocking connectivity) and a Python `IndentationError` in the log streaming loop.
 - **Login Persistence**: Transitioned Dev backend from volatile SQLite file to persistent PostgreSQL RDS database to prevent data loss during deployments.
 - **Database Connectivity**: Added mandatory `sslmode=require` and connection timeouts to robustly handle AWS RDS connections.

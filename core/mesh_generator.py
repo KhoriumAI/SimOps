@@ -1372,6 +1372,9 @@ class BaseMeshGenerator(ABC):
     def save_mesh(self, output_file: str) -> bool:
         """Save mesh to file"""
         try:
+            # CRITICAL: Always save all elements (including surface triangles)
+            # otherwise physical groups will filter them out and viewer will be empty.
+            gmsh.option.setNumber("Mesh.SaveAll", 1)
             gmsh.write(output_file)
             self.log_message(f"[OK] Mesh saved to: {output_file}")
             return True

@@ -198,7 +198,6 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             "linear_tet_delaunay",
             "linear_tet_frontal",
             "subdivide_and_mesh",
-            "subdivide_and_mesh",
             "automatic_gmsh_default",
             "resurfacing_reconstruction",
             "bounding_box_fallback" # Absolute last resort
