@@ -61,8 +61,23 @@ def main():
             sys.exit(0)
             
         # Try 3D
+        # Try 3D
         print(f"[Worker V{args.tag}] Generating 3D mesh (Order {args.order}, MinSize {args.min_size}, MaxSize {args.max_size})...", flush=True)
-        success, _ = gen._try_tet_hxt_optimized()
+        
+        # CRITICAL FIX: Switch from HXT (brittle, causes inversion) to standard Delaunay (robust)
+        # HXT is fast but often produces inverted elements on thin/complex geometry.
+        # Standard Delaunay (Algo3D=1) is the industry standard for robustness.
+        
+        # We manually invoke the generation step instead of using the strategy helper
+        # to ensure we have full control over the algorithm.
+        try:
+           gmsh.option.setNumber("Mesh.Algorithm3D", 1) # 1: Delaunay
+           gmsh.option.setNumber("Mesh.Optimize", 1)    # Basic optimization
+           gmsh.model.mesh.generate(3)
+           success = True
+        except Exception as e:
+           print(f"[Worker V{args.tag}] 3D Generation failed: {e}", flush=True)
+           success = False
         if success:
             # CRITICAL: Enforce unique Physical Group for assembly stitching
             # We must use the original tag 'args.tag' so that when merged, 
