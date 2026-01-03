@@ -1737,14 +1737,17 @@ def parse_msh_file(msh_filepath: str):
                 except KeyError: pass
             elif el_type in [2, 9]:  # Triangles (surface mesh)
                 try:
-                    # Assembly logic: Triangles are often redundant or internal.
-                    # We only include them if they are NOT clearly part of a volume-only assembly.
-                    # For now, let's treat them as surfaces but don't force 'is_surface' if we have volumes.
+                    # When we have volume elements, explicit triangles are redundant with tet faces.
+                    # We skip counting them to avoid inflating the count (which would hide boundary faces).
+                    # We only add them if they're NOT already in face_map (from tet processing).
                     n = [node_id_to_index[nid] for nid in node_ids[:3]]
                     key = tuple(sorted(n))
                     if key not in face_map:
-                        face_map[key] = {'nodes': n, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag, 'is_surface': True}
-                    face_map[key]['is_surface'] = True
+                        # This triangle is NOT a face of any tet - it's a standalone surface element
+                        face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag, 'is_surface': True}
+                    else:
+                        # Already exists from tet processing - just mark it as surface
+                        face_map[key]['is_surface'] = True
                 except KeyError: pass
 
         if msh_version.startswith('4'):
