@@ -1559,10 +1559,9 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             self.log_message(f"[!] Analysis failed: {e}")
 
         # Write the merged mesh
-        # For assemblies, SaveAll=0 avoids saving redundant, overlapping surface meshes
-        # that cause "double counting" artifacts and z-fighting in the viewer.
-        # Our native parser extracts the boundary from the volume tets anyway.
-        gmsh.option.setNumber("Mesh.SaveAll", 0)
+        # CRITICAL: We MUST use SaveAll=1 to preserve the elementary surface tags 
+        # for the web viewer selection. Our native parser now handles these correctly.
+        gmsh.option.setNumber("Mesh.SaveAll", 1)
         gmsh.write(output_file)
         gmsh.finalize()
         

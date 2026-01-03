@@ -143,9 +143,9 @@ def main():
                  gen.create_bounding_box_mesh(args.output)
                  sys.exit(0)
 
-            # CRITICAL: Set save_all=False to only save the Physical Volume (tets).
-            # If set to True, we save duplicate surface meshes which cause self-intersections when merged.
-            gen.save_mesh(args.output, save_all=False)
+            # CRITICAL: Set save_all=True to preserve Surface Elements (elementary tags)
+            # for the web viewer's face selection logic.
+            gen.save_mesh(args.output, save_all=True)
             print(f"[Worker V{args.tag}] SUCCESS", flush=True)
             sys.exit(0)
         else:

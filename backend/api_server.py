@@ -2013,6 +2013,9 @@ def parse_msh_file(msh_filepath: str):
                 line_parts = elements_section[curr_line].split()
                 curr_line += 1
                 if not line_parts: continue
+                # DEBUG: Print first few blocks to see what we are parsing
+                if curr_line < 20:
+                     print(f"[MESH PARSE DEBUG] Block Header Raw: {line_parts}")
                 entity_tag_block = int(line_parts[0])
                 el_type = int(line_parts[2])
                 num_els = int(line_parts[3])
@@ -2091,6 +2094,9 @@ def parse_msh_file(msh_filepath: str):
 
         print(f"[MESH PARSE DEBUG] Boundary faces extracted: {boundary_face_count}")
         print(f"[MESH PARSE DEBUG] Faces WITH quality data: {faces_with_quality}")
+        unique_ent_tags = set(entity_tags)
+        print(f"[MESH PARSE DEBUG] Unique Entity Tags found: {len(unique_ent_tags)}")
+        print(f"[MESH PARSE DEBUG] Sample tags: {list(unique_ent_tags)[:20]}")
         print(f"[MESH PARSE DEBUG] Faces WITHOUT quality data: {faces_without_quality}")
         print(f"[MESH PARSE] Generated {len(vertices)//3} vertices")
         

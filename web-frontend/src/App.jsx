@@ -43,6 +43,20 @@ function App() {
   const [projectStatus, setProjectStatus] = useState(null)
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
+
+  // DEBUG: Trace meshData changes
+  useEffect(() => {
+    if (meshData) {
+      console.log('[App] meshData updated:', {
+        vertices: meshData.vertices?.length,
+        isPreview: meshData.isPreview,
+        colors: meshData.colors?.length
+      })
+    } else {
+      console.log('[App] meshData set to NULL')
+    }
+  }, [meshData])
+
   const [isPolling, setIsPolling] = useState(false)
   const [isExportingAnsys, setIsExportingAnsys] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
@@ -278,6 +292,11 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
       if (response.ok) {
         const data = await response.json()
+        console.log('[App] fetchMeshData success:', {
+          projectId,
+          vertices: data.vertices?.length,
+          resultId: data.result_id || 'N/A'
+        })
         setMeshData(data)
       }
     } catch (error) {
