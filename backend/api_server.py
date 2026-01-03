@@ -812,9 +812,46 @@ def register_routes(app):
             db.session.add(feedback)
             db.session.commit()
             
-            # TODO: Send email notification to admin?
+            # Send email notification to admin?
+            # Send Slack notification
+            slack_webhook = app.config.get('SLACK_WEBHOOK_URL') or os.environ.get('SLACK_WEBHOOK_URL')
+            if slack_webhook:
+                try:
+                    import requests
+                    slack_msg = {
+                        "text": f"New {data.get('type', 'feedback').upper()} from {data.get('userEmail') or 'Anonymous'}",
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*New {data.get('type', 'feedback').upper()}*\nFrom: {data.get('userEmail') or 'Anonymous'}"
+                                }
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*{data.get('message')}*"
+                                }
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"URL: {data.get('url')}\nJob ID: {data.get('jobId') or 'N/A'}"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                    requests.post(slack_webhook, json=slack_msg, timeout=5)
+                except Exception as slack_err:
+                    print(f"[SLACK ERROR] Failed to send notification: {slack_err}")
             
             return jsonify({"success": True, "id": feedback.id})
+
         except Exception as e:
             db.session.rollback()
             print(f"[FEEDBACK ERROR] {e}")

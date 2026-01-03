@@ -112,7 +112,21 @@ def main():
                 gmsh.model.addPhysicalGroup(3, vol_tags, p_tag)
                 gmsh.model.setPhysicalName(3, p_tag, f"Volume_{args.tag}")
                 print(f"[Worker V{args.tag}] Assigned Physical Volume {p_tag} (Name: Volume_{args.tag})", flush=True)
+
+            # Quality Check: Verify the mesh isn't garbage (inverted)
+            q_metrics = gen._get_quality_metrics()
+            min_sicn = q_metrics.get('sicn', {}).get('min', 1.0)
+            avg_sicn = q_metrics.get('sicn', {}).get('avg', 1.0)
             
+            print(f"[Worker V{args.tag}] Quality Check: Min SICN={min_sicn:.4f}, Avg SICN={avg_sicn:.4f}", flush=True)
+            
+            if min_sicn < 0:
+                 print(f"[Worker V{args.tag}] ERROR: Generated mesh is INVERTED (Min SICN {min_sicn:.4f} < 0). Marking as failed.", flush=True)
+                 # Force boxing if quality is unacceptable
+                 print(f"[Worker V{args.tag}] Falling back to Bounding Box due to inversion...", flush=True)
+                 gen.create_bounding_box_mesh(args.output)
+                 sys.exit(0)
+
             # CRITICAL: Set save_all=False to only save the Physical Volume (tets).
             # If set to True, we save duplicate surface meshes which cause self-intersections when merged.
             gen.save_mesh(args.output, save_all=False)
