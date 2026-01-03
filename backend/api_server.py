@@ -1557,6 +1557,16 @@ def parse_msh_file(msh_filepath: str):
             with open(msh_filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
 
+        # --- Detect Version ---
+        msh_version = '2.2' # Default
+        if not is_binary and '$MeshFormat' in content:
+            try:
+                format_section = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')
+                if format_section:
+                    msh_version = format_section[0].split()[0]
+                    print(f"[MESH PARSE] MSH version: {msh_version}")
+            except: pass
+
         # --- Parse Nodes ---
         if '$Nodes' not in content:
             return {"error": "Invalid MSH file: No $Nodes section"}

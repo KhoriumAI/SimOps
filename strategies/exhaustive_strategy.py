@@ -1450,6 +1450,23 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         else:
             self.log_message("[WARNING] No physical groups found after merge! Mesh may not export correctly.")
         
+        # Analyze the merged assembly mesh before finalization to capture metrics/counts
+        try:
+            metrics = self.analyze_current_mesh()
+            if metrics:
+                self.log_message(f"[SURGICAL] Final assembly metrics: {metrics.get('total_elements', 0)} elements, {metrics.get('total_nodes', 0)} nodes")
+                # Add as a pseudo-attempt so the worker picks up the metrics
+                attempt_data = {
+                    'strategy': 'surgical_assembly',
+                    'success': True,
+                    'metrics': metrics,
+                    'score': self._calculate_quality_score(metrics)
+                }
+                self.all_attempts.append(attempt_data)
+                self.quality_history = self.all_attempts.copy()
+        except Exception as e:
+            self.log_message(f"[!] Failed to analyze final surgical assembly: {e}")
+
         # Write the merged mesh
         gmsh.option.setNumber("Mesh.SaveAll", 1)  # Ensure all elements are saved
         gmsh.write(output_file)
