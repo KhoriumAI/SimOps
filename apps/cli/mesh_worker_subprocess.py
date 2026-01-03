@@ -1450,6 +1450,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             per_element_gamma = {}
             per_element_skewness = {}
             per_element_aspect_ratio = {}
+            per_element_min_angle = {}
             quality_metrics = {}
             
             #Try to get quality metrics from best attempt
