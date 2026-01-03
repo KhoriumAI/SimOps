@@ -2,26 +2,32 @@
 
 ## Quick Deploy (Backend on EC2)
 
-**Standard deployment:**
-```bash
-cd /home/ec2-user/backend
+### Option 1: Manual SSM Deployment (Recommended)
+Since GitHub Actions SSH keys may struggle with connectivity, the most reliable method is to use AWS Systems Manager (SSM) manually:
+
+```powershell
+# 1. Start Session
+aws ssm start-session --target i-0bdb1e0eaa658cc7c
+
+# 2. Switch to ec2-user
+sudo su ec2-user
+
+# 3. Deploy
+cd ~/backend
 git pull origin main
 sudo systemctl restart gunicorn
-sudo systemctl status gunicorn
+
+# 4. Verify
+curl localhost:3000/api/health
 ```
 
-> [!IMPORTANT]
-> Python doesn't need a "build" step - just pull and restart!
+### Option 2: GitHub Actions (Automated)
+The repository contains a `.github/workflows/deploy-backend.yml` that attempts to deploy via SSH.
+**Prerequisites:**
+- `EC2_HOST`, `EC2_SSH_KEY` secrets must be correct.
+- Security Group must allow traffic from GitHub Actions IP (or open access) on Port 22.
 
-**Critical requirements:**
-- Gunicorn **must** run on port **3000** (CloudFront points directly to EC2:3000)
-- `.env` file must exist at `/home/ec2-user/backend/backend/.env` with:
-  ```
-  CORS_ORIGINS=https://app.khorium.ai
-  SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
-  ```
-
-**Verify deployment:**
+**Verification command:**
 ```bash
 # Check Gunicorn is on port 3000
 sudo netstat -tlnp | grep 3000

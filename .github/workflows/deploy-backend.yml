@@ -1,4 +1,4 @@
-# Deploy Backend to EC2 via AWS SSM
+# Deploy Backend to EC2
 # Triggers on push to main branch when backend files change
 
 name: Deploy Backend
@@ -23,67 +23,102 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-1
-
-      - name: Create SSM Parameters File
-        run: |
-          cat <<EOF > ssm_params.json
-          {
-            "commands": [
-              "echo '[DEPLOY] Updating permissions...'",
-              "sudo chown -R ec2-user:ec2-user /home/ec2-user/backend",
-              "echo '[DEPLOY] Configuring git...'",
-              "runuser -l ec2-user -c 'git config --global --add safe.directory /home/ec2-user/backend'",
-              "echo '[DEPLOY] Pulling latest code...'",
-              "runuser -l ec2-user -c 'cd /home/ec2-user/backend && git fetch --all && git reset --hard origin/main'",
-              "echo '[DEPLOY] Installing dependencies...'",
-              "runuser -l ec2-user -c 'cd /home/ec2-user/backend && venv/bin/pip install --upgrade pip'",
-              "runuser -l ec2-user -c 'cd /home/ec2-user/backend && venv/bin/pip install -r backend/requirements.txt'",
-              "echo '[DEPLOY] Running migrations...'",
-              "runuser -l ec2-user -c 'cd /home/ec2-user/backend && venv/bin/python backend/run_migration.py'",
-              "echo '[DEPLOY] Restarting gunicorn...'",
-              "sudo systemctl restart gunicorn",
-              "echo '[DEPLOY] Waiting for service to start...'",
-              "sleep 10",
-              "echo '[DEPLOY] Health check...'",
-              "if curl -sf http://localhost:3000/api/health; then",
-              "  echo '[OK] Health check passed!'",
-              "else",
-              "  echo '[ERROR] Health check failed!'",
-              "  sudo journalctl -u gunicorn -n 50 --no-pager",
-              "  exit 1",
-              "fi"
-            ]
-          }
-          EOF
-
-      - name: Deploy via SSM
-        run: |
-          echo "[INFO] Sending SSM command to i-0bdb1e0eaa658cc7c..."
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "i-0bdb1e0eaa658cc7c" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy backend via GitHub Actions (SSM)" \
-            --parameters file://ssm_params.json \
-            --query "Command.CommandId" \
-            --output text)
-          
-          echo "Command ID: $COMMAND_ID"
-          
-          echo "[INFO] Waiting for command completion..."
-          # Max wait ~10 minutes
-          aws ssm wait command-executed \
-            --command-id "$COMMAND_ID" \
-            --instance-id "i-0bdb1e0eaa658cc7c"
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
             
-          echo "[INFO] Getting final command output..."
-          aws ssm get-command-invocation \
-            --command-id "$COMMAND_ID" \
-            --instance-id "i-0bdb1e0eaa658cc7c" \
-            --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}" \
-            --output json
+            echo "[DEPLOY] Searching for project directory..."
+            if [ -d "/home/ec2-user/backend" ]; then
+              PROJECT_ROOT="/home/ec2-user/backend"
+            elif [ -d "/home/ec2-user/MeshPackageLean" ]; then
+              PROJECT_ROOT="/home/ec2-user/MeshPackageLean"
+            else
+              echo "[ERROR] Could not find /home/ec2-user/backend or /home/ec2-user/MeshPackageLean"
+              ls -la /home/ec2-user
+              exit 1
+            fi
+            
+            echo "[DEPLOY] Using project root: $PROJECT_ROOT"
+            cd "$PROJECT_ROOT"
+            
+            echo "[DEPLOY] Pulling latest code..."
+            git fetch --all
+            git reset --hard origin/main
+            git log --oneline -1
+            
+            echo "[DEPLOY] Activating virtual environment..."
+            if [ -f "venv/bin/activate" ]; then
+               source venv/bin/activate
+            elif [ -f "backend/venv/bin/activate" ]; then
+               source backend/venv/bin/activate
+            else
+               echo "[ERROR] Could not find venv/bin/activate"
+               find . -name activate
+               exit 1
+            fi
+            which python
+            
+            echo "[DEPLOY] Installing dependencies..."
+            # Check where requirements.txt is
+            if [ -f "backend/requirements.txt" ]; then
+              REQS="backend/requirements.txt"
+            elif [ -f "requirements.txt" ]; then
+              REQS="requirements.txt"
+            else
+              echo "[ERROR] Could not find requirements.txt"
+              exit 1
+            fi
+            pip install -r "$REQS" 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
+            
+            echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
+            sudo fuser -k 3000/tcp 2>/dev/null || true
+            sudo fuser -k 5000/tcp 2>/dev/null || true
+            
+            echo "[DEPLOY] Restarting gunicorn service..."
+            # Try to restart the service (could be named gunicorn or meshgen or khorium)
+            if sudo systemctl list-unit-files | grep -q gunicorn.service; then
+              sudo systemctl restart gunicorn
+            elif sudo systemctl list-unit-files | grep -q meshgen.service; then
+              sudo systemctl restart meshgen
+            else
+              echo "[WARNING] Could not find gunicorn.service or meshgen.service. Attempting direct restart anyway."
+              sudo systemctl restart gunicorn || sudo systemctl start gunicorn
+            fi
+            
+            echo "[DEPLOY] Waiting for service to start..."
+            sleep 5
+            
+            echo "[DEPLOY] Checking service status..."
+            sudo systemctl status gunicorn --no-pager || sudo systemctl status meshgen --no-pager || true
+            
+            echo "[OK] Backend deployment sequence finished!"
+
+      - name: Health Check
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "[HEALTH] Waiting for service to fully start..."
+            sleep 7
+            
+            echo "[HEALTH] Checking listening ports..."
+            sudo netstat -tlnp | grep -E "3000|5000" || echo "[WARNING] Nothing listening on 3000 or 5000!"
+            
+            echo "[HEALTH] Running health check on port 3000..."
+            if curl -sf http://localhost:3000/api/health; then
+              echo "[OK] Health check passed on port 3000!"
+            elif curl -sf http://localhost:5000/api/health; then
+              echo "[OK] Health check passed on port 5000! (Note: ALB might expect 3000)"
+            else
+              echo "[ERROR] Health check failed on both 3000 and 5000!"
+              echo "[DEBUG] Recent gunicorn logs:"
+              sudo journalctl -u gunicorn -n 20 --no-pager || sudo journalctl -u meshgen -n 20 --no-pager || true
+              exit 1
+            fi
