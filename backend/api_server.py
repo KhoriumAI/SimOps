@@ -1398,6 +1398,35 @@ def parse_msh_file(msh_filepath: str):
         except Exception as e:
             print(f"[MESH PARSE] Failed to load quality data: {e}")
 
+    def get_color(q, metric='sicn'):
+        if q is None:
+            return 0.29, 0.56, 0.89  # Blue default
+        val = q
+        if metric == 'skewness':
+            val = max(0.0, min(1.0, 1.0 - q))
+        elif metric == 'aspect_ratio':
+            val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
+        elif metric == 'minAngle':
+            val = max(0.0, min(1.0, q / 60.0))
+        else:
+            val = max(0.0, min(1.0, q))
+        
+        # Vivid Red -> Yellow -> Green scale
+        if val <= 0.1: return 0.8, 0.0, 0.0
+        if val <= 0.5:
+            t = (val - 0.1) / 0.4
+            return 1.0, t, 0.0
+        else:
+            t = min(1.0, (val - 0.5) / 0.5)
+            return 1.0 - t, 1.0, 0.0
+
+    def get_q_value(tag, data_dict):
+        if not data_dict: return None
+        # JSON keys were converted to int above, but some might be strings
+        v = data_dict.get(int(tag))
+        if v is None: v = data_dict.get(str(tag))
+        return v
+
     try:
         # Try to detect format
         with open(msh_filepath, 'rb') as f:
@@ -1434,15 +1463,19 @@ def parse_msh_file(msh_filepath: str):
                     cell_type = cell_block.type
                     cells = cell_block.data
                     
-                    for cell in cells:
-                        el_tag += 1
-                        if cell_type == 'tetra':  # Tet4
+                    # Attempt to get global tag if available in cell_data
+                    # This is tricky with meshio, but necessary for quality mapping.
+                    # For now, we'll use the index as a placeholder.
+                    
+                    if cell_type == 'tetra':  # Tet4
+                        for i, cell in enumerate(cells):
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:4]]
-                            add_face((n[0], n[2], n[1]), el_tag)
-                            add_face((n[0], n[1], n[3]), el_tag)
-                            add_face((n[0], n[3], n[2]), el_tag)
-                            add_face((n[1], n[2], n[3]), el_tag)
-                        elif cell_type == 'hexahedron':  # Hex8
+                            add_face((n[0], n[2], n[1]), el_tag + i)
+                            add_face((n[0], n[1], n[3]), el_tag + i)
+                            add_face((n[0], n[3], n[2]), el_tag + i)
+                            add_face((n[1], n[2], n[3]), el_tag + i)
+                    elif cell_type == 'hexahedron':  # Hex8
+                        for i, cell in enumerate(cells):
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:8]]
                             quads = [
                                 (n[0], n[3], n[2], n[1]), (n[4], n[5], n[6], n[7]),
@@ -1450,11 +1483,15 @@ def parse_msh_file(msh_filepath: str):
                                 (n[1], n[2], n[6], n[5]), (n[4], n[7], n[3], n[0])
                             ]
                             for q in quads:
-                                add_face((q[0], q[1], q[2]), el_tag)
-                                add_face((q[0], q[2], q[3]), el_tag)
-                        elif cell_type == 'triangle':  # Surface triangle
+                                add_face((q[0], q[1], q[2]), el_tag + i)
+                                add_face((q[0], q[2], q[3]), el_tag + i)
+                    elif cell_type == 'triangle':  # Surface triangle
+                        for i, cell in enumerate(cells):
                             n = [node_id_to_index[int(nid)+1] for nid in cell[:3]]
-                            face_map[tuple(sorted(n))] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': 0}
+                            key = tuple(sorted(n))
+                            face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag + i, 'entity_tag': 0, 'is_surface': True}
+                    
+                    el_tag += len(cells)
                 
                 print(f"[MESH PARSE] Processed {len(face_map)} unique faces")
                 
@@ -1468,7 +1505,7 @@ def parse_msh_file(msh_filepath: str):
                 entity_tags = []
                 
                 for key, data in face_map.items():
-                    if data['count'] == 1:  # Boundary face
+                    if data.get('is_surface') or data['count'] == 1:  # Boundary face or explicit surface
                         face_nodes = data['nodes']
                         for idx in face_nodes:
                             vertices.extend(indexed_nodes[idx])
@@ -1484,31 +1521,13 @@ def parse_msh_file(msh_filepath: str):
                 colors_aspect_ratio = []
                 colors_min_angle = []
                 
-                def get_color(q, metric='sicn'):
-                    if q is None:
-                        return 0.29, 0.56, 0.89
-                    val = q
-                    if metric == 'skewness':
-                        val = max(0.0, min(1.0, 1.0 - q))
-                    elif metric == 'aspect_ratio':
-                        val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
-                    elif metric == 'minAngle':
-                        val = max(0.0, min(1.0, q / 60.0))
-                    else:
-                        val = max(0.0, min(1.0, q))
-                    if val <= 0.1: return 0.8, 0.0, 0.0
-                    elif val < 0.3: return 1.0, 0.3 * (val - 0.1)/0.2, 0.0
-                    elif val < 0.5: return 1.0, 0.3 + 0.7 * (val - 0.3)/0.2, 0.0
-                    elif val < 0.7: return 1.0 - 0.5 * (val - 0.5)/0.2, 1.0, 0.0
-                    else: return 0.5 - 0.5 * min(1.0, (val - 0.7)/0.3), 0.8 + 0.2 * min(1.0, (val - 0.7)/0.3), 0.2 * min(1.0, (val - 0.7)/0.3)
-                
                 for el_tag in element_tags:
-                    tag_key = int(el_tag)
-                    q_sicn = per_element_quality.get(tag_key)
-                    q_gamma = per_element_gamma.get(tag_key)
-                    q_skew = per_element_skewness.get(tag_key)
-                    q_ar = per_element_aspect_ratio.get(tag_key)
-                    q_ang = per_element_min_angle.get(tag_key)
+                    tag_key = el_tag # Could be int or str
+                    q_sicn = get_q_value(tag_key, per_element_quality)
+                    q_gamma = get_q_value(tag_key, per_element_gamma)
+                    q_skew = get_q_value(tag_key, per_element_skewness)
+                    q_ar = get_q_value(tag_key, per_element_aspect_ratio)
+                    q_ang = get_q_value(tag_key, per_element_min_angle)
                     
                     colors_sicn.extend(get_color(q_sicn, 'sicn') * 3)
                     colors_gamma.extend(get_color(q_gamma, 'gamma') * 3)
@@ -1684,7 +1703,8 @@ def parse_msh_file(msh_filepath: str):
                 try:
                     n = [node_id_to_index[nid] for nid in node_ids[:3]]
                     key = tuple(sorted(n))
-                    face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag}
+                    # Mark as explicit surface to prevent it being hidden by volume sharing
+                    face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag, 'is_surface': True}
                 except KeyError: pass
 
         if msh_version.startswith('4'):
@@ -1713,6 +1733,7 @@ def parse_msh_file(msh_filepath: str):
                 # Skip tags, node IDs start after tags
                 node_ids = [int(x) for x in parts[3 + num_tags:]]
                 entity_tag = int(parts[3]) if num_tags > 0 else 0
+                process_element(el_tag, el_type, node_ids, entity_tag)
         print(f"[MESH PARSE] Processed faces, extracting boundary...")
         
         # Reconstruct nodes list from dict for fast access by index
@@ -1722,9 +1743,9 @@ def parse_msh_file(msh_filepath: str):
         for nid, idx in node_id_to_index.items():
             indexed_nodes[idx] = nodes[nid]
             
-        # Extract boundary faces (count == 1)
+        # Extract boundary faces (count == 1) or explicit surface triangles
         for key, data in face_map.items():
-            if data['count'] == 1:
+            if data.get('is_surface') or data['count'] == 1:
                 # This is a boundary face
                 face_nodes = data['nodes']
                 el_tag = data['element_tag']
@@ -1738,19 +1759,19 @@ def parse_msh_file(msh_filepath: str):
                 entity_tags.append(ent_tag)
                 
                 # Colors
-                q_sicn = per_element_quality.get(el_tag)
-                colors_sicn.extend(get_color(q_sicn, 'sicn') * 3) # 3 vertices
+                q_sicn = get_q_value(el_tag, per_element_quality)
+                colors_sicn.extend(get_color(q_sicn, 'sicn') * 3)
                 
-                q_gamma = per_element_gamma.get(el_tag)
+                q_gamma = get_q_value(el_tag, per_element_gamma)
                 colors_gamma.extend(get_color(q_gamma, 'gamma') * 3)
                 
-                q_skew = per_element_skewness.get(el_tag)
+                q_skew = get_q_value(el_tag, per_element_skewness)
                 colors_skewness.extend(get_color(q_skew, 'skewness') * 3)
                 
-                q_ar = per_element_aspect_ratio.get(el_tag)
+                q_ar = get_q_value(el_tag, per_element_aspect_ratio)
                 colors_aspect_ratio.extend(get_color(q_ar, 'aspect_ratio') * 3)
                 
-                q_ang = per_element_min_angle.get(el_tag)
+                q_ang = get_q_value(el_tag, per_element_min_angle)
                 colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
 
         print(f"[MESH PARSE] Generated {len(vertices)//3} vertices")
