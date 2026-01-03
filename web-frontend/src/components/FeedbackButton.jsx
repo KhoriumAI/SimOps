@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { MessageCircle, X, Send, Bug, Lightbulb, AlertCircle } from 'lucide-react'
+import { MessageCircle, X, Send, Bug, Lightbulb, AlertCircle, Flag } from 'lucide-react'
 import { API_BASE } from '../config'
 
 export default function FeedbackButton({ userEmail, jobId }) {
@@ -66,7 +66,7 @@ export default function FeedbackButton({ userEmail, jobId }) {
                 className="fixed bottom-4 right-4 z-50 bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-full shadow-lg transition-all hover:scale-110"
                 title="Send Feedback"
             >
-                <MessageCircle className="w-5 h-5" />
+                <Flag className="w-5 h-5" />
             </button>
 
             {/* Feedback Modal */}

@@ -235,11 +235,10 @@ function App() {
   }, [minElementSize])
 
   const handleCopyConsole = (e) => {
+    const btn = e.currentTarget // Store ref immediately
     const text = logs.join('\n')
-    const originalText = e.currentTarget.innerText
 
     const finalize = (success) => {
-      const btn = e.currentTarget
       const span = btn.querySelector('span')
       if (span) span.innerText = success ? 'Copied!' : 'Failed'
       setTimeout(() => {
@@ -851,10 +850,6 @@ function App() {
                 </div>
                 <div className="p-3 space-y-3">
                   <div className="flex flex-col gap-2">
-                    {/* Controls moved to Viewer Overlay */}
-                  </div>
-
-                  <div className="pt-2 border-t border-gray-100">
                     <label className="text-gray-400 text-[10px] uppercase mb-1 block">Quality Metric</label>
                     <select
                       value={qualityMetric}

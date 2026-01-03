@@ -1316,332 +1316,257 @@ except Exception as e:
 
 
 def parse_msh_file(msh_filepath: str):
-    """Parse Gmsh .msh file for Three.js visualization using gmsh API"""
-    import subprocess
-    import tempfile
+    """
+    Parse Gmsh .msh file for Three.js visualization using native Python parsing.
+    This replaces the GMSH API subprocess to avoid "mesh soup" issues with assemblies
+    (non-contiguous node IDs) and improves stability.
+    """
+    import json
+    import sys
     from collections import defaultdict
     
-    print(f"[MESH PARSE] Parsing mesh file: {msh_filepath}")
+    print(f"[MESH PARSE] Parsing mesh file (native): {msh_filepath}")
     
     # Load quality data if available
     quality_filepath = Path(msh_filepath).with_suffix('.quality.json')
     per_element_quality = {}
-    quality_threshold = 0.3
+    per_element_gamma = {}
+    per_element_skewness = {}
+    per_element_aspect_ratio = {}
+    per_element_min_angle = {}
     
     if quality_filepath.exists():
         try:
             with open(quality_filepath, 'r') as f:
                 qdata = json.load(f)
                 per_element_quality = {int(k): v for k, v in qdata.get('per_element_quality', {}).items()}
-                quality_threshold = qdata.get('quality_threshold_10', 0.3)
+                per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
+                per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
+                per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
+                per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
                 print(f"[MESH PARSE] Loaded quality data for {len(per_element_quality)} elements")
         except Exception as e:
             print(f"[MESH PARSE] Failed to load quality data: {e}")
 
-    # Use gmsh in subprocess to extract surface mesh
-    gmsh_script = f'''
-import gmsh
-import json
-import sys
-from collections import defaultdict
-
-gmsh.initialize()
-gmsh.option.setNumber("General.Terminal", 0)
-
-try:
-    gmsh.open("{msh_filepath}")
-    
-    # Get all nodes
-    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    nodes = {{}}
-    for i, tag in enumerate(node_tags):
-        nodes[int(tag)] = [node_coords[i*3], node_coords[i*3+1], node_coords[i*3+2]]
-    
-    # Map elements to entities (Surface IDs)
-    element_to_entity = {{}}
-    entities = gmsh.model.getEntities(2) # Get all surfaces
-    for dim, entity_tag in entities:
-        # Get elements for this specific surface
-        try:
-            e_types, e_tags, _ = gmsh.model.mesh.getElements(2, entity_tag)
-            for i in range(len(e_types)):
-                for tag in e_tags[i]:
-                    element_to_entity[int(tag)] = int(entity_tag)
-        except:
-            pass
-
-    # Get all unique elements scan
-    vertices = []
-    element_tags = []
-    entity_tags_list = [] # Parralel to element_tags
-    
-    face_count = {{}}  # face_key -> count
-    face_data = {{}}   # face_key -> (original_vertices, element_tag)
-    direct_triangles = [] # (n1, n2, n3, el_tag, entity_tag)
-    
-    # Get all elements efficiently
-    elem_types, elem_tags_list, node_tags_list = gmsh.model.mesh.getElements(-1, -1)
-    
-    # Pre-calculate qualities for 2D elements if we need fallbacks
-    # This ensures older meshes or missing quality.json still works
-    fallback_quality = {{}} # tag -> quality
-    
     try:
-        # Get all 2D element tags (triangles)
-        tri_tags_all = []
-        for et, tags in zip(elem_types, elem_tags_list):
-            if et in [2, 9]: # Triangles (3-node and 6-node)
-                 tri_tags_all.extend(tags)
-        
-        if tri_tags_all:
-             min_sicn = gmsh.model.mesh.getElementQualities(tri_tags_all, "minSICN")
-             for i, tag in enumerate(tri_tags_all):
-                 fallback_quality[int(tag)] = float(min_sicn[i])
-        
-        # CRITICAL FIX: Also compute quality for tetrahedra
-        # Boundary faces extracted from tets use the parent tet's element ID
-        # So we need tet quality values for those lookups
-        tet_tags_all = []
-        for et, tags in zip(elem_types, elem_tags_list):
-            if et in [4, 11]: # 4-node and 10-node tetrahedra
-                 tet_tags_all.extend(tags)
-        
-        if tet_tags_all:
-             tet_sicn = gmsh.model.mesh.getElementQualities(tet_tags_all, "minSICN")
-             for i, tag in enumerate(tet_tags_all):
-                 fallback_quality[int(tag)] = float(tet_sicn[i])
-             print(f"DEBUG: Computed quality for {{len(tet_tags_all)}} tetrahedra", file=sys.stderr)
-    except Exception as qe:
-        print(f"DEBUG: Quality computation error: {{qe}}", file=sys.stderr)
+        with open(msh_filepath, 'r') as f:
+            content = f.read()
 
-    # Debug: Print found types
-    print(f"DEBUG: Found element types: {{list(elem_types)}}", file=sys.stderr)
-
-    for et, tags, nodes_per_elem in zip(elem_types, elem_tags_list, node_tags_list):
-        if et == 2:  # Triangle (2D surface element)
-            nodes_per = 3
-            for i, tag in enumerate(tags):
-                el_tag = int(tag)
-                n1 = int(nodes_per_elem[i*nodes_per])
-                n2 = int(nodes_per_elem[i*nodes_per + 1])
-                n3 = int(nodes_per_elem[i*nodes_per + 2])
-                ent_tag = element_to_entity.get(el_tag, 0)
-                direct_triangles.append((n1, n2, n3, el_tag, ent_tag))
-                
-        elif et == 4:  # 4-node Tetrahedron
-            nodes_per = 4
-            for i, tag in enumerate(tags):
-                n1 = int(nodes_per_elem[i*nodes_per])
-                n2 = int(nodes_per_elem[i*nodes_per + 1])
-                n3 = int(nodes_per_elem[i*nodes_per + 2])
-                n4 = int(nodes_per_elem[i*nodes_per + 3])
-                
-                # Check faces - Ensure outward normals: (n1,n2,n3), (n1,n4,n2), (n1,n3,n4), (n2,n4,n3)
-                tet_faces = [
-                    ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
-                    ((n1, n4, n2), tuple(sorted([n1, n2, n4]))),
-                    ((n1, n3, n4), tuple(sorted([n1, n3, n4]))),
-                    ((n2, n4, n3), tuple(sorted([n2, n3, n4])))
-                ]
-                for orig_face, face_key in tet_faces:
-                    if face_key in face_count:
-                        face_count[face_key] += 1
-                    else:
-                        face_count[face_key] = 1
-                        face_data[face_key] = (orig_face, int(tag))
-                        
-        elif et == 11:  # 10-node Tet
-            nodes_per = 10
-            for i, tag in enumerate(tags):
-                n1 = int(nodes_per_elem[i*nodes_per])
-                n2 = int(nodes_per_elem[i*nodes_per + 1])
-                n3 = int(nodes_per_elem[i*nodes_per + 2])
-                n4 = int(nodes_per_elem[i*nodes_per + 3])
-                tet_faces = [
-                    ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
-                    ((n1, n4, n2), tuple(sorted([n1, n2, n4]))),
-                    ((n1, n3, n4), tuple(sorted([n1, n3, n4]))),
-                    ((n2, n4, n3), tuple(sorted([n2, n3, n4])))
-                ]
-                for orig_face, face_key in tet_faces:
-                    if face_key in face_count:
-                        face_count[face_key] += 1
-                    else:
-                        face_count[face_key] = 1
-                        face_data[face_key] = (orig_face, int(tag))
-    
-    # Extract boundary faces from volumes
-    surface_triangles = [] # (n1, n2, n3, el_tag, entity_tag)
-    for face_key, count in face_count.items():
-        if count == 1:
-            orig_face, el_tag = face_data[face_key]
-            # Boundary faces form tets don't have explicit entity tags usually
-            # unless we map them spatially. Use 0 for now.
-            surface_triangles.append((orig_face[0], orig_face[1], orig_face[2], el_tag, 0))
-    
-    # Strategy: If we have direct surface triangles, use them (they have entity tags).
-    # If not, use boundary faces. 
-    # Or combine them?
-    # Simple merge for now.
-    all_triangles = direct_triangles + surface_triangles
-    
-    # deduplicate based on node sets if needed? 
-    # For now, just output.
-    
-    for n1, n2, n3, el_tag, ent_tag in all_triangles:
-        if n1 in nodes and n2 in nodes and n3 in nodes:
-            vertices.extend(nodes[n1])
-            vertices.extend(nodes[n2])
-            vertices.extend(nodes[n3])
-            element_tags.append(el_tag)
-            entity_tags_list.append(ent_tag)
+        # --- Parse Nodes ---
+        if '$Nodes' not in content:
+            return {"error": "Invalid MSH file: No $Nodes section"}
             
-    result = {{
-        "vertices": vertices,
-        "element_tags": element_tags,
-        "entity_tags": entity_tags_list,
-        "num_nodes": len(nodes),
-        "fallback_quality": fallback_quality # Return on-the-fly quality
-    }}
-    print("MESH_DATA:" + json.dumps(result))
-    
-except Exception as e:
-    print("ERROR:" + str(e))
-    import traceback
-    traceback.print_exc()
-finally:
-    gmsh.finalize()
-'''
+        nodes_section = content.split('$Nodes')[1].split('$EndNodes')[0].strip().split('\n')
+        
+        # Check format (ascii usually): numEntityBlocks(int) numNodes(int) minNodeTag(int) maxNodeTag(int)
+        header = nodes_section[0].split()
+        num_blocks = int(header[0])
+        total_nodes = int(header[1])
+        
+        nodes = {} # node_tag -> [x, y, z]
+        node_id_to_index = {} # node_tag -> sequential_index (0, 1, 2...) for three.js buffers
+        
+        curr_line = 1
+        for _ in range(num_blocks):
+            # entityDim(int) entityTag(int) parametric(int; 0 or 1) numNodesInBlock(int)
+            block_header = nodes_section[curr_line].split()
+            curr_line += 1
+            num_nodes_in_block = int(block_header[3])
+            
+            # Read node tags
+            node_tags = []
+            for i in range(num_nodes_in_block):
+                tag = int(nodes_section[curr_line + i])
+                node_tags.append(tag)
+            curr_line += num_nodes_in_block
+            
+            # Read coords
+            for i in range(num_nodes_in_block):
+                coords = list(map(float, nodes_section[curr_line + i].split()))
+                node_tag = node_tags[i]
+                # Only keep x,y,z (ignore parametric u,v,w if present, though usually just 3)
+                nodes[node_tag] = coords[:3]
+                node_id_to_index[node_tag] = len(node_id_to_index) # Assign next sequential index
+            curr_line += num_nodes_in_block
 
-    try:
-        result = subprocess.run(
-            [sys.executable, '-c', gmsh_script],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        
-        print(f"[MESH PARSE] Subprocess stderr: {result.stderr[:500] if result.stderr else 'empty'}")
-        
-        # Parse output
-        mesh_data = None
-        for line in result.stdout.split('\n'):
-            if line.startswith('MESH_DATA:'):
-                mesh_data = json.loads(line[10:])
-                break
-            elif line.startswith('ERROR:'):
-                return {"error": line[6:], "vertices": [], "colors": [], "numVertices": 0, "numTriangles": 0}
-        
-        if not mesh_data:
-            return {"error": "Failed to parse mesh - no data returned", "vertices": [], "colors": [], "numVertices": 0, "numTriangles": 0}
-        
-        vertices = mesh_data['vertices']
-        element_tags = mesh_data['element_tags']
-        entity_tags = mesh_data.get('entity_tags', []) # New field
-        fallback_quality = mesh_data.get('fallback_quality', {}) # Parse fallback
+        print(f"[MESH PARSE] Parsed {len(nodes)} nodes")
 
-        def get_color(q, metric='sicn'):
-            if q is None:
-                return 0.29, 0.56, 0.89  # Default blue
-                
-            # Normalize q so that 0 is WORST and 1 is BEST for coloring
-            val = q
-            if metric == 'skewness':
-                val = max(0.0, min(1.0, 1.0 - q))
-            elif metric == 'aspect_ratio':
-                # AR 1.0 is best, 5.0+ is poor
-                val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
-            elif metric == 'minAngle':
-                # Normalize q (degrees) so 0 is WORST, 60+ is BEST
-                val = max(0.0, min(1.0, q / 60.0))
-            else:
-                val = max(0.0, min(1.0, q))
-                
-            # Smooth gradient from red (0) to green (1)
-            if val <= 0.1:
-                return 0.8, 0.0, 0.0  # Dark red - very bad
-            elif val < 0.3:
-                # Red to Orange
-                t = (val - 0.1) / 0.2
-                return 1.0, 0.3 * t, 0.0
-            elif val < 0.5:
-                # Orange to Yellow
-                t = (val - 0.3) / 0.2
-                return 1.0, 0.3 + 0.7 * t, 0.0
-            elif val < 0.7:
-                # Yellow to Light Green
-                t = (val - 0.5) / 0.2
-                return 1.0 - 0.5 * t, 1.0, 0.0
-            else:
-                # Light Green to Green
-                t = min(1.0, (val - 0.7) / 0.3)
-                return 0.5 - 0.5 * t, 0.8 + 0.2 * t, 0.2 * t
-
-        # Load all metrics from quality.json
-        per_element_gamma = {}
-        per_element_skewness = {}
-        per_element_aspect_ratio = {}
-        per_element_min_angle = {}
+        # --- Parse Elements ---
+        if '$Elements' not in content:
+            return {"error": "Invalid MSH file: No $Elements section"}
+            
+        elements_section = content.split('$Elements')[1].split('$EndElements')[0].strip().split('\n')
         
-        try:
-            if quality_filepath.exists():
-                with open(quality_filepath, 'r') as f:
-                    qdata = json.load(f)
-                    per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
-                    per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
-                    per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
-                    per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
-        except: pass
-
-        # Build colors for all metrics
+        # numEntityBlocks(int) numElements(int) minElementTag(int) maxElementTag(int)
+        header = elements_section[0].split()
+        num_blocks = int(header[0])
+        
+        # Element types mapping (MSH 4.1)
+        # 2: 3-node triangle
+        # 4: 4-node tet
+        # 11: 10-node tet
+        # 5: 8-node hex
+        # 12: 27-node hex
+        
+        vertices = []       # Flat list of x,y,z
+        element_tags = []   # Parallel element ID per triangle
+        entity_tags = []    # Parallel entity ID per triangle
+        
+        # Quality color arrays
         colors_sicn = []
         colors_gamma = []
         colors_skewness = []
         colors_aspect_ratio = []
         colors_min_angle = []
         
-        matched_count = 0
-        unmatched_count = 0
-        
-        # If per_element_quality is empty (no file), initialize it with fallback
-        if not per_element_quality and fallback_quality:
-            per_element_quality = {k: v for k, v in fallback_quality.items()}
-
-        for el_tag in element_tags:
-            tag_key = int(el_tag)
-            
-            # 1. SICN
-            q_sicn = per_element_quality.get(tag_key)
-            if q_sicn is None: q_sicn = fallback_quality.get(tag_key)
-            if q_sicn is None: q_sicn = fallback_quality.get(str(tag_key))
-            
-            # 2. Others
-            q_gamma = per_element_gamma.get(tag_key)
-            q_skew = per_element_skewness.get(tag_key)
-            q_ar = per_element_aspect_ratio.get(tag_key)
-            q_angle = per_element_min_angle.get(tag_key)
-            
-            if q_sicn is not None: matched_count += 1
-            else: unmatched_count += 1
-            
-            # Calculate RGBs
-            r_s, g_s, b_s = get_color(q_sicn, 'sicn')
-            r_g, g_g, b_g = get_color(q_gamma, 'gamma')
-            r_k, g_k, b_k = get_color(q_skew, 'skewness')
-            r_a, g_a, b_a = get_color(q_ar, 'aspect_ratio')
-            r_an, g_an, b_an = get_color(q_angle, 'minAngle')
-            
-            colors_sicn.extend([r_s, g_s, b_s] * 3)
-            colors_gamma.extend([r_g, g_g, b_g] * 3)
-            colors_skewness.extend([r_k, g_k, b_k] * 3)
-            colors_aspect_ratio.extend([r_a, g_a, b_a] * 3)
-            colors_min_angle.extend([r_an, g_an, b_an] * 3)
-        
-        print(f"[MESH PARSE] Mapped colors for {matched_count} elements ({unmatched_count} missing)")
-        
-        print(f"[MESH PARSE] Quality color mapping: {matched_count} matched, {unmatched_count} unmatched")
+        def get_color(q, metric='sicn'):
+            if q is None:
+                return 0.29, 0.56, 0.89  # Default blue
                 
-        print(f"[MESH PARSE] Extracted {len(vertices)//9} triangles, {mesh_data['num_nodes']} nodes")
+            val = q
+            if metric == 'skewness':
+                val = max(0.0, min(1.0, 1.0 - q))
+            elif metric == 'aspect_ratio':
+                val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
+            elif metric == 'minAngle':
+                val = max(0.0, min(1.0, q / 60.0))
+            else:
+                val = max(0.0, min(1.0, q))
+                
+            if val <= 0.1: return 0.8, 0.0, 0.0
+            elif val < 0.3: return 1.0, 0.3 * (val - 0.1)/0.2, 0.0
+            elif val < 0.5: return 1.0, 0.3 + 0.7 * (val - 0.3)/0.2, 0.0
+            elif val < 0.7: return 1.0 - 0.5 * (val - 0.5)/0.2, 1.0, 0.0
+            else: return 0.5 - 0.5 * min(1.0, (val - 0.7)/0.3), 0.8 + 0.2 * min(1.0, (val - 0.7)/0.3), 0.2 * min(1.0, (val - 0.7)/0.3)
+
+        curr_line = 1
+        
+        # We need to process volume elements (Tets/Hexes) to extract their surfaces
+        # AND surface elements (Triangles) that are explicitly defined.
+        
+        # Storage for faces from valid elements
+        # face_key (sorted tuple of mapped indices) -> {
+        #   'nodes': [mapped_idx1, mapped_idx2, mapped_idx3], 
+        #   'count': int,
+        #   'element_tag': tag,
+        #   'entity_tag': tag
+        # }
+        face_map = {} 
+        
+        for _ in range(num_blocks):
+            # entityDim(int) entityTag(int) elementType(int) numElementsInBlock(int)
+            line_parts = elements_section[curr_line].split()
+            curr_line += 1
+            
+            if not line_parts: continue
+            
+            entity_dim = int(line_parts[0])
+            entity_tag_block = int(line_parts[1])
+            el_type = int(line_parts[2])
+            num_els = int(line_parts[3])
+            
+            # Process block
+            for i in range(num_els):
+                el_line = list(map(int, elements_section[curr_line + i].split()))
+                el_tag = el_line[0]
+                node_ids = el_line[1:]
+                
+                # Check for 3D elements (Tet4=4, Tet10=11, Hex8=5, Hex27=12)
+                if el_type in [4, 11]: # Tetrahedra
+                    # Extract 4 faces
+                    try:
+                        # Use first 4 nodes (linear part) for visualization
+                        n = [node_id_to_index[nid] for nid in node_ids[:4]]
+                        faces = [
+                            (n[0], n[2], n[1]), # Reorder for outward normal
+                            (n[0], n[1], n[3]),
+                            (n[0], n[3], n[2]),
+                            (n[1], n[2], n[3])
+                        ]
+                        for face in faces:
+                            # Use sorted key for identification, but keep 'face' order for rendering
+                            key = tuple(sorted(face))
+                            if key not in face_map:
+                                face_map[key] = {'nodes': face, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
+                            face_map[key]['count'] += 1
+                    except KeyError: pass # Node missing?
+                    
+                elif el_type in [5, 12]: # Hexahedra
+                    # Extract 6 faces (as 12 triangles)
+                    try:
+                        n = [node_id_to_index[nid] for nid in node_ids[:8]]
+                        # 6 Quads -> 12 Tris
+                        qs = [
+                            (n[0], n[3], n[2], n[1]), # Bottom
+                            (n[4], n[5], n[6], n[7]), # Top
+                            (n[0], n[1], n[5], n[4]), # Front
+                            (n[2], n[3], n[7], n[6]), # Back
+                            (n[1], n[2], n[6], n[5]), # Right
+                            (n[4], n[7], n[3], n[0])  # Left
+                        ]
+                        for q in qs:
+                            # Split quad into 2 tris
+                            tris = [(q[0], q[1], q[2]), (q[0], q[2], q[3])]
+                            for tri in tris:
+                                key = tuple(sorted(tri))
+                                if key not in face_map:
+                                    face_map[key] = {'nodes': tri, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
+                                face_map[key]['count'] += 1
+                    except KeyError: pass
+
+                elif el_type in [2, 9]: # Triangles (explicit surface mesh)
+                    # Support linear (3 nodes) for vis
+                    try:
+                        n = [node_id_to_index[nid] for nid in node_ids[:3]]
+                        key = tuple(sorted(n))
+                        # Explicit surface triangles are always kept, verify winding?
+                        # Just mark count as 1 to treat as boundary
+                        face_map[key] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': entity_tag_block}
+                    except KeyError: pass
+
+            curr_line += num_els
+            
+        print(f"[MESH PARSE] Processed faces, extracting boundary...")
+        
+        # Reconstruct nodes list from dict for fast access by index
+        # We need this because node_id_to_index maps ID -> 0..N
+        # We need 0..N -> [x,y,z]
+        indexed_nodes = [None] * len(nodes)
+        for nid, idx in node_id_to_index.items():
+            indexed_nodes[idx] = nodes[nid]
+            
+        # Extract boundary faces (count == 1)
+        for key, data in face_map.items():
+            if data['count'] == 1:
+                # This is a boundary face
+                face_nodes = data['nodes']
+                el_tag = data['element_tag']
+                ent_tag = data['entity_tag']
+                
+                # Update buffers
+                for idx in face_nodes:
+                    vertices.extend(indexed_nodes[idx])
+                
+                element_tags.append(el_tag)
+                entity_tags.append(ent_tag)
+                
+                # Colors
+                q_sicn = per_element_quality.get(el_tag)
+                colors_sicn.extend(get_color(q_sicn, 'sicn') * 3) # 3 vertices
+                
+                q_gamma = per_element_gamma.get(el_tag)
+                colors_gamma.extend(get_color(q_gamma, 'gamma') * 3)
+                
+                q_skew = per_element_skewness.get(el_tag)
+                colors_skewness.extend(get_color(q_skew, 'skewness') * 3)
+                
+                q_ar = per_element_aspect_ratio.get(el_tag)
+                colors_aspect_ratio.extend(get_color(q_ar, 'aspect_ratio') * 3)
+                
+                q_ang = per_element_min_angle.get(el_tag)
+                colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
+
+        print(f"[MESH PARSE] Generated {len(vertices)//3} vertices")
         
         # Calculate quality summary and histogram from per_element_quality
         quality_values = list(per_element_quality.values()) if per_element_quality else []
@@ -1705,31 +1630,31 @@ finally:
             }
             print(f"[MESH PARSE] Histogram computed: {histogram_bins}")
 
-        return {
+        mesh_data = {
             "vertices": vertices,
-            "colors": colors_sicn, # Compatibility
+            "element_tags": element_tags,
+            "entity_tags": entity_tags,
+            "num_nodes": len(nodes),
+            "colors": colors_sicn, # Default color set
             "qualityColors": {
                 "sicn": colors_sicn,
                 "gamma": colors_gamma,
                 "skewness": colors_skewness,
-                "aspectRatio": colors_aspect_ratio,
-                "minAngle": colors_min_angle
+                "aspect_ratio": colors_aspect_ratio,
+                "min_angle": colors_min_angle
             },
-            "entityTags": entity_tags,  # Pass raw array of surface IDs per triangle
-            "numVertices": len(vertices) // 3,
-            "numTriangles": len(vertices) // 9,
             "qualityMetrics": quality_summary,
             "histogramData": histogram_data,
-            "hasQualityData": len(quality_values) > 0
+            "hasQualityData": bool(per_element_quality)
         }
+        
+        return mesh_data
 
-    except subprocess.TimeoutExpired:
-        return {"error": "Mesh parsing timed out", "vertices": [], "colors": [], "numVertices": 0, "numTriangles": 0}
     except Exception as e:
-        import traceback
         print(f"[MESH PARSE ERROR] {e}")
+        import traceback
         traceback.print_exc()
-        return {"error": str(e), "vertices": [], "colors": [], "numVertices": 0, "numTriangles": 0}
+        return {"error": str(e), "vertices": [], "colors": []}
 
 
 app = create_app()
