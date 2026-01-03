@@ -1399,30 +1399,163 @@ def parse_msh_file(msh_filepath: str):
             print(f"[MESH PARSE] Failed to load quality data: {e}")
 
     try:
-        with open(msh_filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-
-        # Detect MSH format version from header
-        msh_version = "2.2"  # Default
-        if '$MeshFormat' in content:
-            format_line = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0]
-            version_parts = format_line.split()
-            if version_parts:
-                msh_version = version_parts[0]
+        # Try to detect format
+        with open(msh_filepath, 'rb') as f:
+            header = f.read(100)
         
-        print(f"[MESH PARSE] Detected MSH version: {msh_version}")
+        is_binary = b'\x00' in header[:50]  # Binary files have null bytes in header
         
-        # Check for binary format (second field = 1)
-        is_binary = False
-        if '$MeshFormat' in content:
-            format_line = content.split('$MeshFormat')[1].split('$EndMeshFormat')[0].strip().split('\n')[0]
-            parts = format_line.split()
-            if len(parts) >= 2 and parts[1] == '1':
-                is_binary = True
-                print(f"[MESH PARSE] Binary format detected - falling back to GMSH subprocess")
-                # For binary files, use the old GMSH subprocess method
-                return parse_msh_file_via_gmsh(msh_filepath, per_element_quality, per_element_gamma, 
-                                               per_element_skewness, per_element_aspect_ratio, per_element_min_angle)
+        # For binary MSH files, use meshio (simpler and more robust)
+        if is_binary and meshio is not None:
+            print(f"[MESH PARSE] Binary MSH file detected, using meshio")
+            try:
+                mesh = meshio.read(msh_filepath)
+                
+                # Get nodes
+                nodes = {}
+                node_id_to_index = {}
+                for i, point in enumerate(mesh.points):
+                    nodes[i+1] = point.tolist()
+                    node_id_to_index[i+1] = i
+                
+                print(f"[MESH PARSE] Loaded {len(nodes)} nodes via meshio")
+                
+                # Process cells to extract boundary faces
+                face_map = {}
+                
+                def add_face(face_nodes, el_tag, entity_tag=0):
+                    key = tuple(sorted(face_nodes))
+                    if key not in face_map:
+                        face_map[key] = {'nodes': face_nodes, 'count': 0, 'element_tag': el_tag, 'entity_tag': entity_tag}
+                    face_map[key]['count'] += 1
+                
+                el_tag = 0
+                for cell_block in mesh.cells:
+                    cell_type = cell_block.type
+                    cells = cell_block.data
+                    
+                    for cell in cells:
+                        el_tag += 1
+                        if cell_type == 'tetra':  # Tet4
+                            n = [node_id_to_index[int(nid)+1] for nid in cell[:4]]
+                            add_face((n[0], n[2], n[1]), el_tag)
+                            add_face((n[0], n[1], n[3]), el_tag)
+                            add_face((n[0], n[3], n[2]), el_tag)
+                            add_face((n[1], n[2], n[3]), el_tag)
+                        elif cell_type == 'hexahedron':  # Hex8
+                            n = [node_id_to_index[int(nid)+1] for nid in cell[:8]]
+                            quads = [
+                                (n[0], n[3], n[2], n[1]), (n[4], n[5], n[6], n[7]),
+                                (n[0], n[1], n[5], n[4]), (n[2], n[3], n[7], n[6]),
+                                (n[1], n[2], n[6], n[5]), (n[4], n[7], n[3], n[0])
+                            ]
+                            for q in quads:
+                                add_face((q[0], q[1], q[2]), el_tag)
+                                add_face((q[0], q[2], q[3]), el_tag)
+                        elif cell_type == 'triangle':  # Surface triangle
+                            n = [node_id_to_index[int(nid)+1] for nid in cell[:3]]
+                            face_map[tuple(sorted(n))] = {'nodes': n, 'count': 1, 'element_tag': el_tag, 'entity_tag': 0}
+                
+                print(f"[MESH PARSE] Processed {len(face_map)} unique faces")
+                
+                # Build output from meshio data
+                indexed_nodes = [None] * len(nodes)
+                for nid, idx in node_id_to_index.items():
+                    indexed_nodes[idx] = nodes[nid]
+                
+                vertices = []
+                element_tags = []
+                entity_tags = []
+                
+                for key, data in face_map.items():
+                    if data['count'] == 1:  # Boundary face
+                        face_nodes = data['nodes']
+                        for idx in face_nodes:
+                            vertices.extend(indexed_nodes[idx])
+                        element_tags.append(data['element_tag'])
+                        entity_tags.append(data['entity_tag'])
+                
+                print(f"[MESH PARSE] Extracted {len(element_tags)} boundary triangles")
+                
+                # Apply quality colors using the loaded quality data
+                colors_sicn = []
+                colors_gamma = []
+                colors_skewness = []
+                colors_aspect_ratio = []
+                colors_min_angle = []
+                
+                def get_color(q, metric='sicn'):
+                    if q is None:
+                        return 0.29, 0.56, 0.89
+                    val = q
+                    if metric == 'skewness':
+                        val = max(0.0, min(1.0, 1.0 - q))
+                    elif metric == 'aspect_ratio':
+                        val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
+                    elif metric == 'minAngle':
+                        val = max(0.0, min(1.0, q / 60.0))
+                    else:
+                        val = max(0.0, min(1.0, q))
+                    if val <= 0.1: return 0.8, 0.0, 0.0
+                    elif val < 0.3: return 1.0, 0.3 * (val - 0.1)/0.2, 0.0
+                    elif val < 0.5: return 1.0, 0.3 + 0.7 * (val - 0.3)/0.2, 0.0
+                    elif val < 0.7: return 1.0 - 0.5 * (val - 0.5)/0.2, 1.0, 0.0
+                    else: return 0.5 - 0.5 * min(1.0, (val - 0.7)/0.3), 0.8 + 0.2 * min(1.0, (val - 0.7)/0.3), 0.2 * min(1.0, (val - 0.7)/0.3)
+                
+                for el_tag in element_tags:
+                    tag_key = int(el_tag)
+                    q_sicn = per_element_quality.get(tag_key)
+                    q_gamma = per_element_gamma.get(tag_key)
+                    q_skew = per_element_skewness.get(tag_key)
+                    q_ar = per_element_aspect_ratio.get(tag_key)
+                    q_ang = per_element_min_angle.get(tag_key)
+                    
+                    colors_sicn.extend(get_color(q_sicn, 'sicn') * 3)
+                    colors_gamma.extend(get_color(q_gamma, 'gamma') * 3)
+                    colors_skewness.extend(get_color(q_skew, 'skewness') * 3)
+                    colors_aspect_ratio.extend(get_color(q_ar, 'aspect_ratio') * 3)
+                    colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
+                
+                # Build quality summary
+                quality_values = [per_element_quality.get(int(t)) for t in element_tags if per_element_quality.get(int(t)) is not None]
+                quality_summary = {}
+                histogram_data = []
+                if quality_values:
+                    quality_summary = {
+                        "min": min(quality_values),
+                        "max": max(quality_values),
+                        "avg": sum(quality_values) / len(quality_values),
+                        "count": len(quality_values)
+                    }
+                
+                return {
+                    "vertices": vertices,
+                    "element_tags": element_tags,
+                    "entity_tags": entity_tags,
+                    "num_nodes": len(nodes),
+                    "colors": colors_sicn,
+                    "qualityColors": {
+                        "sicn": colors_sicn,
+                        "gamma": colors_gamma,
+                        "skewness": colors_skewness,
+                        "aspect_ratio": colors_aspect_ratio,
+                        "min_angle": colors_min_angle
+                    },
+                    "qualityMetrics": quality_summary,
+                    "histogramData": histogram_data,
+                    "hasQualityData": bool(per_element_quality)
+                }
+                
+            except Exception as e:
+                print(f"[MESH PARSE] meshio failed: {e}, falling back to text parsing")
+                import traceback
+                traceback.print_exc()
+                is_binary = False
+        
+        # For ASCII files or if meshio failed, use native parsing
+        if not is_binary:
+            with open(msh_filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
 
         # --- Parse Nodes ---
         if '$Nodes' not in content:

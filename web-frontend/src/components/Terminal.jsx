@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useLayoutEffect } from 'react'
 import { Terminal as TerminalIcon, Copy } from 'lucide-react'
 
 export default function Terminal({ logs, compact = false, noHeader = false }) {
@@ -6,7 +6,7 @@ export default function Terminal({ logs, compact = false, noHeader = false }) {
 
   const isAutoScroll = useRef(true)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (scrollRef.current && isAutoScroll.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
@@ -15,7 +15,7 @@ export default function Terminal({ logs, compact = false, noHeader = false }) {
   const handleScroll = () => {
     if (scrollRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = scrollRef.current
-      const atBottom = scrollHeight - scrollTop - clientHeight < 50
+      const atBottom = scrollHeight - scrollTop - clientHeight < 10
       isAutoScroll.current = atBottom
     }
   }

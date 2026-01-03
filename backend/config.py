@@ -142,6 +142,9 @@ class ProductionConfig(Config):
         'pool_recycle': 300,
         'pool_size': 10,
         'max_overflow': 20,
+        'connect_args': {
+            'connect_timeout': 5
+        }
     }
 
 

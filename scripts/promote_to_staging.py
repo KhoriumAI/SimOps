@@ -162,6 +162,12 @@ def phase_1_database_promotion(rds):
         return False
 
     try:
+        # Fetch Source Security Groups (To ensure Staging has same access)
+        logger.info(f"Fetching Security Groups from {PROD_DB_ID}...")
+        source_desc = rds.describe_db_instances(DBInstanceIdentifier=PROD_DB_ID)
+        vpc_sgs = [sg['VpcSecurityGroupId'] for sg in source_desc['DBInstances'][0]['VpcSecurityGroups']]
+        logger.info(f"Found SGs: {vpc_sgs}")
+
         logger.info(f"Snapshotting {PROD_DB_ID} to {snapshot_id}...")
         rds.create_db_snapshot(DBSnapshotIdentifier=snapshot_id, DBInstanceIdentifier=PROD_DB_ID)
         
@@ -182,7 +188,7 @@ def phase_1_database_promotion(rds):
             logger.info("Staging DB did not exist (clean slate).")
 
         # Restore
-        logger.info(f"Restoring {STAGING_DB_ID} from snapshot...")
+        logger.info(f"Restoring {STAGING_DB_ID} from snapshot with SGs {vpc_sgs}...")
         rds.restore_db_instance_from_db_snapshot(
             DBInstanceIdentifier=STAGING_DB_ID,
             DBSnapshotIdentifier=snapshot_id,
@@ -190,6 +196,7 @@ def phase_1_database_promotion(rds):
             AvailabilityZone=f"{AWS_REGION}c",
             PubliclyAccessible=False,
             AutoMinorVersionUpgrade=True,
+            VpcSecurityGroupIds=vpc_sgs,
             Tags=[{'Key': 'Environment', 'Value': 'Staging'}]
         )
         print("Waiting for restore (10-15m)...", end="", flush=True)

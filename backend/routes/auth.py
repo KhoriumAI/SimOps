@@ -45,6 +45,7 @@ def register():
     if len(password) < 8:
         return jsonify({'error': 'Password must be at least 8 characters'}), 400
     
+    print(f"[AUTH] Validating email: {email}")
     # Validate email format using email-validator library
     try:
         # Normalize email (lowercase, strip whitespace)
@@ -53,6 +54,7 @@ def register():
     except EmailNotValidError as e:
         return jsonify({'error': f'Invalid email: {str(e)}'}), 400
     
+    print(f"[AUTH] Checking if user exists: {email}")
     if User.query.filter_by(email=email).first():
         print(f"[AUTH] Registration failed: Email {email} already exists")
         return jsonify({'error': 'Email already registered'}), 409
@@ -65,6 +67,7 @@ def register():
     )
     
     try:
+        print(f"[AUTH] Committing new user to DB: {email}")
         db.session.add(user)
         db.session.commit()
         print(f"[AUTH] New user registered: {email} (ID: {user.id})")
