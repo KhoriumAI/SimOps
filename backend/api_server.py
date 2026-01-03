@@ -1810,6 +1810,9 @@ def parse_msh_file(msh_filepath: str):
                         "count": len(quality_values)
                     }
                 
+                if not vertices or not element_tags:
+                    raise Exception("Meshio returned empty geometry (no boundary faces found)")
+                
                 return {
                     "vertices": vertices,
                     "element_tags": element_tags,
@@ -1967,7 +1970,7 @@ def parse_msh_file(msh_filepath: str):
                 line_parts = elements_section[curr_line].split()
                 curr_line += 1
                 if not line_parts: continue
-                entity_tag_block = int(line_parts[0])
+                entity_tag_block = int(line_parts[1])
                 el_type = int(line_parts[2])
                 num_els = int(line_parts[3])
                 for i in range(num_els):
