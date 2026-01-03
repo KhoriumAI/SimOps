@@ -6,6 +6,100 @@ import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save, Lightbu
 import { API_BASE } from '../config'
 import QualityHistogram from './QualityHistogram'
 
+/**
+ * Compute smooth normals with angle-threshold-based splitting.
+ * Adjacent faces share normals only if their angle difference < threshold.
+ * This preserves chamfers/sharp edges while smoothing coarse tessellations.
+ * 
+ * @param {Float32Array} vertices - Flat vertex array (non-indexed, 9 floats per tri)
+ * @param {number} angleThresholdDegrees - Faces with angle > this get split normals (default 30°)
+ * @returns {Float32Array} - Smooth normals array matching vertex positions
+ */
+function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30) {
+  const numTriangles = vertices.length / 9
+  if (numTriangles === 0) return new Float32Array(0)
+
+  const threshold = Math.cos((angleThresholdDegrees * Math.PI) / 180)
+
+  // Step 1: Compute face normals
+  const faceNormals = new Float32Array(numTriangles * 3)
+  const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3()
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), fn = new THREE.Vector3()
+
+  for (let i = 0; i < numTriangles; i++) {
+    const idx = i * 9
+    v1.set(vertices[idx], vertices[idx + 1], vertices[idx + 2])
+    v2.set(vertices[idx + 3], vertices[idx + 4], vertices[idx + 5])
+    v3.set(vertices[idx + 6], vertices[idx + 7], vertices[idx + 8])
+    e1.subVectors(v2, v1)
+    e2.subVectors(v3, v1)
+    fn.crossVectors(e1, e2).normalize()
+    faceNormals[i * 3] = fn.x
+    faceNormals[i * 3 + 1] = fn.y
+    faceNormals[i * 3 + 2] = fn.z
+  }
+
+  // Step 2: Build vertex -> face adjacency map
+  const vertexToFaces = new Map()
+  const precision = 5
+
+  for (let faceIdx = 0; faceIdx < numTriangles; faceIdx++) {
+    for (let v = 0; v < 3; v++) {
+      const idx = faceIdx * 9 + v * 3
+      const key = `${vertices[idx].toFixed(precision)},${vertices[idx + 1].toFixed(precision)},${vertices[idx + 2].toFixed(precision)}`
+      if (!vertexToFaces.has(key)) vertexToFaces.set(key, [])
+      vertexToFaces.get(key).push({ faceIdx, vertexIdx: v })
+    }
+  }
+
+  // Step 3: Compute smoothed normals with angle-based grouping
+  const smoothNormals = new Float32Array(vertices.length)
+  const tempNormal = new THREE.Vector3()
+  const baseFaceNormal = new THREE.Vector3()
+  const adjacentFaceNormal = new THREE.Vector3()
+
+  for (let faceIdx = 0; faceIdx < numTriangles; faceIdx++) {
+    baseFaceNormal.set(
+      faceNormals[faceIdx * 3],
+      faceNormals[faceIdx * 3 + 1],
+      faceNormals[faceIdx * 3 + 2]
+    )
+
+    for (let v = 0; v < 3; v++) {
+      const idx = faceIdx * 9 + v * 3
+      const key = `${vertices[idx].toFixed(precision)},${vertices[idx + 1].toFixed(precision)},${vertices[idx + 2].toFixed(precision)}`
+
+      tempNormal.set(0, 0, 0)
+      const adjacentFaces = vertexToFaces.get(key) || []
+
+      for (const { faceIdx: adjFaceIdx } of adjacentFaces) {
+        adjacentFaceNormal.set(
+          faceNormals[adjFaceIdx * 3],
+          faceNormals[adjFaceIdx * 3 + 1],
+          faceNormals[adjFaceIdx * 3 + 2]
+        )
+
+        // Only include if angle is below threshold
+        if (baseFaceNormal.dot(adjacentFaceNormal) >= threshold) {
+          tempNormal.add(adjacentFaceNormal)
+        }
+      }
+
+      // Fallback to face normal if no smooth neighbors
+      if (tempNormal.lengthSq() < 0.001) {
+        tempNormal.copy(baseFaceNormal)
+      }
+
+      tempNormal.normalize()
+      smoothNormals[idx] = tempNormal.x
+      smoothNormals[idx + 1] = tempNormal.y
+      smoothNormals[idx + 2] = tempNormal.z
+    }
+  }
+
+  return smoothNormals
+}
+
 function SliceMesh({ sliceData, clippingPlanes, renderOffset }) {
   const geometry = useMemo(() => {
     if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
@@ -163,7 +257,14 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     }
 
-    geo.computeVertexNormals()
+    // Use smooth normals for preview meshes (preserves chamfers, smooths coarse tessellation)
+    // Use standard vertex normals for completed meshes (shows mesh structure)
+    if (meshData.isPreview) {
+      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 30)
+      geo.setAttribute('normal', new THREE.BufferAttribute(smoothNormals, 3))
+    } else {
+      geo.computeVertexNormals()
+    }
     geo.computeBoundingBox()
 
     // Position geometry so it sits ON the XY plane at z=0 
@@ -388,7 +489,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
           vertexColors={useVertexColors || useGradient}
           color={useVertexColors || useGradient ? undefined : meshColor}
           side={THREE.DoubleSide}
-          flatShading={true}
+          flatShading={!meshData?.isPreview}
           clippingPlanes={clippingPlanes}
           clipShadows={true}
           roughness={roughness}
