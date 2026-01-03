@@ -37,7 +37,7 @@ export default function FileUpload({ onFileUpload, compact = false }) {
   }
 
   const isValidFile = (file) => {
-    const validExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk']
+    const validExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.obj', '.vtk']
     const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0]
     return validExtensions.includes(extension)
   }
@@ -57,7 +57,7 @@ export default function FileUpload({ onFileUpload, compact = false }) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
+          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.obj,.vtk"
           onChange={handleFileSelect}
           className="hidden"
         />
@@ -85,7 +85,7 @@ export default function FileUpload({ onFileUpload, compact = false }) {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
+        accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.obj,.vtk"
         onChange={handleFileSelect}
         className="hidden"
       />

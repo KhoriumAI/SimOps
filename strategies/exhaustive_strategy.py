@@ -1353,6 +1353,18 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("=" * 60)
         
         temp_dir = os.path.join(os.path.dirname(output_file), "temp_surgical")
+        
+        # CRITICAL FIX: Force clear cache to prevent stale inverted meshes
+        # The surgical loop relies on file existence for caching.
+        # If we had a bad run (inverted elements), the bad MSH files persist.
+        if os.path.exists(temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                self.log_message("[CACHE] Cleared stale surgical cache to ensure fresh generation.")
+            except Exception as e:
+                self.log_message(f"[CACHE] Warning: Failed to clear cache: {e}")
+                
         os.makedirs(temp_dir, exist_ok=True)
         
         volumes = gmsh.model.getEntities(3)

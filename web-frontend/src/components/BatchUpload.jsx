@@ -19,7 +19,7 @@ export default function BatchUpload({
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
-  const allowedExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk']
+  const allowedExtensions = ['.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.obj', '.vtk']
 
   const validateFile = useCallback((file) => {
     const ext = file.name.toLowerCase().slice(file.name.lastIndexOf('.'))
@@ -173,7 +173,7 @@ export default function BatchUpload({
           ref={fileInputRef}
           type="file"
           multiple
-          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.x_t,.x_b,.prt,.sldprt,.obj,.vtk"
+          accept=".step,.stp,.stl,.msh,.iges,.igs,.brep,.obj,.vtk"
           onChange={handleFileSelect}
           className="hidden"
           disabled={disabled}

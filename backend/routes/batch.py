@@ -144,7 +144,7 @@ def upload_batch_files(batch_id):
     user = User.query.get(current_user_id)
     storage = get_storage()
     max_file_size = current_app.config.get('BATCH_MAX_FILE_SIZE', 500 * 1024 * 1024)
-    allowed_extensions = current_app.config.get('ALLOWED_EXTENSIONS', {'.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.x_t', '.x_b', '.prt', '.sldprt', '.obj', '.vtk'})
+    allowed_extensions = current_app.config.get('ALLOWED_EXTENSIONS', {'.step', '.stp', '.stl', '.msh', '.iges', '.igs', '.brep', '.obj', '.vtk'})
     
     batch.status = 'uploading'
     db.session.commit()
