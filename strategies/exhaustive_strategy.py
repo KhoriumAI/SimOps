@@ -1383,9 +1383,13 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             
             # Retrieve current strategy from config or default to HXT (fastest)
             current_strategy = "tet_hxt_optimized"
+            current_order = 1
             try:
-                if self.config and self.config.mesh_params and self.config.mesh_params.mesh_strategy:
-                    current_strategy = self.config.mesh_params.mesh_strategy
+                if self.config and self.config.mesh_params:
+                     if self.config.mesh_params.mesh_strategy:
+                        current_strategy = self.config.mesh_params.mesh_strategy
+                     if self.config.mesh_params.element_order:
+                        current_order = self.config.mesh_params.element_order
             except: pass
 
             cmd = [
@@ -1394,7 +1398,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                 "--input", input_file,
                 "--output", worker_msh,
                 "--tag", str(tag),
-                "--strategy", str(current_strategy)
+                "--strategy", str(current_strategy),
+                "--order", str(current_order)
             ]
             
             try:

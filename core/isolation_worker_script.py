@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--tag", type=int, required=True)
+    parser.add_argument("--order", type=int, default=1)
     parser.add_argument("--max-size", type=float, default=10.0)
     parser.add_argument("--min-size", type=float, default=1.0)
     parser.add_argument("--strategy", type=str, default="tet_hxt_optimized")
