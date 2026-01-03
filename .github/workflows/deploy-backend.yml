@@ -1,4 +1,4 @@
-# Deploy Backend to EC2
+# Deploy Backend to EC2 via AWS SSM
 # Triggers on push to main branch when backend files change
 
 name: Deploy Backend
@@ -23,19 +23,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "--- BASIC CONNECTIVITY TEST ---"
-            echo "Current User: $(whoami)"
-            echo "Hostname: $(hostname)"
-            echo "PWD: $(pwd)"
-            echo "--- LISTING HOME ---"
-            ls -la /home
-            echo "--- LISTING CURRENT DIR ---"
-            ls -la
-            echo "--- END BASIC TEST ---"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-1
+
+      - name: Deploy via SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids "i-0bdb1e0eaa658cc7c" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy backend via GitHub Actions (SSM)" \
+            --parameters '{
+              "commands": [
+                "echo \"[DEPLOY] Updating permissions...\"",
+                "sudo chown -R ec2-user:ec2-user /home/ec2-user/backend",
+                "echo \"[DEPLOY] Configuring git...\"",
+                "runuser -l ec2-user -c \"git config --global --add safe.directory /home/ec2-user/backend\"",
+                "echo \"[DEPLOY] Pulling latest code...\"",
+                "runuser -l ec2-user -c \"cd /home/ec2-user/backend && git fetch --all && git reset --hard origin/main\"",
+                "echo \"[DEPLOY] Installing dependencies...\"",
+                "runuser -l ec2-user -c \"cd /home/ec2-user/backend && venv/bin/pip install -r backend/requirements.txt\"",
+                "echo \"[DEPLOY] Running migrations...\"",
+                "runuser -l ec2-user -c \"cd /home/ec2-user/backend && venv/bin/python backend/run_migration.py\"",
+                "echo \"[DEPLOY] Restarting gunicorn...\"",
+                "sudo systemctl restart gunicorn",
+                "echo \"[DEPLOY] Waiting for service to start...\"",
+                "sleep 5",
+                "echo \"[DEPLOY] Health check...\"",
+                "curl -sf http://localhost:3000/api/health || (echo \"[ERROR] Health check failed\" && sudo journalctl -u gunicorn -n 20 --no-pager && exit 1)"
+              ]
+            }' \
+            --region us-west-1
