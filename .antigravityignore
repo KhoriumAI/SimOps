@@ -1,0 +1,123 @@
+# .antigravityignore mirrors .gitignore to optimize indexing
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv
+meshing/
+
+# Node.js
+node_modules/
+dist/
+.pnpm-store/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files
+generated_meshes/
+output/
+sim_build/
+meshing_output/
+*.msh
+*.stl
+*.vtk
+*.vtu
+*.quality.json
+*_exhaustive_report.txt
+
+# User uploads and sample files
+backend/uploads/
+backend/samplefiles/
+backend/outputs/
+backend/instance/
+
+# Logs
+*.log
+
+# Temporary files
+temp_*
+*.tmp
+
+# CAD files
+# *.step
+# *.stp
+# *.iges
+# *.igs
+
+# Test files
+test_*.py
+reproduce_*.py
+fix_*.py
+*_working.py
+!scripts/test_core_meshing.py
+
+# Large Binary Artifacts
+*.cgns
+*.bdf
+*.brep
+*_soup.stl
+fused_*.stl
+dirty_*.stl
+temp_*.stl
+temp_stls/
+robust_mesh*.msh
+final_assembly_*.msh
+final_assembly_*.vtk
+shell_connectivity_mesh.vtk
+voxel_mesh.vtk
+
+# Job Logs
+jobs_log/*.log*
+*.log.processing
+
+# Working copies and backups
+*_working.py
+*.backup_*
+
+# Explicitly exclude common high-volume directories
+.git/
+node_modules/
+venv/
+.venv/
+__pycache__/

@@ -1178,7 +1178,6 @@ export default function MeshViewer({
               rotateSpeed={0.8}
               panSpeed={0.8}
               zoomSpeed={2.4}
-              enabled={!selectionMode}
               makeDefault
             />
 
