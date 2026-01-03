@@ -284,10 +284,20 @@ class S3Storage(StorageBackend):
         """Download S3 file to local filesystem (for mesh processing)"""
         bucket, key = self._parse_s3_uri(s3_path)
         
-        print(f"[S3 DEBUG] Downloading from Bucket='{bucket}', Key='{key}'")
+        print(f"[S3 DEBUG] Downloading s3_path='{s3_path}'")
+        print(f"[S3 DEBUG] Parsed Bucket='{bucket}', Key='{key}'")
+        print(f"[S3 DEBUG] Current bucket_name='{self.bucket_name}'")
+        
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        self.s3_client.download_file(bucket, key, local_path)
-        print(f"[S3] Downloaded {s3_path} to {local_path}")
+        try:
+            self.s3_client.download_file(bucket, key, local_path)
+            print(f"[S3 OK] Downloaded {s3_path} to {local_path}")
+        except Exception as e:
+            print(f"[S3 ERROR] Failed to download {s3_path}. Error: {str(e)}")
+            # Log more details if it's a 404
+            if "404" in str(e):
+                print(f"[S3 ERROR] 404 Not Found. Please check if bucket '{bucket}' exists and contains key '{key}'")
+            raise
         return local_path
     
     def _parse_s3_uri(self, filepath: str) -> tuple:

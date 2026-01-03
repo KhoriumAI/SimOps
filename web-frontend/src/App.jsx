@@ -132,12 +132,23 @@ function App() {
   useEffect(() => {
     if (!currentProject) return
 
+    let isSubscribed = true
+
     const pollStatus = async () => {
+      if (!isPolling || !isSubscribed) return
+
       try {
         const response = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
-        if (!response.ok) return
+        if (!response.ok || !isSubscribed) return
 
         const data = await response.json()
+
+        // Safety check: ensure result matches current project
+        if (data.id !== currentProject) {
+          console.warn('[Poll] Received status for wrong project:', data.id, 'vs', currentProject)
+          return
+        }
+
         setProjectStatus(data)
 
         // Only update logs from server if there are actual generation logs
@@ -185,13 +196,14 @@ function App() {
       }
     }
 
-    if (isPolling) {
-      pollStatus()
-      const interval = setInterval(pollStatus, 1000)
-      return () => clearInterval(interval)
+    const interval = setInterval(pollStatus, 2000)
+    pollStatus()
+
+    return () => {
+      isSubscribed = false
+      clearInterval(interval)
     }
-    // Don't auto-poll when not generating - preserves CAD preview logs
-  }, [currentProject, isPolling, meshData, authFetch, meshStartTime])
+  }, [currentProject, isPolling])
 
   // Parse progress from log messages
   const parseProgressFromLogs = (logs) => {

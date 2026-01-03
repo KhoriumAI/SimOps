@@ -162,6 +162,9 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             project.mesh_count = (project.mesh_count or 0) + 1
             db.session.commit()
             print(f"[MESH GEN] Started for project {project_id}")
+            print(f"[MESH GEN] Project User: {user.email if user else 'N/A'}")
+            print(f"[MESH GEN] Project Filepath: {project.filepath}")
+            print(f"[MESH GEN] Project Status: {project.status}")
 
             worker_script = Path(__file__).parent.parent / "apps" / "cli" / "mesh_worker_subprocess.py"
             output_folder = Path(app.config['OUTPUT_FOLDER'])
@@ -175,11 +178,18 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             if use_s3 and project.filepath.startswith('s3://'):
                 local_input_dir = Path(tempfile.mkdtemp(prefix='meshgen_input_'))
                 local_input_file = local_input_dir / Path(project.filename).name
+                print(f"[MESH GEN] S3 File Exist Check: {project.filepath}")
+                if not storage.file_exists(project.filepath):
+                    print(f"[MESH GEN ERROR] CAD file missing from S3: {project.filepath}")
+                    raise Exception(f"CAD file not found on S3. Please re-upload.")
+                
                 print(f"[MESH GEN] Downloading from S3: {project.filepath}")
                 storage.download_to_local(project.filepath, str(local_input_file))
                 input_filepath = str(local_input_file)
             else:
                 input_filepath = project.filepath
+                if not Path(input_filepath).exists() and not input_filepath.startswith('s3://'):
+                     print(f"[MESH GEN ERROR] Local file missing: {input_filepath}")
             
             print(f"[MESH GEN] Worker script: {worker_script}")
             print(f"[MESH GEN] Input file: {input_filepath}")
@@ -1073,25 +1083,38 @@ def register_routes(app):
                 local_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.msh')
                 storage.download_to_local(output_path, local_temp.name)
                 
-                # CRITICAL: Also download the quality JSON so parse_msh_file can find it
-                # The quality file is uploaded alongside the mesh with the same base name
+                # Also try to download result JSON if it exists (modern worker format)
+                result_s3_path = output_path.replace('.msh', '_result.json')
+                local_result_path = local_temp.name.replace('.msh', '_result.json')
+                
+                # Legacy quality JSON path
                 quality_s3_path = output_path.replace('.msh', '.quality.json')
                 local_quality_path = local_temp.name.replace('.msh', '.quality.json')
+                
                 print(f"[MESH DATA] Mesh S3 path: {output_path}")
-                print(f"[MESH DATA] Quality S3 path: {quality_s3_path}")
-                print(f"[MESH DATA] Temp mesh path: {local_temp.name}")
-                print(f"[MESH DATA] Temp quality path: {local_quality_path}")
-                try:
-                    storage.download_to_local(quality_s3_path, local_quality_path)
-                    print(f"[MESH DATA] Downloaded quality file: {local_quality_path}")
-                except Exception as q_err:
-                    print(f"[MESH DATA] Quality file not found on S3: {q_err}")
+                
+                # Try result file first (richer data)
+                if storage.file_exists(result_s3_path):
+                    try:
+                        storage.download_to_local(result_s3_path, local_result_path)
+                        print(f"[MESH DATA] Downloaded result file: {local_result_path}")
+                    except Exception as r_err:
+                        print(f"[MESH DATA] Error downloading result file: {r_err}")
+                
+                # Try quality file as fallback
+                if storage.file_exists(quality_s3_path):
+                    try:
+                        storage.download_to_local(quality_s3_path, local_quality_path)
+                        print(f"[MESH DATA] Downloaded quality file: {local_quality_path}")
+                    except Exception as q_err:
+                        print(f"[MESH DATA] Error downloading quality file: {q_err}")
 
                 
                 mesh_data = parse_msh_file(local_temp.name)
                 
                 # Clean up temp files
                 Path(local_temp.name).unlink(missing_ok=True)
+                Path(local_result_path).unlink(missing_ok=True)
                 Path(local_quality_path).unlink(missing_ok=True)
             else:
                 mesh_data = parse_msh_file(output_path)
