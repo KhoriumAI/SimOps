@@ -16,11 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Quality Metrics**: Added support for Gamma, Skewness, Aspect Ratio, and Minimum Angle in the web visualizer.
 - **Deployment Automation**: Integrated automatic CloudFront cache invalidation and expanded backend watch paths.
+- **Environment Management**: Migrated to GitHub Secrets-driven `.env` generation for secure production configuration.
 
 ### Fixed
-- **Mesh Quality Visualization**: Resolved issue where only SICN displayed correctly. Implemented robust volume-to-surface quality mapping (node-set intersection heuristic) to ensure surface elements reflect 3D tet quality.
-- **API Data Consistency**: Fixed `api_server.py` to merge per-element quality data from worker subprocess results before serving to frontend.
-- **CloudFront Caching**: Resolved stale frontend assets by implementing cache invalidation workflow. Frontend deployments to S3 now require CloudFront cache invalidation to be visible to users.
+- **Registration 504 Error**: Resolved backend service hangs caused by a missing RDS Security Group (blocking connectivity) and a Python `IndentationError` in the log streaming loop.
+- **Login Persistence**: Transitioned Dev backend from volatile SQLite file to persistent PostgreSQL RDS database to prevent data loss during deployments.
+- **Database Connectivity**: Added mandatory `sslmode=require` and connection timeouts to robustly handle AWS RDS connections.
+- **Promotion Script**: Patched `scripts/promote_to_staging.py` to automatically copy Security Groups from source to target DB instances.
+- **Terminal Handling**: Fixed Terminal UI glitches in the web frontend for smoother log rendering.
 
 ### Discovered
 - **Infrastructure Misconfiguration**: CloudFront distribution E352AHA7L040MU routes frontend to DEV S3 bucket but API calls to STAGING ALB, creating a mixed environment. Documented in ADR-0013.

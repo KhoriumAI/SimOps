@@ -16,6 +16,8 @@ Features:
 """
 
 import boto3
+import os
+
 import subprocess
 import sys
 import time
@@ -25,6 +27,8 @@ import json
 import logging
 from datetime import datetime
 import traceback
+import getpass
+
 
 # --- Configuration (from Discovery) ---
 AWS_REGION = "us-west-1"
@@ -123,26 +127,115 @@ def check_aws_auth():
         logger.critical(f"AWS Authentication Failed: {e}")
         return False
 
-def verify_rds_state(rds_client, db_id):
-    """Check if DB exists and is available."""
+# --- Schema Verification ---
+
+REQUIRED_COLUMNS = {
+    'projects': [
+        'preview_path', 'original_filename', 'file_size', 'file_hash',
+        'mime_type', 'mesh_count', 'download_count', 'last_accessed'
+    ],
+    'mesh_results': [
+        'score', 'output_size', 'quality_metrics', 'logs', 'boundary_zones',
+        'params', 'job_id', 'processing_time', 'node_count', 'element_count',
+        'completed_at'
+    ],
+    'users': [
+        'storage_quota', 'storage_used', 'last_login', 'name', 'role', 'is_active'
+    ]
+}
+
+def verify_schema_integrity(host, port):
+    """
+    Connects to the database and ensures all critical columns exist.
+    Requires DB_USER, DB_PASSWORD, DB_NAME env vars.
+    """
+    from sqlalchemy import create_engine, inspect
+    
+    db_user = os.environ.get('DB_USER')
+    db_password = os.environ.get('DB_PASSWORD')
+    db_name = os.environ.get('DB_NAME', 'meshgen_db')
+
+    # Interactive Prompt if missing
+    if not db_user:
+        Colors.print("\n🔐 Database Credentials Required for Schema Check", Colors.BLUE)
+        db_user = input("   Enter DB User [meshgen_user]: ").strip() or "meshgen_user"
+    
+    if not db_password:
+        if 'db_user' not in locals() or not db_user: # Handle case where user might have been set above
+             pass 
+        prompt_text = f"   Enter Password for {db_user}: "
+        try:
+            db_password = getpass.getpass(prompt_text)
+        except Exception:
+            # Fallback for environments where getpass might fail (though unlikely in standard shell)
+            db_password = input(prompt_text)
+
+    if not (db_user and db_password):
+        Colors.print("⚠️  Credentials checking skipped or incomplete.", Colors.WARNING)
+        if not confirm("Cannot verify database schema without credentials. Proceed blindly?", "warning"):
+            return False
+        return True
+
+    Colors.print(f"🔍 Verifying schema integrity on {host}...", Colors.BLUE)
+    
     try:
-        resp = rds_client.describe_db_instances(DBInstanceIdentifier=db_id)
-        status = resp['DBInstances'][0]['DBInstanceStatus']
-        logger.info(f"DB {db_id} status: {status}")
-        return status == 'available'
+        # Construct connection string
+        db_url = f"postgresql://{db_user}:{db_password}@{host}:{port}/{db_name}"
+        engine = create_engine(db_url, connect_args={'connect_timeout': 5})
+        inspector = inspect(engine)
+        
+        missing_found = False
+        
+        for table, required_cols in REQUIRED_COLUMNS.items():
+            if not inspector.has_table(table):
+                Colors.print(f"❌ Missing critical table: {table}", Colors.FAIL)
+                missing_found = True
+                continue
+                
+            existing_cols = [c['name'] for c in inspector.get_columns(table)]
+            for col in required_cols:
+                if col not in existing_cols:
+                    Colors.print(f"❌ Missing column in '{table}': {col}", Colors.FAIL)
+                    missing_found = True
+        
+        if missing_found:
+            Colors.print("❌ Database schema is missing required columns! Promotion aborted.", Colors.FAIL)
+            return False
+            
+        Colors.print("✓ Schema verification passed.", Colors.GREEN)
+        return True
+
     except Exception as e:
-        logger.error(f"Could not verify DB {db_id}: {e}")
-        return False
+        logger.error(f"Schema verification failed: {e}")
+        Colors.print("⚠️  Could not connect to database to verify schema.", Colors.WARNING)
+        if not confirm("Schema check failed due to connection error. Proceed?", "warning"):
+            return False
+        return True
 
 # --- Core Logic ---
 
 def phase_1_database_promotion(rds):
     log_section("Phase 1: Database Promotion")
     
-    # 1. Pre-flight Checks
-    if not verify_rds_state(rds, PROD_DB_ID):
-        logger.error("Source (Dev) DB is not available. Aborting.")
+    # 1. Pre-flight Checks & Schema Verification
+    logger.info(f"Checking {PROD_DB_ID} status...")
+    try:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=PROD_DB_ID)
+        status = resp['DBInstances'][0]['DBInstanceStatus']
+        endpoint = resp['DBInstances'][0]['Endpoint']
+        
+        if status != 'available':
+            logger.error(f"Source (Dev) DB is {status}. Aborting.")
+            return False
+            
+        # Run Code-Level Schema Check
+        if not verify_schema_integrity(endpoint['Address'], endpoint['Port']):
+            return False
+            
+    except Exception as e:
+        logger.error(f"Could not verify DB {PROD_DB_ID}: {e}")
         return False
+
     
     # 2. Safety Check: Staging Connectivity?
     # (Here we assume RDS API access is sufficient, but in a real script we might check VPC pairing)
