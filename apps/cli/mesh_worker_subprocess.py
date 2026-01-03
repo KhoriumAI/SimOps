@@ -1159,14 +1159,15 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         except Exception as qe:
             print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
         
-        # Write output
+        # Write output mesh
         gmsh.write(output_file)
         gmsh.finalize()
         
         total_time = time.time() - start_time
         print(f"[HXT] SUCCESS! Total time: {total_time:.2f}s", flush=True)
         
-        return {
+        # Build the result dict
+        result = {
             'success': True,
             'output_file': str(Path(output_file).absolute()),
             'strategy': 'fast_tet_delaunay',
@@ -1186,6 +1187,21 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
             },
             'quality_metrics': quality_metrics
         }
+        
+        # CRITICAL: Save full result to _result.json file
+        # The stdout output is sanitized (per_element arrays removed) to avoid huge JSON,
+        # so we save the full data to file for api_server.py to load later.
+        result_json_path = str(Path(output_file).with_suffix('')) + '_result.json'
+        try:
+            with open(result_json_path, 'w') as f:
+                json.dump(result, f)
+            print(f"[HXT] Saved full result to: {result_json_path}")
+            result['full_result_file'] = result_json_path
+        except Exception as save_err:
+            print(f"[HXT] Warning: Could not save result JSON: {save_err}")
+        
+        return result
+
         
     except Exception as e:
         import traceback
