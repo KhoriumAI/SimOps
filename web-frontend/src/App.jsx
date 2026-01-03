@@ -461,7 +461,7 @@ function App() {
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
         setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
-        // setMeshData(null) // Keep existing mesh/preview visible during generation
+        setMeshData(null) // Clear existing mesh to show generation is starting
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
       } else {
@@ -926,6 +926,7 @@ function App() {
           {/* 3D Viewer - Takes most of the space */}
           <div className="flex-1 relative min-h-0">
             <MeshViewer
+              key={currentProject} // Force remount on project change to reset internal state
               meshData={meshData}
               projectId={currentProject}
               geometryInfo={geometryInfo}

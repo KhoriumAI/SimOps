@@ -101,14 +101,12 @@ function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30)
 }
 
 function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
-  // Debug log to verify data reception
+  // Debug log to verify data reception - ensure this runs
   useEffect(() => {
-    if (sliceData) {
-      console.log("[SliceMesh] Received slice data:", {
-        vertices: sliceData.vertices?.length,
-        colors: sliceData.colors?.length,
-        indices: sliceData.indices?.length
-      });
+    if (sliceData && sliceData.vertices) {
+      console.log(`[SliceMesh] Data Loaded: ${sliceData.vertices.length / 3} vertices. Displaying...`);
+    } else if (sliceData) {
+      console.log("[SliceMesh] sliceData present but empty/invalid:", sliceData);
     }
   }, [sliceData]);
 
@@ -144,19 +142,34 @@ function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
 
   if (!geometry) return null
 
+  // Use MeshBasicMaterial to ignore lighting issues. 
+  // Disable depth testing to force it to show up (might look weird but verifies existence).
   return (
-    <mesh geometry={geometry}>
-      <meshStandardMaterial
-        vertexColors={true}
-        side={THREE.DoubleSide}
-        transparent={false}
-        opacity={1.0}
-        roughness={0.5}
-        metalness={0.1}
-        clippingPlanes={filteredPlanes}
-        clipShadows={true}
-      />
-    </mesh>
+    <group>
+      {/* Main Slice Surface */}
+      <mesh geometry={geometry}>
+        <meshBasicMaterial
+          vertexColors={true}
+          side={THREE.DoubleSide}
+          transparent={false}
+          opacity={1.0}
+          clippingPlanes={filteredPlanes}
+          depthTest={true} // Keep depth test for correct volume sorting
+        />
+      </mesh>
+
+      {/* Debug Wireframe to make it super obvious */}
+      {/* 
+      <mesh geometry={geometry}>
+        <meshBasicMaterial 
+            color="red" 
+            wireframe={true} 
+            side={THREE.DoubleSide} 
+            clippingPlanes={filteredPlanes}
+        />
+      </mesh>
+      */}
+    </group>
   )
 }
 
@@ -227,13 +240,21 @@ function AxesIndicator({ visible }) {
 
 function Lights({ dynamic }) {
   const { camera } = useThree()
+  const lightRef = useRef()
+
+  useFrame(() => {
+    if (dynamic && lightRef.current) {
+      lightRef.current.position.copy(camera.position)
+    }
+  })
 
   if (dynamic) {
     return (
       <>
         <ambientLight intensity={0.4} />
-        {/* Headlight attached to camera */}
+        {/* Headlight attached to camera - updates every frame via useFrame */}
         <directionalLight
+          ref={lightRef}
           position={[camera.position.x, camera.position.y, camera.position.z]}
           intensity={1.2}
           castShadow={false}
@@ -618,6 +639,12 @@ export default function MeshViewer({
   // Derive quality coloring: ON for completed meshes with quality data
   const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || (meshData?.qualityColors && Object.keys(meshData.qualityColors).length > 0) || meshData?.hasQualityData
   const showQuality = status === 'completed' && hasQualityData
+
+  // Clear slice data when project changes to prevent ghosting
+  useEffect(() => {
+    setSliceData(null)
+  }, [projectId])
+
   const [clipping, setClipping] = useState({
     enabled: false,
     showQualitySlice: true,
