@@ -168,15 +168,15 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
     def run_meshing_strategy(self, input_file: str, output_file: str) -> bool:
         """
-        Run exhaustive meshing - try EVERYTHING in PARALLEL
+        Run automatic meshing - optimizes parameters
         """
         self.log_message("\n" + "=" * 60)
-        self.log_message("EXHAUSTIVE MESH GENERATION STRATEGY (PARALLEL RACE)")
-        self.log_message("Will run strategies concurrently. First winner takes all.")
+        self.log_message("AUTOMATIC MESH GENERATION")
+        self.log_message("Optimizing mesh generation parameters...")
         self.log_message("=" * 60)
 
         # Analyze geometry for defeaturing (this happens in main process once)
-        self.log_message("\nAnalyzing geometry for defeaturing...")
+        self.log_message("\nAnalyzing geometry...")
         geom_stats = self.geometry_cleanup.analyze_geometry()
 
         # Define all strategies to try
@@ -264,7 +264,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         
         num_workers = max_workers
         
-        self.log_message(f"Starting parallel pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
+        self.log_message(f"Starting optimization pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
         self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
         # --- EARLY CANARY CHECKS ---
@@ -298,7 +298,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             
             if should_fail_fast:
                 self.log_message(f"[!] Geometry failed early 1D canary: {complexity['reason']}")
-                self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
+                self.log_message("[!] Skipping optimization - creating bounding box fallback...")
                 return self.create_bounding_box_mesh(output_file)
         
         # 2D Surface Canary - ONLY for single parts (<= 3 volumes)
@@ -308,7 +308,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             canary_timeout = 10.0 if complexity['edge_count'] > 5000 else 5.0
             if not self.generate_2d_canary(timeout=canary_timeout):
                 self.log_message("[!] Geometry failed 2D canary (surface mesh timeout after 5.0s)")
-                self.log_message("[!] Skipping parallel race - creating bounding box fallback...")
+                self.log_message("[!] Skipping optimization - creating bounding box fallback...")
                 return self.create_bounding_box_mesh(output_file)
             self.log_message("[OK] Canary checks passed - geometry is meshable")
         else:
@@ -320,7 +320,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         use_surgical = num_vols > 3
         if use_surgical:
             self.log_message(f"\n[SURGICAL] Assembly detected ({num_vols} volumes). Initializing Surgical Amputation Loop...")
-            self.log_message(f"[SURGICAL] Bypassing {num_workers}-worker parallel race (surgical uses 6 dedicated workers)")
+            self.log_message(f"[SURGICAL] Bypassing {num_workers}-worker optimization (surgical uses 6 dedicated workers)")
             return self._run_surgical_isolation_loop(input_file, output_file)
 
         best_mesh_path = None
@@ -426,14 +426,15 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                     pool.close()
                     pool.join()
                     
+                    
                 except Exception as e:
-                    self.log_message(f"[!] Parallel execution error: {e}")
+                    self.log_message(f"[!] Execution error: {e}")
                     if pool:
                         pool.terminate() # Fallback to hard kill on error
                         pool.join()
                 
         # --- LAST DITCH SAFETY FALLBACK ---
-        # If no winners and no candidates after the parallel race, 
+        # If no winners and no candidates after the optimization, 
         # try the bounding box fallback ONE LAST TIME in the main process.
         if not best_mesh_path:
             self.log_message("\n[SAFETY] No successful strategy found. Attempting main-process last-ditch fallback...")

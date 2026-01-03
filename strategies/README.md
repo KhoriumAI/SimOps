@@ -4,7 +4,7 @@ This directory implements specific mesh generation algorithms and strategies.
 
 ## Key Strategies
 
-- **exhaustive_strategy.py**: A "race" orchestrator that runs multiple strategies in parallel and picks the best result based on quality scores.
+- **exhaustive_strategy.py**: An automatic optimizer that runs multiple strategies and picks the best result based on quality scores.
 - **tetgen_strategy.py**: Wrapper for the TetGen library (alternative to Gmsh).
 - **pymesh_strategy.py**: Integration with PyMesh for mesh repair and generation.
 - **paintbrush_strategy.py**: Logic for localized refinement using "painted" regions.

@@ -21,6 +21,7 @@ PyQt6>=6.4.0           # Montage GUI (montage_gui.py)
 vtk>=9.2.0             # 3D visualization backend
 pyvista>=0.40.0        # High-level VTK wrapper
 qtrangeslider>=0.1.5   # Custom slider widget
+scikit-image>=0.21.0     # Image processing (used in winding_resurface.py)
 
 # --- CAD File Support & Mesh I/O ---
 # pythonocc-core>=7.7.0  # STEP/IGES CAD file loading (Install via Conda, not Pip)

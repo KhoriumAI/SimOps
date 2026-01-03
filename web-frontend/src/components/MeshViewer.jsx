@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
-import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
+import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport, Edges } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save } from 'lucide-react'
+import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save, Lightbulb, Hexagon } from 'lucide-react'
 import { API_BASE } from '../config'
 import QualityHistogram from './QualityHistogram'
 
-function SliceMesh({ sliceData, clippingPlanes }) {
+function SliceMesh({ sliceData, clippingPlanes, renderOffset }) {
   const geometry = useMemo(() => {
     if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
     const geo = new THREE.BufferGeometry()
@@ -16,8 +16,14 @@ function SliceMesh({ sliceData, clippingPlanes }) {
       geo.setIndex(sliceData.indices)
     }
     geo.computeVertexNormals()
+
+    // Apply centering offset to align with main mesh
+    if (renderOffset) {
+      geo.translate(renderOffset.x, renderOffset.y, renderOffset.z)
+    }
+
     return geo
-  }, [sliceData])
+  }, [sliceData, renderOffset])
 
   if (!geometry) return null
 
@@ -99,7 +105,36 @@ function AxesIndicator({ visible }) {
   )
 }
 
-function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces }) {
+function Lights({ dynamic }) {
+  const { camera } = useThree()
+
+  if (dynamic) {
+    return (
+      <>
+        <ambientLight intensity={0.4} />
+        {/* Headlight attached to camera */}
+        <directionalLight
+          position={[camera.position.x, camera.position.y, camera.position.z]}
+          intensity={1.2}
+          castShadow={false}
+        />
+        {/* Fill light */}
+        <directionalLight position={[-50, -50, -25]} intensity={0.2} />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[50, 50, 25]} intensity={0.6} />
+      <directionalLight position={[-50, -50, -25]} intensity={0.3} />
+      <hemisphereLight intensity={0.3} />
+    </>
+  )
+}
+
+function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces, boundaryZones, showEdges, edgeThreshold }) {
   const meshRef = useRef()
   const { camera, gl, raycaster, pointer } = useThree()
 
@@ -108,9 +143,9 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     gl.localClippingEnabled = true
   }, [gl])
 
-  // Create geometry from flat arrays
-  const geometry = useMemo(() => {
-    if (!meshData || !meshData.vertices) return null
+  // Create geometry from flat arrays and calculate centering offset
+  const { geometry, renderOffset } = useMemo(() => {
+    if (!meshData || !meshData.vertices) return { geometry: null, renderOffset: null }
 
     const geo = new THREE.BufferGeometry()
 
@@ -119,7 +154,6 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
     // Colors (Float32Array) - if available (for quality mode)
-    // Support multiple color sets if available
     const activeColors = (meshData.qualityColors && showQuality) ?
       meshData.qualityColors[showQuality === true ? 'sicn' : showQuality] :
       meshData.colors;
@@ -140,7 +174,7 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     geo.translate(offset.x, offset.y, offset.z);
     geo.computeBoundingBox();
 
-    return geo
+    return { geometry: geo, renderOffset: offset }
   }, [meshData, showQuality])
 
   // Create gradient colors based on height (Z position in original coords)
@@ -229,18 +263,18 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     const planes = []
 
     if (clipping.x) {
-      // X plane: Normal (-1, 0, 0) to cut from right
-      const xPos = center.x + (size.x / 2) * (clipping.xValue / 50)
+      // X plane: Normal (-1, 0, 0) to cut from right (max -> min)
+      const xPos = (center.x + size.x / 2) - (clipping.xValue / 100) * size.x
       planes.push(new THREE.Plane(new THREE.Vector3(-1, 0, 0), xPos))
     }
     if (clipping.y) {
-      // Y plane
-      const yPos = center.y + (size.y / 2) * (clipping.yValue / 50)
+      // Y plane: Normal (0, -1, 0)
+      const yPos = (center.y + size.y / 2) - (clipping.yValue / 100) * size.y
       planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), yPos))
     }
     if (clipping.z) {
-      // Z plane
-      const zPos = center.z + (size.z / 2) * (clipping.zValue / 50)
+      // Z plane: Normal (0, 0, -1)
+      const zPos = (center.z + size.z / 2) - (clipping.zValue / 100) * size.z
       planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), zPos))
     }
 
@@ -304,6 +338,34 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     return geo
   }, [selectedFaces, geometry])
 
+  // Create geometries for saved boundary zones
+  const zoneGeometries = useMemo(() => {
+    if (!boundaryZones || Object.keys(boundaryZones).length === 0 || !geometry) return []
+
+    const geometries = []
+    const positions = geometry.attributes.position.array
+
+    Object.entries(boundaryZones).forEach(([name, indices]) => {
+      const highlightPositions = []
+      // indices is an array of face indices
+      indices.forEach(faceIndex => {
+        const idx = faceIndex * 9
+        if (idx + 8 < positions.length) {
+          for (let i = 0; i < 9; i++) highlightPositions.push(positions[idx + i])
+        }
+      })
+
+      if (highlightPositions.length > 0) {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(highlightPositions, 3))
+        geo.computeVertexNormals()
+        geometries.push({ name, geometry: geo })
+      }
+    })
+
+    return geometries
+  }, [boundaryZones, geometry])
+
   if (!geometry) return null
 
   // Determine which geometry and colors to use
@@ -336,11 +398,24 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         />
       </mesh>
 
-      {/* Highlight selected faces */}
+      {/* Render persistent boundary zones */}
+      {zoneGeometries.map(zone => (
+        <mesh key={zone.name} geometry={zone.geometry}>
+          <meshBasicMaterial
+            color="#3b82f6" // Blue-500
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.5}
+            depthTest={false} // Overlay behavior
+          />
+        </mesh>
+      ))}
+
+      {/* Highlight selected faces (on top of zones) */}
       {selectedFaceGeometry && (
         <mesh geometry={selectedFaceGeometry}>
           <meshBasicMaterial
-            color="#00ff00"
+            color="#22c55e" // Green-500
             side={THREE.DoubleSide}
             transparent
             opacity={0.6}
@@ -367,7 +442,18 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
 
       {/* Volumetric Quality Slice */}
       {clipping.enabled && clipping.showQualitySlice && sliceData && (
-        <SliceMesh sliceData={sliceData} clippingPlanes={clippingPlanes} />
+        <SliceMesh sliceData={sliceData} clippingPlanes={clippingPlanes} renderOffset={renderOffset} />
+      )}
+
+      {/* Sharp Edges Overlay */}
+      {showEdges && (
+        <Edges
+          geometry={activeGeometry}
+          threshold={edgeThreshold}
+          color="#1a1a1a"
+          opacity={0.8}
+          transparent
+        />
       )}
     </group>
   )
@@ -477,6 +563,11 @@ export default function MeshViewer({
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
   const [gradientColors, setGradientColors] = useState({ start: '#4a9eff', end: '#ff6b6b' })
+
+  // Lighting & Visibility
+  const [dynamicLighting, setDynamicLighting] = useState(true)
+  const [showEdges, setShowEdges] = useState(false) // Default off until user enables
+  const [edgeThreshold, setEdgeThreshold] = useState(15)
 
   // Face selection state (selectionMode removed - always enabled)
   const selectionMode = true
@@ -912,6 +1003,60 @@ export default function MeshViewer({
               >
                 Reset to Default
               </button>
+
+              <div className="mt-3 border-t border-gray-700 pt-3">
+                <div className="font-medium text-white mb-2 text-sm">💡 Lighting & Visibility</div>
+
+                {/* Dynamic Lighting Toggle */}
+                <div className="mb-2">
+                  <label className="flex items-center gap-2 cursor-pointer text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={dynamicLighting}
+                      onChange={(e) => setDynamicLighting(e.target.checked)}
+                      className="accent-blue-500 w-3 h-3"
+                    />
+                    <div className="flex items-center gap-1.5">
+                      <Lightbulb className={`w-3 h-3 ${dynamicLighting ? 'text-yellow-400 fill-yellow-400' : 'text-gray-500'}`} />
+                      Dynamic Lighting (Headlight)
+                    </div>
+                  </label>
+                  <p className="text-[9px] text-gray-500 ml-5 mt-0.5">Light follows camera to see all details</p>
+                </div>
+
+                {/* Sharp Edges Toggle */}
+                <div className="mb-2">
+                  <label className="flex items-center gap-2 cursor-pointer text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={showEdges}
+                      onChange={(e) => setShowEdges(e.target.checked)}
+                      className="accent-blue-500 w-3 h-3"
+                    />
+                    <div className="flex items-center gap-1.5">
+                      <Hexagon className={`w-3 h-3 ${showEdges ? 'text-blue-400' : 'text-gray-500'}`} />
+                      Show Sharp Edges
+                    </div>
+                  </label>
+                </div>
+
+                {/* Edge Threshold Slider */}
+                {showEdges && (
+                  <div className="ml-5 mb-2">
+                    <div className="flex justify-between text-[10px] mb-1">
+                      <label className="text-gray-400">Angle Threshold</label>
+                      <span>{edgeThreshold}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1" max="90" step="1"
+                      value={edgeThreshold}
+                      onChange={(e) => setEdgeThreshold(parseInt(e.target.value))}
+                      className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -987,64 +1132,109 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* Quality Metrics - Top Right (only show when mesh is completed) */}
-          {isCompleted && qualityMetrics && !showPaintPanel && (
-            <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur rounded p-2.5 z-10 text-[10px] text-gray-300 min-w-[180px]">
-              <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
+          {/* View Options & Quality Metrics - Top Right */}
+          {(!showPaintPanel) && (
+            <div className="absolute top-10 right-3 flex flex-col gap-2 z-10 min-w-[180px]">
 
-              {/* SICN */}
-              <div className="mb-2 pb-2 border-b border-gray-700">
-                <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
-                <div className="grid grid-cols-3 gap-1 text-center">
-                  <div>
-                    <div className="text-[8px] text-gray-500">Min</div>
-                    <div className={(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn) < 0.1 ? 'text-red-400 font-medium' : 'text-green-400 font-medium'}>
-                      {(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn)?.toFixed(3) || 'N/A'}
-                    </div>
+              {/* Main Info Panel */}
+              <div className="bg-gray-900/90 backdrop-blur rounded p-2.5 text-[10px] text-gray-300 shadow-xl border border-gray-700">
+
+                {/* Header / Visualization Toggles */}
+                <div className="mb-2 pb-2 border-b border-gray-700 space-y-2">
+                  <div className="font-medium text-white text-xs flex items-center gap-2">
+                    <span>View Options</span>
                   </div>
-                  <div>
-                    <div className="text-[8px] text-gray-500">Avg</div>
-                    <div className="text-blue-400 font-medium">{(qualityMetrics.sicn_avg ?? qualityMetrics.avg_sicn)?.toFixed(3) || 'N/A'}</div>
-                  </div>
-                  <div>
-                    <div className="text-[8px] text-gray-500">Max</div>
-                    <div className="text-green-400 font-medium">{(qualityMetrics.sicn_max ?? qualityMetrics.max_sicn)?.toFixed(3) || 'N/A'}</div>
-                  </div>
+
+                  <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={showAxes}
+                      onChange={(e) => setShowAxes(e.target.checked)}
+                      className="accent-blue-500 w-3 h-3 cursor-pointer"
+                    />
+                    Show Axes
+                  </label>
+
+                  {/* Only show Histogram toggle if metrics are available (Mesh Completed) */}
+                  {isCompleted && qualityMetrics && (
+                    <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={showHistogram}
+                        onChange={(e) => setShowHistogram(e.target.checked)}
+                        className="accent-blue-500 w-3 h-3 cursor-pointer"
+                      />
+                      Show Quality Histogram
+                    </label>
+                  )}
                 </div>
+
+                {/* Quality Metrics Content (Only when mesh is completed) */}
+                {isCompleted && qualityMetrics ? (
+                  <>
+                    <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
+
+                    {/* SICN */}
+                    <div className="mb-2 pb-2 border-b border-gray-700">
+                      <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
+                      <div className="grid grid-cols-3 gap-1 text-center">
+                        <div>
+                          <div className="text-[8px] text-gray-500">Min</div>
+                          <div className={(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn) < 0.1 ? 'text-red-400 font-medium' : 'text-green-400 font-medium'}>
+                            {(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn)?.toFixed(3) || 'N/A'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] text-gray-500">Avg</div>
+                          <div className="text-blue-400 font-medium">{(qualityMetrics.sicn_avg ?? qualityMetrics.avg_sicn)?.toFixed(3) || 'N/A'}</div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] text-gray-500">Max</div>
+                          <div className="text-green-400 font-medium">{(qualityMetrics.sicn_max ?? qualityMetrics.max_sicn)?.toFixed(3) || 'N/A'}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Gamma */}
+                    {((qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined)) && (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[9px] text-gray-500 uppercase mb-1">Gamma (Radius Ratio)</div>
+                        <div className="grid grid-cols-3 gap-1 text-center">
+                          <div>
+                            <div className="text-[8px] text-gray-500">Min</div>
+                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_min?.toFixed(3) || 'N/A'}</div>
+                          </div>
+                          <div>
+                            <div className="text-[8px] text-gray-500">Avg</div>
+                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_avg?.toFixed(3) || 'N/A'}</div>
+                          </div>
+                          <div>
+                            <div className="text-[8px] text-gray-500">Max</div>
+                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_max?.toFixed(3) || 'N/A'}</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Element Count */}
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Elements:</span>
+                      <span className="font-medium">{(qualityMetrics.total_elements ?? qualityMetrics.element_count)?.toLocaleString() || 'N/A'}</span>
+                    </div>
+                    {qualityMetrics.poor_elements > 0 && (
+                      <div className="flex justify-between text-yellow-400 mt-0.5">
+                        <span>Poor (&lt;0.1):</span>
+                        <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / (qualityMetrics.total_elements ?? qualityMetrics.element_count)) * 100).toFixed(1)}%)</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* Placeholder or info when no metrics available (e.g. CAD preview or processing) */
+                  <div className="text-[9px] text-gray-500 italic text-center py-1">
+                    {status === 'processing' ? 'Generating mesh...' : 'No mesh metrics available'}
+                  </div>
+                )}
               </div>
-
-              {/* Gamma */}
-              {((qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined)) && (
-                <div className="mb-2 pb-2 border-b border-gray-700">
-                  <div className="text-[9px] text-gray-500 uppercase mb-1">Gamma (Radius Ratio)</div>
-                  <div className="grid grid-cols-3 gap-1 text-center">
-                    <div>
-                      <div className="text-[8px] text-gray-500">Min</div>
-                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_min?.toFixed(3) || 'N/A'}</div>
-                    </div>
-                    <div>
-                      <div className="text-[8px] text-gray-500">Avg</div>
-                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_avg?.toFixed(3) || 'N/A'}</div>
-                    </div>
-                    <div>
-                      <div className="text-[8px] text-gray-500">Max</div>
-                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_max?.toFixed(3) || 'N/A'}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Element Count */}
-              <div className="flex justify-between">
-                <span className="text-gray-400">Elements:</span>
-                <span className="font-medium">{(qualityMetrics.total_elements ?? qualityMetrics.element_count)?.toLocaleString() || 'N/A'}</span>
-              </div>
-              {qualityMetrics.poor_elements > 0 && (
-                <div className="flex justify-between text-yellow-400 mt-0.5">
-                  <span>Poor (&lt;0.1):</span>
-                  <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / (qualityMetrics.total_elements ?? qualityMetrics.element_count)) * 100).toFixed(1)}%)</span>
-                </div>
-              )}
             </div>
           )}
 
@@ -1118,32 +1308,56 @@ export default function MeshViewer({
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
                 {Object.entries(boundaryZones).map(([name, indices]) => (
-                  <div key={name} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
+                  <div
+                    key={name}
+                    className="flex items-center justify-between bg-gray-800 rounded px-2 py-1 cursor-pointer hover:bg-gray-700 transition-colors group"
+                    onClick={() => {
+                      // Recall selection
+                      const newSelection = indices.map(idx => ({ faceIndex: idx }))
+                      setSelectedFaces(newSelection)
+                      setPendingFaceName(name)
+                      setShowFacePanel(true)
+                    }}
+                  >
                     <div className="flex flex-col overflow-hidden max-w-[100px]">
                       <span className="text-white truncate" title={name}>{name}</span>
                       <span className="text-[9px] text-gray-500">{indices.length} faces</span>
                     </div>
                     <button
-                      onClick={async () => {
+                      onClick={(e) => {
+                        e.stopPropagation() // Prevent selecting when deleting
+                        if (!window.confirm(`Delete zone "${name}"?`)) return
+
                         const newZones = { ...boundaryZones }
                         delete newZones[name]
                         setBoundaryZones(newZones)
 
-                        try {
-                          const token = localStorage.getItem('token')
-                          await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
-                            method: 'POST',
-                            headers: {
-                              'Content-Type': 'application/json',
-                              'Authorization': `Bearer ${token}`
-                            },
-                            body: JSON.stringify(newZones)
-                          })
-                        } catch (err) {
-                          console.error("Failed to delete zone:", err)
+                        // Also clear from active selection if currently viewing it
+                        if (pendingFaceName === name) {
+                          setPendingFaceName('')
+                          setShowFacePanel(false)
+                          setSelectedFaces([])
                         }
+
+                        // ... fetch call
+                        const deleteZone = async () => {
+                          try {
+                            const token = localStorage.getItem('token')
+                            await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
+                              method: 'POST',
+                              headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${token}`
+                              },
+                              body: JSON.stringify(newZones)
+                            })
+                          } catch (err) {
+                            console.error("Failed to delete zone:", err)
+                          }
+                        }
+                        deleteZone()
                       }}
-                      className="text-gray-500 hover:text-red-400 ml-2 flex-shrink-0"
+                      className="text-gray-500 hover:text-red-400 ml-2 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -1154,12 +1368,7 @@ export default function MeshViewer({
           )}
 
           {/* Selection Mode Indicator */}
-          {selectionMode && (
-            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-full text-xs font-medium flex items-center gap-2 shadow-lg z-10">
-              <MousePointer2 className="w-4 h-4" />
-              Click on mesh to select faces
-            </div>
-          )}
+
 
           <Canvas
             gl={{
@@ -1181,10 +1390,7 @@ export default function MeshViewer({
               makeDefault
             />
 
-            <ambientLight intensity={0.7} />
-            <directionalLight position={[50, 50, 25]} intensity={0.6} />
-            <directionalLight position={[-50, -50, -25]} intensity={0.3} />
-            <hemisphereLight intensity={0.3} />
+            <Lights dynamic={dynamicLighting} />
 
             <MeshObject
               meshData={meshData}
@@ -1204,6 +1410,9 @@ export default function MeshViewer({
               onFaceSelect={handleFaceSelect}
               selectionMode={selectionMode}
               selectedFaces={selectedFaces}
+              boundaryZones={boundaryZones}
+              showEdges={showEdges}
+              edgeThreshold={edgeThreshold}
             />
 
             <gridHelper args={[200, 20, '#aaaaaa', '#dddddd']} />
@@ -1248,7 +1457,7 @@ export default function MeshViewer({
                       <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
                     </div>
                     <input
-                      type="range" min="-50" max="50"
+                      type="range" min="0" max="100"
                       value={clipping[`${axis}Value`]}
                       onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
                       disabled={!clipping[axis]}

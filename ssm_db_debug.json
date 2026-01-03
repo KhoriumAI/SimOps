@@ -1,0 +1,12 @@
+{
+    "InstanceIds": [
+        "i-0bdb1e0eaa658cc7c"
+    ],
+    "DocumentName": "AWS-RunShellScript",
+    "Parameters": {
+        "commands": [
+            "cat /etc/systemd/system/gunicorn.service",
+            "find /home/ec2-user/backend -name mesh_app.db"
+        ]
+    }
+}

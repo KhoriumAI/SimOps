@@ -118,7 +118,7 @@ class ModernMeshGenGUI(QMainWindow):
         self.load_settings()  # Restore previous session settings
 
     def init_ui(self):
-        self.setWindowTitle("Khorium MeshGen - Parallel Edition")
+        self.setWindowTitle("Khorium MeshGen - Automatic Edition")
         self.setGeometry(100, 50, 1600, 850)  # Reduced height to fit more screens
 
         palette = QPalette()
@@ -307,7 +307,7 @@ class ModernMeshGenGUI(QMainWindow):
         from multiprocessing import cpu_count
         cores = cpu_count()
         workers = max(1, cores - 2)
-        system_info = QLabel(f"System: {cores} cores | {workers} parallel workers")
+        system_info = QLabel(f"System: {cores} cores | {workers} workers")
         system_info.setFont(QFont("Arial", 9))
         system_info.setStyleSheet("color: #6c757d; padding: 5px 0;")
         layout.addWidget(system_info)
@@ -480,7 +480,7 @@ class ModernMeshGenGUI(QMainWindow):
         self.mesh_strategy.setToolTip(
             "Tetrahedral (Delaunay): Robust conformal tet mesh (CPU)\n"
             "Tetrahedral (GPU Delaunay): Ultra-fast GPU Fill & Filter pipeline\n"
-            "Exhaustive (Parallel Race): Tries ALL strategies, picks best score\n"
+            "Automatic (Best Quality): Optimizes strategies, picks best score\n"
             "Hex Dominant (Subdivision): 100% hex mesh via CoACD + subdivision\n"
             "Hex Dominant Testing: Visualize CoACD components\n"
             "Polyhedral (Dual): Polyhedral cells from tet dual"
@@ -712,7 +712,7 @@ class ModernMeshGenGUI(QMainWindow):
         worker_sublayout.setSpacing(5)
         
         worker_header = QHBoxLayout()
-        worker_label = QLabel("Parallel Workers:")
+        worker_label = QLabel("Workers:")
         worker_label.setStyleSheet("font-size: 11px; color: #495057; font-weight: bold;")
         worker_header.addWidget(worker_label)
         
@@ -748,7 +748,7 @@ class ModernMeshGenGUI(QMainWindow):
         self.worker_count_slider.valueChanged.connect(self.on_worker_count_changed)
         worker_sublayout.addWidget(self.worker_count_slider)
         
-        worker_info = QLabel(f"1 worker (serial) ← → {min(total_cores, 32)} workers (max parallel)")
+        worker_info = QLabel(f"1 worker (serial) ← → {min(total_cores, 32)} workers (max)")
         worker_info.setStyleSheet("font-size: 9px; color: #6c757d;")
         worker_info.setAlignment(Qt.AlignCenter)
         worker_sublayout.addWidget(worker_info)

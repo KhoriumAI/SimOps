@@ -234,7 +234,7 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                                 mesh_result.strategy = result.get('strategy')
                                 mesh_result.score = result.get('score')
                                 local_output_path = result.get('output_file')
-                                mesh_result.quality_metrics = result.get('quality_metrics') # Fix: use correct key
+                                mesh_result.quality_metrics = result.get('quality_metrics', {})
                                 mesh_result.completed_at = datetime.utcnow()
                                 mesh_result.processing_time = time.time() - start_time
                                 mesh_result.node_count = result.get('total_nodes')
@@ -244,6 +244,21 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                                 if local_output_path and Path(local_output_path).exists():
                                     mesh_result.output_size = Path(local_output_path).stat().st_size
                                     
+                                    # Try to load full results from the _result.json file if available
+                                    # (Contains heavy arrays that are sanitized from the stdout JSON)
+                                    full_result_path = Path(local_output_path).with_name(Path(local_output_path).stem + "_result.json")
+                                    if full_result_path.exists():
+                                        try:
+                                            with open(full_result_path, 'r') as f:
+                                                full_data = json.load(f)
+                                                # Merge quality data back into result for processing
+                                                for key in ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio']:
+                                                    if key in full_data and (not result.get(key)):
+                                                        result[key] = full_data[key]
+                                            print(f"[MESH GEN] Loaded quality data from {full_result_path.name}")
+                                        except Exception as e:
+                                            print(f"[MESH GEN] Warning: Could not load full result JSON: {e}")
+
                                     # Save quality data to a JSON file alongside the mesh
                                     per_element_quality = result.get('per_element_quality', {})
                                     per_element_gamma = result.get('per_element_gamma', {})
@@ -662,13 +677,13 @@ def register_routes(app):
         plane_origin = center.tolist()
         if axis == 'x':
             plane_normal = [1, 0, 0]
-            plane_origin[0] = bbox_min[0] + (offset_percent + 50) / 100.0 * size[0]
+            plane_origin[0] = bbox_max[0] - (offset_percent / 100.0) * size[0]
         elif axis == 'y':
             plane_normal = [0, 1, 0]
-            plane_origin[1] = bbox_min[1] + (offset_percent + 50) / 100.0 * size[1]
+            plane_origin[1] = bbox_max[1] - (offset_percent / 100.0) * size[1]
         else: # z
             plane_normal = [0, 0, 1]
-            plane_origin[2] = bbox_min[2] + (offset_percent + 50) / 100.0 * size[2]
+            plane_origin[2] = bbox_max[2] - (offset_percent / 100.0) * size[2]
             
         # Generate slice
         print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
@@ -1421,12 +1436,12 @@ try:
                 n3 = int(nodes_per_elem[i*nodes_per + 2])
                 n4 = int(nodes_per_elem[i*nodes_per + 3])
                 
-                # Check faces
+                # Check faces - Ensure outward normals: (n1,n2,n3), (n1,n4,n2), (n1,n3,n4), (n2,n4,n3)
                 tet_faces = [
                     ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
-                    ((n1, n2, n4), tuple(sorted([n1, n2, n4]))),
+                    ((n1, n4, n2), tuple(sorted([n1, n2, n4]))),
                     ((n1, n3, n4), tuple(sorted([n1, n3, n4]))),
-                    ((n2, n3, n4), tuple(sorted([n2, n3, n4])))
+                    ((n2, n4, n3), tuple(sorted([n2, n3, n4])))
                 ]
                 for orig_face, face_key in tet_faces:
                     if face_key in face_count:
@@ -1444,9 +1459,9 @@ try:
                 n4 = int(nodes_per_elem[i*nodes_per + 3])
                 tet_faces = [
                     ((n1, n2, n3), tuple(sorted([n1, n2, n3]))),
-                    ((n1, n2, n4), tuple(sorted([n1, n2, n4]))),
+                    ((n1, n4, n2), tuple(sorted([n1, n2, n4]))),
                     ((n1, n3, n4), tuple(sorted([n1, n3, n4]))),
-                    ((n2, n3, n4), tuple(sorted([n2, n3, n4])))
+                    ((n2, n4, n3), tuple(sorted([n2, n3, n4])))
                 ]
                 for orig_face, face_key in tet_faces:
                     if face_key in face_count:
@@ -1536,6 +1551,9 @@ finally:
             elif metric == 'aspect_ratio':
                 # AR 1.0 is best, 5.0+ is poor
                 val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
+            elif metric == 'minAngle':
+                # Normalize q (degrees) so 0 is WORST, 60+ is BEST
+                val = max(0.0, min(1.0, q / 60.0))
             else:
                 val = max(0.0, min(1.0, q))
                 
@@ -1563,6 +1581,7 @@ finally:
         per_element_gamma = {}
         per_element_skewness = {}
         per_element_aspect_ratio = {}
+        per_element_min_angle = {}
         
         try:
             if quality_filepath.exists():
@@ -1571,6 +1590,7 @@ finally:
                     per_element_gamma = {int(k): v for k, v in qdata.get('per_element_gamma', {}).items()}
                     per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
                     per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
+                    per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
         except: pass
 
         # Build colors for all metrics
@@ -1578,6 +1598,7 @@ finally:
         colors_gamma = []
         colors_skewness = []
         colors_aspect_ratio = []
+        colors_min_angle = []
         
         matched_count = 0
         unmatched_count = 0
@@ -1598,6 +1619,7 @@ finally:
             q_gamma = per_element_gamma.get(tag_key)
             q_skew = per_element_skewness.get(tag_key)
             q_ar = per_element_aspect_ratio.get(tag_key)
+            q_angle = per_element_min_angle.get(tag_key)
             
             if q_sicn is not None: matched_count += 1
             else: unmatched_count += 1
@@ -1607,11 +1629,13 @@ finally:
             r_g, g_g, b_g = get_color(q_gamma, 'gamma')
             r_k, g_k, b_k = get_color(q_skew, 'skewness')
             r_a, g_a, b_a = get_color(q_ar, 'aspect_ratio')
+            r_an, g_an, b_an = get_color(q_angle, 'minAngle')
             
             colors_sicn.extend([r_s, g_s, b_s] * 3)
             colors_gamma.extend([r_g, g_g, b_g] * 3)
             colors_skewness.extend([r_k, g_k, b_k] * 3)
             colors_aspect_ratio.extend([r_a, g_a, b_a] * 3)
+            colors_min_angle.extend([r_an, g_an, b_an] * 3)
         
         print(f"[MESH PARSE] Mapped colors for {matched_count} elements ({unmatched_count} missing)")
         
@@ -1688,7 +1712,8 @@ finally:
                 "sicn": colors_sicn,
                 "gamma": colors_gamma,
                 "skewness": colors_skewness,
-                "aspectRatio": colors_aspect_ratio
+                "aspectRatio": colors_aspect_ratio,
+                "minAngle": colors_min_angle
             },
             "entityTags": entity_tags,  # Pass raw array of surface IDs per triangle
             "numVertices": len(vertices) // 3,

@@ -2,15 +2,15 @@
 Parallel Mesh Generation Strategy
 ===================================
 
-Executes multiple meshing strategies in parallel for 3-5x speedup.
+Executes multiple meshing strategies for speedup.
 
-Based on NVIDIA Meshtron's parallel processing approach:
-- Runs multiple strategies concurrently on different CPU cores
+Based on NVIDIA Meshtron's processing approach:
+- Runs strategies concurrently
 - "Racing" approach: first excellent result wins
-- Automatic load balancing across available cores
+- Automatic load balancing
 - Progress tracking for GUI integration
 
-Performance: 3-5x faster than sequential exhaustive strategy
+Performance: 3-5x faster than sequential strategy
 """
 
 import sys
@@ -60,7 +60,7 @@ class ParallelStrategyExecutor:
         Initialize parallel executor
 
         Args:
-            max_workers: Number of parallel workers (default: CPU count - 1)
+            max_workers: Number of workers (default: CPU count - 1)
             progress_callback: Callback function for progress updates
                                Signature: callback(strategy_name, status, message)
         """
@@ -79,7 +79,7 @@ class ParallelStrategyExecutor:
             max_workers_ram = max(1, int(available_ram / MIN_RAM_PER_WORKER))
             
             if self.max_workers > max_workers_ram:
-                print(f"Info    : [!]️  Limiting parallel workers from {self.max_workers} to {max_workers_ram} based on available RAM ({available_ram / (1024**3):.1f} GB)")
+                print(f"Info    : [!]️  Limiting workers from {self.max_workers} to {max_workers_ram} based on available RAM ({available_ram / (1024**3):.1f} GB)")
                 self.max_workers = max_workers_ram
         except Exception as e:
             print(f"Info    : [!] Could not detect RAM: {e}. Using default worker count.")
@@ -101,8 +101,8 @@ class ParallelStrategyExecutor:
         Returns:
             Best StrategyResult found, or None if all failed
         """
-        self._log("Starting parallel strategy execution...")
-        self._log(f"Using {self.max_workers} parallel workers")
+        self._log("Starting automatic optimization...")
+        self._log(f"Using {self.max_workers} workers")
         self._log(f"Testing {len(strategies)} strategies")
 
         # FIX: Shared Geometry / Cache Warmup
@@ -176,7 +176,7 @@ class ParallelStrategyExecutor:
 
         # Summary
         successes = [r for r in all_results if r.success]
-        self._log(f"\nParallel execution complete:")
+        self._log(f"\nExecution complete:")
         self._log(f"  Successful: {len(successes)}/{len(all_results)}")
 
         if best_result:

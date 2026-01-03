@@ -1,0 +1,11 @@
+{
+    "InstanceIds": [
+        "i-0bdb1e0eaa658cc7c"
+    ],
+    "DocumentName": "AWS-RunShellScript",
+    "Parameters": {
+        "commands": [
+            "sudo journalctl -u gunicorn -n 300 --no-pager | grep -E 'Error|Exception' -A 20"
+        ]
+    }
+}

@@ -90,10 +90,17 @@ function App() {
         const response = await fetch(`${API_BASE}/strategies`)
         if (response.ok) {
           const data = await response.json()
-          setMeshStrategies(data.names || [])
+          // Filter out unsupported/experimental strategies
+          const allowedStrategies = (data.names || []).filter(name => {
+            const lower = name.toLowerCase()
+            return !lower.includes('gpu delaunay') && !lower.includes('polyhedral')
+          })
+
+          setMeshStrategies(allowedStrategies)
           // Set default strategy if current selection isn't in the list
-          if (data.default && !data.names.includes(meshStrategy)) {
-            setMeshStrategy(data.default)
+          if (data.default && !allowedStrategies.includes(meshStrategy)) {
+            // If default is filtered out, pick the first allowed one
+            setMeshStrategy(allowedStrategies.includes(data.default) ? data.default : allowedStrategies[0])
           }
         }
       } catch (err) {
@@ -174,8 +181,8 @@ function App() {
     const logsText = logs.join('\n').toLowerCase()
     const progress = { ...meshProgress }
 
-    // Strategy progress (parallel race)
-    if (logsText.includes('exhaustive mesh generation') || logsText.includes('parallel race')) {
+    // Strategy progress (parallel race / automatic optimization)
+    if (logsText.includes('exhaustive mesh generation') || logsText.includes('automatic mesh generation') || logsText.includes('parallel race')) {
       progress.strategy = Math.min(100, progress.strategy + 5)
     }
     if (logsText.includes('winner')) progress.strategy = 100
@@ -813,11 +820,11 @@ function App() {
                     >
                       {meshStrategies.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
-                    {meshStrategy.includes('Hex') && meshStrategy.includes('Pure') && (
+                    {meshStrategy.toLowerCase().includes('hex') && (
                       <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
                         <span className="text-amber-500 text-sm">⚠️</span>
                         <div className="text-[10px] text-amber-800 leading-tight">
-                          <strong>Pure Hex Note:</strong> Currently uses subdivision. Cartesian cut-cell hex coming soon.
+                          <strong>Hex Mesh Note:</strong> Currently uses subdivision. Cartesian cut-cell hex coming soon.
                         </div>
                       </div>
                     )}
@@ -844,24 +851,7 @@ function App() {
                 </div>
                 <div className="p-3 space-y-3">
                   <div className="flex flex-col gap-2">
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={showAxes}
-                        onChange={(e) => setShowAxes(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Show Axes
-                    </label>
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={showHistogram}
-                        onChange={(e) => setShowHistogram(e.target.checked)}
-                        className="accent-blue-500 w-3.5 h-3.5"
-                      />
-                      Quality Histogram
-                    </label>
+                    {/* Controls moved to Viewer Overlay */}
                   </div>
 
                   <div className="pt-2 border-t border-gray-100">
@@ -875,6 +865,7 @@ function App() {
                       <option value="gamma">Gamma (Ideal=1)</option>
                       <option value="skewness">Skewness</option>
                       <option value="aspectRatio">Aspect Ratio</option>
+                      <option value="minAngle">Minimum Angle</option>
                     </select>
                   </div>
                 </div>
@@ -991,13 +982,14 @@ function App() {
                 </button>
               </div>
 
-              {/* Console Content - Only when open */}
-              {consoleOpen && (
-                <div className="flex-1 overflow-hidden">
-                  <Terminal logs={logs} noHeader={true} />
-                </div>
-              )}
             </div>
+
+            {/* Console Content - Only when open */}
+            {consoleOpen && (
+              <div className="flex-1 overflow-hidden">
+                <Terminal logs={logs} noHeader={true} />
+              </div>
+            )}
           </div>
         </div>
 

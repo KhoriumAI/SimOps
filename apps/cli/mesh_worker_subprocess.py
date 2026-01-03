@@ -806,25 +806,28 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         total_3d = num_hexes + num_tets
         
         # Extract per-element quality for visualization
+        per_element_quality = []
+        per_element_gamma = []
+        per_element_skewness = []
+        per_element_aspect_ratio = []
+        
         try:
-            from core.quality import compute_element_quality_gmsh
-            
             # Get hex elements (type 5 = 8-node hex)
             hex_tags, hex_nodes = gmsh.model.mesh.getElementsByType(5)
             
             if len(hex_tags) > 0:
                 # Compute quality for each hex
-                per_element_quality = []
-                for tag in hex_tags:
-                    quality = gmsh.model.mesh.getElementQualities([tag], "minSICN")
-                    per_element_quality.append(quality[0] if quality else 0.5)
+                sicn_values = gmsh.model.mesh.getElementQualities(hex_tags, "minSICN")
+                for q in sicn_values:
+                    quality = float(q)
+                    per_element_quality.append(quality)
+                    per_element_gamma.append(quality) # Fallback for hex
+                    per_element_skewness.append(1.0 - quality)
+                    per_element_aspect_ratio.append(1.0 / max(quality, 0.01))
                 
                 print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
-            else:
-                per_element_quality = []
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
-            per_element_quality = []
         
         gmsh.finalize()
         
@@ -837,7 +840,10 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'message': f'Hex-dominant mesh: {num_hexes} hexes, {num_tets} tets',
             'total_elements': total_3d,
             'total_nodes': 0,  # TODO: count nodes
-            'per_element_quality': per_element_quality,  # For VTK visualization
+            'per_element_quality': per_element_quality,
+            'per_element_gamma': per_element_gamma,
+            'per_element_skewness': per_element_skewness,
+            'per_element_aspect_ratio': per_element_aspect_ratio,
             'metrics': {
                 'num_hexes': num_hexes,
                 'num_tets': num_tets,
@@ -1092,8 +1098,23 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                     quality_metrics['aspect_ratio_max'] = 5.0
                 
                 # Store per-element quality for visualization
+                per_element_gamma = {}
+                per_element_skewness = {}
+                per_element_aspect_ratio = {}
+                per_element_min_angle = {}
+                
+                try:
+                    angle_vals = gmsh.model.mesh.getElementQualities(tet_tags, "angleShape")
+                except:
+                    angle_vals = [0.0] * len(tet_tags)
+
                 for i, tag in enumerate(tet_tags):
-                    per_element_quality[str(tag)] = float(sicn_values[i])
+                    tag_str = str(tag)
+                    per_element_quality[tag_str] = float(sicn_values[i])
+                    per_element_gamma[tag_str] = float(gamma_values[i])
+                    per_element_skewness[tag_str] = float(skewness_values[i])
+                    per_element_aspect_ratio[tag_str] = float(ar_values[i])
+                    per_element_min_angle[tag_str] = float(angle_vals[i])
                 
                 # Also compute surface quality (Triangles) for visualization
                 # This ensures the "Quality" view in frontend (which renders surface) has data
@@ -1105,8 +1126,29 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                 if tri_tags:
                     try:
                         tri_sicn = gmsh.model.mesh.getElementQualities(tri_tags, "minSICN")
+                        tri_gamma = gmsh.model.mesh.getElementQualities(tri_tags, "gamma")
+                        # SJ for triangles
+                        try:
+                            tri_sj = gmsh.model.mesh.getElementQualities(tri_tags, "minSJ")
+                            tri_skew = [max(0, 1 - abs(v)) for v in tri_sj]
+                        except:
+                            tri_skew = [max(0, 1 - v) for v in tri_sicn]
+                            
+                        # Eta for triangles (AR)
+                        try:
+                            tri_eta = gmsh.model.mesh.getElementQualities(tri_tags, "eta")
+                            tri_ar = [1.0 / max(v, 0.01) for v in tri_eta]
+                        except:
+                            tri_ar = [1.0 / max(v, 0.01) for v in tri_sicn]
+
                         for i, tag in enumerate(tri_tags):
-                            per_element_quality[str(tag)] = float(tri_sicn[i])
+                            tag_str = str(tag)
+                            per_element_quality[tag_str] = float(tri_sicn[i])
+                            per_element_gamma[tag_str] = float(tri_gamma[i])
+                            per_element_skewness[tag_str] = float(tri_skew[i])
+                            per_element_aspect_ratio[tag_str] = float(tri_ar[i])
+                            per_element_min_angle[tag_str] = 60.0 # Default for triangles
+                            
                         print(f"[HXT] Included quality for {len(tri_tags)} surface elements")
                     except Exception as e:
                         print(f"[HXT] Warning: Could not compute surface quality: {e}")
@@ -1132,6 +1174,10 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
             'total_elements': num_elements,
             'total_nodes': num_nodes,
             'per_element_quality': per_element_quality,
+            'per_element_gamma': per_element_gamma,
+            'per_element_skewness': per_element_skewness,
+            'per_element_aspect_ratio': per_element_aspect_ratio,
+            'per_element_min_angle': per_element_min_angle,
             'metrics': {
                 'total_elements': num_elements,
                 'total_nodes': num_nodes,
@@ -1471,15 +1517,22 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 vol_gammas = {}
                 vol_skews = {}
                 vol_ars = {}
+                vol_angles = {}
                 for etype, etags, enodes in zip(vol_types, vol_tags, vol_nodes):
                     if etype in [4, 11, 5, 12]:
                         try:
                             sicn_vals = gmsh_reload.model.mesh.getElementQualities(etags.tolist(), "minSICN")
                             gamma_vals = gmsh_reload.model.mesh.getElementQualities(etags.tolist(), "gamma")
+                            try:
+                                angle_vals = gmsh_reload.model.mesh.getElementQualities(etags.tolist(), "angleShape")
+                            except:
+                                angle_vals = [0.0] * len(etags)
+                                
                             for i, tag in enumerate(etags):
                                 tag_int = int(tag)
                                 sicn = float(sicn_vals[i])
                                 gamma = float(gamma_vals[i])
+                                angle = float(angle_vals[i])
                                 skew = 1.0 - sicn
                                 ar = 1.0 / sicn if sicn > 0 else 100.0
                                 
@@ -1487,12 +1540,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                                 vol_gammas[tag_int] = gamma
                                 vol_skews[tag_int] = skew
                                 vol_ars[tag_int] = ar
+                                vol_angles[tag_int] = angle
                                 
                                 # Global map for return
                                 per_element_quality[tag_int] = sicn
                                 per_element_gamma[tag_int] = gamma
                                 per_element_skewness[tag_int] = skew
                                 per_element_aspect_ratio[tag_int] = ar
+                                per_element_min_angle[tag_int] = angle
                         except: pass
 
                 # Now map to 2D surface elements (triangles/quads)
@@ -1520,14 +1575,6 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                             for vol_tag in candidates:
                                 # We'd need the volume nodes to be 100% sure, but this is a heuristic:
                                 # if all triangle corners are in the tet corners, they are definitely adjacent.
-                                # To be faster, we skip getting tet nodes again and rely on the fact that
-                                # a triangle sharing its first node with a tet is highly likely to be adjacent
-                                # if we check other corners too.
-                                
-                                # A better/faster way: since we already have node_to_vol, 
-                                # the intersection of sets of volume tags for all corner nodes results in exactly the adjacent volume.
-                                pass # Logic moved below to be more robust
-                            
                             # ROBUST INTERSECTION:
                             adj_vols = None
                             for nid in element_corners:
@@ -1545,21 +1592,29 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                                     worst_gamma = min(worst_gamma, vol_gammas.get(v_tag, 1.0))
                                     worst_skew = max(worst_skew, vol_skews.get(v_tag, 0.0))
                                     worst_ar = max(worst_ar, vol_ars.get(v_tag, 1.0))
+                                    worst_angle = min(worst_angle, vol_angles.get(v_tag, 60.0))
                             
                             if found_adj:
                                 per_element_quality[tag_int] = worst_sicn
                                 per_element_gamma[tag_int] = worst_gamma
                                 per_element_skewness[tag_int] = worst_skew
                                 per_element_aspect_ratio[tag_int] = worst_ar
+                                per_element_min_angle[tag_int] = worst_angle
                             else:
                                 # Fallback to intrinsic 2D quality if no adjacent volume found
                                 try:
                                     sicn = float(gmsh_reload.model.mesh.getElementQualities([tag_int], "minSICN")[0])
                                     gamma = float(gmsh_reload.model.mesh.getElementQualities([tag_int], "gamma")[0])
+                                    try:
+                                        angle = float(gmsh_reload.model.mesh.getElementQualities([tag_int], "angleShape")[0])
+                                    except:
+                                        angle = 60.0
+                                        
                                     per_element_quality[tag_int] = sicn
                                     per_element_gamma[tag_int] = gamma
                                     per_element_skewness[tag_int] = 1.0 - sicn
                                     per_element_aspect_ratio[tag_int] = 1.0 / sicn if sicn > 0 else 100.0
+                                    per_element_min_angle[tag_int] = angle
                                 except: pass
 
                 # Calculate statistics (for all 3D tets)
@@ -1617,6 +1672,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 'per_element_gamma': per_element_gamma,
                 'per_element_skewness': per_element_skewness,
                 'per_element_aspect_ratio': per_element_aspect_ratio,
+                'per_element_min_angle': per_element_min_angle,
                 'strategy': best_attempt.get('strategy', 'unknown'),
                 'score': best_attempt.get('score', 0),
                 'message': result.message,
@@ -1691,7 +1747,7 @@ if __name__ == "__main__":
     sanitized_result = copy.deepcopy(result)
     
     # Remove heavy per-element arrays from stdout output
-    keys_to_remove = ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio']
+    keys_to_remove = ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio', 'per_element_min_angle']
     for key in keys_to_remove:
         if key in sanitized_result:
             del sanitized_result[key]

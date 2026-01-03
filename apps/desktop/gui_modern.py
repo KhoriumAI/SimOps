@@ -77,7 +77,7 @@ class MeshWorker:
             if not worker_script.exists():
                 worker_script = Path(__file__).parent.parent / "cli" / "mesh_worker.py"
             self.signals.log.emit("Starting mesh generation process...")
-            self.signals.progress.emit(20, "Trying exhaustive strategies...")
+            self.signals.progress.emit(20, "Optimizing mesh strategies...")
 
             self.process = subprocess.Popen(
                 [sys.executable, str(worker_script), cad_file],
