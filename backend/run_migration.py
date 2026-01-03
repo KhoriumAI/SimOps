@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 
 def migrate():
-    db_path = Path('backend/instance/mesh_app.db')
+    base_dir = Path(__file__).parent
+    db_path = base_dir / 'instance' / 'mesh_app.db'
     if not db_path.exists():
         print(f"Database not found at {db_path}")
         return
