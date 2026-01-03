@@ -1764,10 +1764,23 @@ def parse_msh_file(msh_filepath: str):
         indexed_nodes = [None] * len(nodes)
         for nid, idx in node_id_to_index.items():
             indexed_nodes[idx] = nodes[nid]
+        
+        # DEBUG: Sample element tags to compare with quality data
+        sample_face_tags = [d['element_tag'] for d in list(face_map.values())[:10]]
+        sample_quality_keys = list(per_element_quality.keys())[:10] if per_element_quality else []
+        print(f"[MESH PARSE DEBUG] Sample face element_tags: {sample_face_tags}")
+        print(f"[MESH PARSE DEBUG] Sample quality dict keys: {sample_quality_keys}")
+        print(f"[MESH PARSE DEBUG] Total faces in face_map: {len(face_map)}")
+        print(f"[MESH PARSE DEBUG] Quality dict has {len(per_element_quality)} entries")
+        
+        boundary_face_count = 0
+        faces_with_quality = 0
+        faces_without_quality = 0
             
         # Extract boundary faces (count == 1)
         for key, data in face_map.items():
             if data['count'] == 1:
+                boundary_face_count += 1
                 # This is a boundary face
                 face_nodes = data['nodes']
                 el_tag = data['element_tag']
@@ -1782,6 +1795,10 @@ def parse_msh_file(msh_filepath: str):
                 
                 # Colors
                 q_sicn = get_q_value(el_tag, per_element_quality)
+                if q_sicn is not None:
+                    faces_with_quality += 1
+                else:
+                    faces_without_quality += 1
                 colors_sicn.extend(get_color(q_sicn, 'sicn') * 3)
                 
                 q_gamma = get_q_value(el_tag, per_element_gamma)
@@ -1796,6 +1813,9 @@ def parse_msh_file(msh_filepath: str):
                 q_ang = get_q_value(el_tag, per_element_min_angle)
                 colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
 
+        print(f"[MESH PARSE DEBUG] Boundary faces extracted: {boundary_face_count}")
+        print(f"[MESH PARSE DEBUG] Faces WITH quality data: {faces_with_quality}")
+        print(f"[MESH PARSE DEBUG] Faces WITHOUT quality data: {faces_without_quality}")
         print(f"[MESH PARSE] Generated {len(vertices)//3} vertices")
         
         # Calculate quality summary and histogram from per_element_quality
