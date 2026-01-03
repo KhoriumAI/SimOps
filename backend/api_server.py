@@ -885,11 +885,16 @@ def register_routes(app):
                 # The quality file is uploaded alongside the mesh with the same base name
                 quality_s3_path = output_path.replace('.msh', '.quality.json')
                 local_quality_path = local_temp.name.replace('.msh', '.quality.json')
+                print(f"[MESH DATA] Mesh S3 path: {output_path}")
+                print(f"[MESH DATA] Quality S3 path: {quality_s3_path}")
+                print(f"[MESH DATA] Temp mesh path: {local_temp.name}")
+                print(f"[MESH DATA] Temp quality path: {local_quality_path}")
                 try:
                     storage.download_to_local(quality_s3_path, local_quality_path)
                     print(f"[MESH DATA] Downloaded quality file: {local_quality_path}")
                 except Exception as q_err:
                     print(f"[MESH DATA] Quality file not found on S3: {q_err}")
+
                 
                 mesh_data = parse_msh_file(local_temp.name)
                 
