@@ -75,6 +75,20 @@ jobs:
             fi
             pip install -r "$REQS" 2>&1 || { echo "[ERROR] pip install failed"; exit 1; }
             
+            echo "[DEPLOY] Creating .env file from secrets..."
+            cd backend
+            cat > .env << 'EOF'
+            FLASK_ENV=production
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            SECRET_KEY=${{ secrets.SECRET_KEY }}
+            JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+            USE_S3=true
+            S3_BUCKET_NAME=muaz-webdev-assets
+            AWS_REGION=us-west-1
+            CORS_ORIGINS=https://app.khorium.ai,http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com
+            EOF
+            cd ..
+            
             echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
             sudo fuser -k 5000/tcp 2>/dev/null || true
