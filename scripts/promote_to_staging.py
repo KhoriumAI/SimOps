@@ -247,43 +247,32 @@ def phase_2_asset_sync(s3):
     
     return True
 
-def phase_3_cutover(r53):
-    log_section("Phase 3: Traffic Cutover")
+def phase_3_cutover_manual(targets):
+    log_section("Phase 3: MANUAL Cutover (GoDaddy/Registrar)")
     
-    # 1. Verification of Staging Health (Pre-cutover)
-    # In a perfect world, we'd use requests.get() here on the Staging ALB
-    # But for this script, we'll verify via AWS API that ALB is active
+    print("\n" + "="*60)
+    Colors.print("🛑 STOP! DNS UPDATE REQUIRED 🛑", Colors.FAIL, bold=True)
+    print("="*60)
+    print("\nAutomated Route53 cutover is DISABLED.")
+    print(f"You must now log in to your DNS Provider (e.g., GoDaddy) and update the records manually.\n")
     
+    print(f"👉 To switch {DOMAIN_NAME} to STAGING, update your CNAME/A Record to point to:")
+    Colors.print(f"   {targets['ALB']}", Colors.BLUE, bold=True)
+    print("   (Or your Staging CloudFront Domain if configured)\n")
+
     if ARGS.dry_run:
-        print(f"[DRY RUN] Would update Route53 A-record {DOMAIN_NAME} to {STAGING_ALB_DNS}")
+        print("[DRY RUN] Would pause here for user confirmation of DNS update.")
         return
 
-    Colors.print("⚠️  FINAL WARNING: You are about to shift LIVE TRAFFIC to Staging.", Colors.WARNING)
-    if not confirm(f"Point {DOMAIN_NAME} to Staging ALB?", "critical"):
+    Colors.print("⚠️  ACTION REQUIRED: Perform the smoke tests on 'staging.khorium.ai' NOW.", Colors.WARNING)
+    print("Once tests pass, update your main DNS record.")
+    
+    if not confirm(f"Have you updated the DNS for {DOMAIN_NAME} in GoDaddy and verified it?", "critical"):
+        Colors.print("❌ Promotion aborted. Old traffic path remains active (unless you changed DNS independently).", Colors.FAIL)
         return
 
-    change_batch = {
-        'Changes': [{
-            'Action': 'UPSERT',
-            'ResourceRecordSet': {
-                'Name': DOMAIN_NAME,
-                'Type': 'A',
-                'AliasTarget': {
-                    'HostedZoneId': STAGING_ALB_ZONE_ID,
-                    'DNSName': STAGING_ALB_DNS,
-                    'EvaluateTargetHealth': True
-                }
-            }
-        }]
-    }
-
-    try:
-        resp = r53.change_resource_record_sets(HostedZoneId=HOSTED_ZONE_ID, ChangeBatch=change_batch)
-        logger.info(f"Cutover initiated. Change ID: {resp['ChangeInfo']['Id']}")
-        Colors.print("✓ Cutover signal sent. Propagation ~60s.", Colors.GREEN)
-    except Exception as e:
-        logger.error(f"Route53 Update Failed: {e}")
-        Colors.print("❌ DNS Update Failed. Old traffic path remains active.", Colors.FAIL)
+    Colors.print("✓ Manual Cutover confirmed by user.", Colors.GREEN)
+    logger.info("User confirmed manual DNS cutover.")
 
 def main():
     Colors.print(f"🚀 Promotion Wizard v2.0 | Log: {LOG_FILENAME}", Colors.BLUE)
@@ -295,12 +284,17 @@ def main():
     session = boto3.Session(region_name=AWS_REGION)
     rds = session.client('rds')
     s3 = session.client('s3')
-    r53 = session.client('route53')
+    # r53 = session.client('route53') # Not used in Manual Mode
 
     # Execute
     if phase_1_database_promotion(rds):
         if phase_2_asset_sync(s3):
-            phase_3_cutover(r53)
+            # Pass ALIAS targets to cutover phase so it can print them
+            targets = {
+                "ALB": STAGING_ALB_DNS,
+                "CloudFront": "You must check your CloudFront Console for the 'Staging' Distribution Domain Name."
+            }
+            phase_3_cutover_manual(targets)
         else:
             logger.warning("Skipping cutover due to S3 sync failure.")
     else:
