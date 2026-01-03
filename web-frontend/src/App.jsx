@@ -65,6 +65,10 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
+  // Fast Mode - experimental optimized preview (uses SSH compute, skips retries)
+  // TODO: Remove this after testing
+  const [fastMode, setFastMode] = useState(true)  // Default ON for testing
+
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
   const [minSizeStr, setMinSizeStr] = useState('2.0')
@@ -282,9 +286,14 @@ function App() {
     }
   }
 
-  const fetchCadPreview = async (projectId, filename) => {
+  const fetchCadPreview = async (projectId, filename, useFastMode = false) => {
     try {
-      const response = await authFetch(`${API_BASE}/projects/${projectId}/preview`)
+      // Pass fast_mode as query parameter
+      const url = useFastMode
+        ? `${API_BASE}/projects/${projectId}/preview?fast_mode=true`
+        : `${API_BASE}/projects/${projectId}/preview`
+
+      const response = await authFetch(url)
       if (response.ok) {
         const data = await response.json()
 
@@ -315,7 +324,7 @@ function App() {
 
           setLogs(prev => [
             ...prev,
-            `[INFO] Loaded CAD: ${filename}`,
+            `[INFO] Loaded CAD: ${filename}${useFastMode ? ' ⚡ Fast Mode' : ''}`,
             ``,
             `📐 CAD Geometry Info:`,
             `   • Volumes: ${geo.volumes}`,
@@ -404,7 +413,7 @@ function App() {
       setIsPolling(false)
 
       // Fetch CAD preview to show geometry before meshing
-      await fetchCadPreview(data.project_id, file.name)
+      await fetchCadPreview(data.project_id, file.name, fastMode)
       setIsUploading(false)
       setUploadProgress(0)
     } catch (error) {
@@ -838,6 +847,21 @@ function App() {
                       disabled={isGenerating}
                     />
                     Curvature-Adaptive
+                  </label>
+
+                  {/* Fast Mode Toggle - Experimental */}
+                  <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs mt-1" title="Uses SSH compute with optimized settings. Faster but experimental.">
+                    <input
+                      type="checkbox"
+                      checked={fastMode}
+                      onChange={(e) => setFastMode(e.target.checked)}
+                      className="accent-green-500"
+                      disabled={isGenerating}
+                    />
+                    <span className="flex items-center gap-1">
+                      ⚡ Fast Mode
+                      <span className="text-[9px] text-green-600 bg-green-100 px-1 py-0.5 rounded">BETA</span>
+                    </span>
                   </label>
                 </div>
               </div>

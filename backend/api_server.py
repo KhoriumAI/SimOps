@@ -1066,6 +1066,7 @@ def register_routes(app):
     def get_cad_preview(project_id: str):
         """Get triangulated preview of CAD file before meshing"""
         import tempfile
+        import time
         current_user_id = int(get_jwt_identity())
         project = Project.query.get(project_id)
         
@@ -1078,9 +1079,65 @@ def register_routes(app):
         if not project.filepath:
             return jsonify({"error": "CAD file not found"}), 404
         
+        # Check for fast_mode query parameter
+        fast_mode = request.args.get('fast_mode', 'false').lower() == 'true'
+        
         try:
             storage = get_storage()
             use_s3 = app.config.get('USE_S3', False)
+            
+            # ================================================================
+            # FAST MODE: Use optimized compute backend (SSH tunnel preferred)
+            # ================================================================
+            if fast_mode:
+                from compute_backend import get_preferred_backend, SSHTunnelBackend
+                
+                start_time = time.time()
+                print(f"[PREVIEW] ⚡ Fast Mode enabled for project {project_id}")
+                
+                # Get the CAD file path (download from S3 if needed)
+                filepath = project.filepath
+                local_path = None
+                
+                if use_s3 and filepath.startswith('s3://'):
+                    file_ext = Path(project.filename).suffix
+                    local_temp = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+                    local_path = local_temp.name
+                    storage.download_to_local(filepath, local_path)
+                    filepath = local_path
+                elif not Path(filepath).exists():
+                    return jsonify({"error": "CAD file not found"}), 404
+                
+                try:
+                    # Prefer SSH tunnel, fallback to local GMSH
+                    backend = get_preferred_backend(strategy='auto')
+                    print(f"[PREVIEW] ⚡ Using backend: {backend.name}")
+                    
+                    result = backend.generate_preview(filepath, timeout=120)
+                    elapsed = time.time() - start_time
+                    
+                    if "error" in result:
+                        print(f"[PREVIEW] ⚡ Backend error: {result['error']}")
+                        # Fallback to standard method on error
+                        result = parse_step_file_for_preview(filepath)
+                    else:
+                        print(f"[PREVIEW] ⚡ Fast preview complete in {elapsed:.2f}s")
+                        # Add colors for frontend compatibility
+                        vertices = result.get("vertices", [])
+                        result["colors"] = [0.3, 0.6, 0.9] * (len(vertices) // 3)
+                        result["_fast_mode"] = True
+                        result["_backend"] = backend.name
+                        result["_elapsed"] = elapsed
+                    
+                    return jsonify(result)
+                finally:
+                    # Cleanup temp file
+                    if local_path:
+                        Path(local_path).unlink(missing_ok=True)
+            
+            # ================================================================
+            # STANDARD MODE: Original behavior with caching
+            # ================================================================
             
             # 1. Check if we already have a cached preview
             if project.preview_path:
@@ -1910,7 +1967,7 @@ def parse_msh_file(msh_filepath: str):
                 line_parts = elements_section[curr_line].split()
                 curr_line += 1
                 if not line_parts: continue
-                entity_tag_block = int(line_parts[1])
+                entity_tag_block = int(line_parts[0])
                 el_type = int(line_parts[2])
                 num_els = int(line_parts[3])
                 for i in range(num_els):

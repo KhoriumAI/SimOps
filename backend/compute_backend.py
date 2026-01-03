@@ -168,7 +168,12 @@ class LocalGMSHBackend(ComputeBackend):
             
             for etype, enodes in zip(elem_types, node_tags_list):
                 if etype == 2:  # 3-node triangle
-                    enodes_list = enodes.astype(int).tolist()
+                    # Handle both numpy arrays and lists
+                    try:
+                        enodes_list = enodes.astype(int).tolist()
+                    except AttributeError:
+                        enodes_list = [int(n) for n in enodes]
+                    
                     for i in range(0, len(enodes_list), 3):
                         n1, n2, n3 = enodes_list[i], enodes_list[i+1], enodes_list[i+2]
                         if n1 in nodes and n2 in nodes and n3 in nodes:

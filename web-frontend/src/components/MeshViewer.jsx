@@ -1259,7 +1259,7 @@ export default function MeshViewer({
           )}
 
           {/* View Options & Quality Metrics - Top Right */}
-          {(!showPaintPanel) && (
+          {(!showPaintPanel && !showControls) && (
             <div className="absolute top-10 right-3 flex flex-col gap-2 z-10 min-w-[180px]">
 
               {/* Main Info Panel */}

@@ -170,7 +170,23 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
                 face_map[key] = {"nodes": face, "neighbors": [], "tag": elements[i][1]}
             face_map[key]["neighbors"].append(i)
             
-    # 3. Identify boundary faces of the KEPT volume
+    # 3. Identify Interface Elements (Kept elements touching Discarded elements)
+    interface_element_indices = set()
+    
+    for key, data in face_map.items():
+        neighbors = data["neighbors"]
+        kept_neighbors = [n for n in neighbors if is_kept[n]]
+        discarded_neighbors = [n for n in neighbors if not is_kept[n]]
+        
+        # If a face is shared by Kept and Discarded, the Kept neighbor is an Interface Element
+        if len(kept_neighbors) >= 1 and len(discarded_neighbors) >= 1:
+            for k in kept_neighbors:
+                interface_element_indices.add(k)
+                
+    # 4. Generate Output Mesh
+    # - For Interface Elements: Output ALL faces (Thick/Volumetric look)
+    # - For Deep Kept Elements: Output Only Boundary faces (Shell look)
+    
     output_vertices = []
     output_colors = []
     output_indices = []
@@ -188,27 +204,42 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
             return [1.0 - t, 1.0, 0.0]
 
     vertex_count = 0
-    for key, data in face_map.items():
-        neighbors = data["neighbors"]
-        
-        # For crinkle cut: show faces that are NEWLY exposed by the cut
-        # This means faces where one neighbor is kept and the other is discarded
-        # (i.e., internal faces that became exposed at the cut plane)
-        kept_neighbors = [n_idx for n_idx in neighbors if is_kept[n_idx]]
-        discarded_neighbors = [n_idx for n_idx in neighbors if not is_kept[n_idx]]
-        
-        # Only include faces that are at the CUT boundary (one kept, one discarded)
-        # This excludes original external faces (which have only 1 neighbor total)
-        if len(kept_neighbors) == 1 and len(discarded_neighbors) >= 1:
-            quality = quality_map.get(str(data["tag"]), quality_map.get(int(data["tag"]), 1.0))
-            color = get_color(quality)
+    
+    # Iterate ALL elements to generate geometry
+    for i, faces in enumerate(element_faces_list):
+        if not is_kept[i]:
+            continue
             
-            for mapped_idx in data["nodes"]:
-                output_vertices.extend(node_coords_list[mapped_idx])
-                output_colors.extend(color)
+        el_tag = elements[i][1]
+        quality = quality_map.get(str(el_tag), quality_map.get(int(el_tag), 1.0))
+        color = get_color(quality)
+        
+        is_interface = (i in interface_element_indices)
+        
+        for face in faces:
+            # Decide whether to show this face
+            show_face = False
             
-            output_indices.extend([vertex_count, vertex_count + 1, vertex_count + 2])
-            vertex_count += 3
+            if is_interface:
+                # Interface elements show ALL faces (volumetric plug)
+                show_face = True
+            else:
+                # Deep elements show only Boundary faces
+                key = tuple(sorted(list(face)))
+                neighbor_indices = face_map[key]["neighbors"]
+                # Count kept neighbors for this face
+                k_neighbors = sum(1 for n in neighbor_indices if is_kept[n])
+                if k_neighbors == 1:
+                    show_face = True
+            
+            if show_face:
+                # Add face vertices
+                for mapped_idx in face:
+                    output_vertices.extend(node_coords_list[mapped_idx])
+                    output_colors.extend(color)
+                
+                output_indices.extend([vertex_count, vertex_count + 1, vertex_count + 2])
+                vertex_count += 3
             
     return {
         "vertices": output_vertices,
