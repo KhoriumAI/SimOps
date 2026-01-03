@@ -880,9 +880,22 @@ def register_routes(app):
             if use_s3 and output_path.startswith('s3://'):
                 local_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.msh')
                 storage.download_to_local(output_path, local_temp.name)
+                
+                # CRITICAL: Also download the quality JSON so parse_msh_file can find it
+                # The quality file is uploaded alongside the mesh with the same base name
+                quality_s3_path = output_path.replace('.msh', '.quality.json')
+                local_quality_path = local_temp.name.replace('.msh', '.quality.json')
+                try:
+                    storage.download_to_local(quality_s3_path, local_quality_path)
+                    print(f"[MESH DATA] Downloaded quality file: {local_quality_path}")
+                except Exception as q_err:
+                    print(f"[MESH DATA] Quality file not found on S3: {q_err}")
+                
                 mesh_data = parse_msh_file(local_temp.name)
-                # Clean up temp file
+                
+                # Clean up temp files
                 Path(local_temp.name).unlink(missing_ok=True)
+                Path(local_quality_path).unlink(missing_ok=True)
             else:
                 mesh_data = parse_msh_file(output_path)
             
