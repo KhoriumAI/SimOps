@@ -113,6 +113,21 @@ class Config:
     S3_UPLOADS_FOLDER = 'uploads'
     S3_MESH_FOLDER = 'mesh'
     
+    # Compute Backend Configuration
+    # Options: 'auto', 'local', 'ssh_tunnel', 'remote_http'
+    # - 'auto': Try SSH tunnel first, fallback to local GMSH
+    # - 'local': Use local GMSH only (fastest if running on powerful machine)
+    # - 'ssh_tunnel': Forward to remote workstation via SSH tunnel
+    # - 'remote_http': Use custom HTTP endpoint (for Modal.com, etc.)
+    COMPUTE_BACKEND = os.environ.get('COMPUTE_BACKEND', 'auto')
+    
+    # SSH tunnel port for remote compute (default: 8080)
+    # Establish tunnel with: ssh -L 8080:localhost:8080 user@remote-host
+    SSH_TUNNEL_PORT = int(os.environ.get('SSH_TUNNEL_PORT', '8080'))
+    
+    # Custom remote compute URL (used when COMPUTE_BACKEND='remote_http')
+    REMOTE_COMPUTE_URL = os.environ.get('REMOTE_COMPUTE_URL', 'http://localhost:8080')
+    
     # CORS - Add your domain
     CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(',')
 
