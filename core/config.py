@@ -40,6 +40,7 @@ class MeshParameters:
     # Sizing control
     max_size_mm: Optional[float] = None
     min_size_mm: Optional[float] = None
+    curvature_adaptive: bool = False
 
 
 @dataclass
@@ -148,6 +149,7 @@ class Config:
         self.mesh_params.element_order = int(
             os.getenv('MESH_ELEMENT_ORDER', self.mesh_params.element_order)
         )
+        self.mesh_params.curvature_adaptive = os.getenv('MESH_CURVATURE_ADAPTIVE', 'false').lower() == 'true'
 
         # AI configuration
         self.ai_config.enabled = os.getenv('AI_ENABLED', 'true').lower() == 'true'

@@ -1331,6 +1331,11 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 config.mesh_params.min_size_mm = float(quality_params['min_size_mm'])
                 print(f"[DEBUG] Set min_size_mm to: {quality_params['min_size_mm']}")
             
+            # Update curvature adaptive flag
+            if 'curvature_adaptive' in quality_params:
+                config.mesh_params.curvature_adaptive = bool(quality_params['curvature_adaptive'])
+                print(f"[DEBUG] Set curvature_adaptive to: {config.mesh_params.curvature_adaptive}")
+            
             # Update ansys_mode for CFD/FEA export
             if 'ansys_mode' in quality_params:
                 config.mesh_params.ansys_mode = quality_params['ansys_mode']

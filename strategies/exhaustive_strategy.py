@@ -755,6 +755,14 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
 
+        # Apply curvature adaptation if enabled
+        if getattr(self.config.mesh_params, 'curvature_adaptive', False):
+            self.log_message("[INFO] Curvature adaptive meshing ENABLED")
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)  # Use curvature radius to size elements
+            gmsh.option.setNumber("Mesh.MinimumCircleNodes", 20)    # Increase resolution on curves (default 12)
+        else:
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)  # Disabled
+
         # Standard optimization only (Disable Netgen)
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.OptimizeNetgen", 0) # Disable slow Netgen
@@ -772,6 +780,12 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
+
+        if getattr(self.config.mesh_params, 'curvature_adaptive', False):
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
+            gmsh.option.setNumber("Mesh.MinimumCircleNodes", 20)
+        else:
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
 
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.Smoothing", 15)
@@ -793,6 +807,12 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
         # Apply paintbrush refinement if available
         self._apply_painted_refinement()
+
+        if getattr(self.config.mesh_params, 'curvature_adaptive', False):
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
+            gmsh.option.setNumber("Mesh.MinimumCircleNodes", 20)
+        else:
+            gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
 
         gmsh.option.setNumber("Mesh.Optimize", 1)
         gmsh.option.setNumber("Mesh.OptimizeNetgen", 0) # Disable slow Netgen

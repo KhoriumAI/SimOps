@@ -758,6 +758,9 @@ def register_routes(app):
         print(f"[SLICE] Generating slice mesh on {axis}={offset_percent}%...")
         slice_data = generate_slice_mesh(nodes, elements, quality_map, plane_origin, plane_normal)
         
+        v_count = len(slice_data.get('vertices', [])) // 3
+        print(f"[SLICE] Generated {v_count} vertices")
+        
         return jsonify({
             "success": True,
             "axis": axis,
@@ -1960,6 +1963,10 @@ def parse_msh_file(msh_filepath: str):
                     else:
                         # Already exists from tet processing - just mark it as surface
                         face_map[key]['is_surface'] = True
+                        # CRITICAL: Overwrite the entity_tag (which was Volume ID) with the Surface ID
+                        # This ensures the frontend receives the specific Surface ID for selection,
+                        # rather than the generic Volume ID.
+                        face_map[key]['entity_tag'] = entity_tag
                 except KeyError: pass
 
         if msh_version.startswith('4'):
@@ -1970,7 +1977,7 @@ def parse_msh_file(msh_filepath: str):
                 line_parts = elements_section[curr_line].split()
                 curr_line += 1
                 if not line_parts: continue
-                entity_tag_block = int(line_parts[1])
+                entity_tag_block = int(line_parts[0])
                 el_type = int(line_parts[2])
                 num_els = int(line_parts[3])
                 for i in range(num_els):

@@ -101,6 +101,17 @@ function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30)
 }
 
 function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
+  // Debug log to verify data reception
+  useEffect(() => {
+    if (sliceData) {
+      console.log("[SliceMesh] Received slice data:", {
+        vertices: sliceData.vertices?.length,
+        colors: sliceData.colors?.length,
+        indices: sliceData.indices?.length
+      });
+    }
+  }, [sliceData]);
+
   const geometry = useMemo(() => {
     if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
     const geo = new THREE.BufferGeometry()
@@ -120,17 +131,12 @@ function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
   }, [sliceData, renderOffset])
 
   // Filter out the plane that corresponds to the activeAxis
-  // Backend already clipped this mesh along that axis. 
-  // Applying it again in frontend causes Z-fighting/clipping of the cut surface itself.
   const filteredPlanes = useMemo(() => {
     if (!clippingPlanes || !activeAxis) return clippingPlanes
 
     return clippingPlanes.filter(plane => {
-      // X plane has normal (-1, 0, 0)
       if (activeAxis === 'x' && Math.abs(plane.normal.x + 1) < 0.01) return false
-      // Y plane has normal (0, 0, -1) in World space (original Y)
       if (activeAxis === 'y' && Math.abs(plane.normal.z + 1) < 0.01) return false
-      // Z plane has normal (0, -1, 0) in World space (original Z)
       if (activeAxis === 'z' && Math.abs(plane.normal.y + 1) < 0.01) return false
       return true
     })
@@ -140,12 +146,15 @@ function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
 
   return (
     <mesh geometry={geometry}>
-      <meshBasicMaterial
+      <meshStandardMaterial
         vertexColors={true}
         side={THREE.DoubleSide}
-        transparent={true}
-        opacity={0.9}
+        transparent={false}
+        opacity={1.0}
+        roughness={0.5}
+        metalness={0.1}
         clippingPlanes={filteredPlanes}
+        clipShadows={true}
       />
     </mesh>
   )

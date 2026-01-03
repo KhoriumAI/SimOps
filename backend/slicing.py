@@ -241,6 +241,9 @@ def generate_slice_mesh(mesh_nodes, elements, quality_map, plane_origin, plane_n
                 output_indices.extend([vertex_count, vertex_count + 1, vertex_count + 2])
                 vertex_count += 3
             
+    print(f"[SLICE_LOGIC] Interface elements: {len(interface_element_indices)}")
+    print(f"[SLICE_LOGIC] Generated {vertex_count} vertices")
+            
     return {
         "vertices": output_vertices,
         "colors": output_colors,
