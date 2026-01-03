@@ -1477,11 +1477,11 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             except Exception as e:
                 self.log_message(f"  [!] Failed to merge {os.path.basename(msh_file)}: {e}")
         
-        # CRITICAL: For assemblies, we must remove duplicate nodes at the interfaces
-        # between volumes. Otherwise, the mesh is just a collection of disjoint parts,
-        # which causes errors during global quality analysis and rendering.
-        self.log_message("Cleaning assembly topology (removing duplicate nodes)...")
-        gmsh.model.mesh.removeDuplicateNodes()
+        # CRITICAL: For assemblies, we must NOT remove duplicate nodes at the interfaces
+        # between volumes if they were meshed in isolation (non-conformal).
+        # Merging mismatched nodes causes element inversion because the surface meshes do not align.
+        # self.log_message("Cleaning assembly topology (removing duplicate nodes)...")
+        # gmsh.model.mesh.removeDuplicateNodes()
         
         # Final renumbering to ensure a perfectly contiguous, unique tag space
         gmsh.model.mesh.renumberNodes()
