@@ -2039,7 +2039,8 @@ def parse_msh_file(msh_filepath: str):
                 # DEBUG: Print first few blocks to see what we are parsing
                 if curr_line < 20:
                      print(f"[MESH PARSE DEBUG] Block Header Raw: {line_parts}")
-                entity_tag_block = int(line_parts[0])
+                entity_dim = int(line_parts[0])
+                entity_tag_block = int(line_parts[1])
                 el_type = int(line_parts[2])
                 num_els = int(line_parts[3])
                 for i in range(num_els):
@@ -2079,9 +2080,9 @@ def parse_msh_file(msh_filepath: str):
         faces_with_quality = 0
         faces_without_quality = 0
             
-        # Extract boundary faces (count == 1)
+        # Extract boundary faces (count == 1 OR explicitly marked as surface)
         for key, data in face_map.items():
-            if data['count'] == 1:
+            if data['count'] == 1 or data.get('is_surface'):
                 boundary_face_count += 1
                 # This is a boundary face
                 face_nodes = data['nodes']
