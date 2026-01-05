@@ -1,0 +1,15 @@
+[Unit]
+Description=Gunicorn instance to serve Mesh Generation API
+After=network.target
+
+[Service]
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/MeshPackageLean
+Environment="PATH=/home/ec2-user/backend/venv/bin"
+ExecStart=/home/ec2-user/backend/venv/bin/gunicorn -b 0.0.0.0:3000 -w 1 --timeout 300 --keep-alive 5 backend.api_server:app
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
