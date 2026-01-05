@@ -74,7 +74,8 @@ def main():
             
         # Try 3D
         print(f"[Worker V{args.tag}] Generating 3D mesh (Order {args.order}, MinSize {args.min_size}, MaxSize {args.max_size}, Strategy {args.strategy})...", flush=True)
-        
+        print(f"[Worker V{args.tag}] Single Strategy Enforced: {args.strategy}", flush=True)
+
         # Dynamic Strategy Selection (User requested restoration of HXT + flexibility)
         success = False
         
