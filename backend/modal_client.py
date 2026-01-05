@@ -8,10 +8,18 @@ Usage:
     call = modal_client.spawn_mesh_job(bucket, key, quality_params)
     result = modal_client.get_job_result(call.object_id)
 """
-import modal
 import os
 import time
 from typing import Dict, Any, Optional
+
+# Optional modal import - server can run without it
+try:
+    import modal
+    MODAL_AVAILABLE = True
+except ImportError:
+    modal = None
+    MODAL_AVAILABLE = False
+    print("[ModalClient] WARNING: modal package not installed. Modal features disabled.")
 
 
 class ModalClient:
@@ -27,6 +35,14 @@ class ModalClient:
         self._preview_fn = None
         self._app_name = None
         
+    def _check_modal_available(self):
+        """Raise error if modal is not available"""
+        if not MODAL_AVAILABLE:
+            raise ImportError(
+                "Modal package is not installed. Install with: pip install modal\n"
+                "Or set USE_MODAL_COMPUTE=false in your environment."
+            )
+        
     def _get_app_name(self):
         """Get app name from Flask config or environment"""
         if self._app_name is None:
@@ -40,6 +56,7 @@ class ModalClient:
             
     def _get_mesh_fn(self):
         """Get the meshing function reference (lazy initialization)"""
+        self._check_modal_available()
         if self._mesh_fn is None:
             app_name = self._get_app_name()
             fn_name = os.environ.get('MODAL_MESH_FUNCTION', 'generate_mesh')
@@ -50,6 +67,7 @@ class ModalClient:
 
     def _get_preview_fn(self):
         """Get the preview function reference (lazy initialization)"""
+        self._check_modal_available()
         if self._preview_fn is None:
             app_name = self._get_app_name()
             fn_name = os.environ.get('MODAL_PREVIEW_FUNCTION', 'generate_preview_mesh')
@@ -92,6 +110,7 @@ class ModalClient:
         Wait for a Modal job to complete and return the result.
         This blocks for the duration of the timeout or until completion.
         """
+        self._check_modal_available()
         try:
             # Reconstruct the call object from id
             call = modal.functions.FunctionCall.from_id(call_id)
@@ -115,7 +134,13 @@ class ModalClient:
         except Exception as e:
             print(f"[ModalClient ERROR] Remote mesh failed: {e}")
             return {"success": False, "message": f"Modal remote call failed: {e}"}
+    
+    @property
+    def is_available(self):
+        """Check if Modal is available for use"""
+        return MODAL_AVAILABLE
 
 
 # Global instance
 modal_client = ModalClient()
+
