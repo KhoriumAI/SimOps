@@ -509,26 +509,47 @@ function App() {
 
     setIsExportingAnsys(true)
     try {
-      const response = await authFetch(`${API_BASE}/projects/${currentProject}/export/ansys`, {
-        method: 'POST'
-      })
+      // Use the new format=fluent query parameter on the download endpoint
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=fluent`)
       if (response.ok) {
-        const blob = await response.blob()
-        const url = window.URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        window.URL.revokeObjectURL(url)
+        const contentType = response.headers.get('content-type')
+
+        if (contentType && contentType.includes('application/json')) {
+          // Check for error or presigned URL
+          const data = await response.json()
+          if (data.error) {
+            alert(data.error)
+            return
+          }
+          // If it's a presigned URL (shouldn't happen for Fluent, but handle it)
+          if (data.download_url) {
+            const a = document.createElement('a')
+            a.href = data.download_url
+            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+            a.target = '_blank'
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a)
+          }
+        } else {
+          // Direct file download
+          const blob = await response.blob()
+          const url = window.URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+          window.URL.revokeObjectURL(url)
+        }
       } else {
         const error = await response.json()
-        alert(error.error || 'Failed to export ANSYS mesh')
+        alert(error.error || 'Failed to export Fluent mesh')
       }
     } catch (error) {
-      console.error('Failed to export ANSYS mesh:', error)
-      alert('Failed to export ANSYS mesh')
+      console.error('Failed to export Fluent mesh:', error)
+      alert('Failed to export Fluent mesh')
     } finally {
       setIsExportingAnsys(false)
     }

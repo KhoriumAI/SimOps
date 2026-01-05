@@ -1026,12 +1026,13 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
         gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
         
-        # Generate mesh
-        print("[HXT] Generating 3D mesh...", flush=True)
+        # NOTE: Mesh was already generated in the try/except block above (line ~1011)
+        # We only need to run optimization, not regenerate
+        print("[HXT] Running light optimization...", flush=True)
         mesh_start = time.time()
-        gmsh.model.mesh.generate(3)
+        gmsh.model.mesh.optimize("", force=True)  # Run optimization pass only
         mesh_time = time.time() - mesh_start
-        print(f"[HXT] Mesh generation: {mesh_time:.2f}s", flush=True)
+        print(f"[HXT] Optimization: {mesh_time:.2f}s", flush=True)
         
         # Count elements
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -1314,10 +1315,14 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             if 'quality_preset' in quality_params:
                 print(f"[DEBUG] Using quality preset: {quality_params['quality_preset']}")
                 
-            # Update target elements if present (used by adaptive sizing in strategies)
-            if 'target_elements' in quality_params and quality_params['target_elements'] is not None:
-                config.mesh_params.target_elements = int(quality_params['target_elements'])
-                print(f"[DEBUG] Set target_elements to: {quality_params['target_elements']}")
+            # Update target_elements if present (used by adaptive sizing in strategies)
+            target_val = quality_params.get('target_elements')
+            if target_val is not None and str(target_val).strip():
+                try:
+                    config.mesh_params.target_elements = int(target_val)
+                    print(f"[DEBUG] Set target_elements to: {config.mesh_params.target_elements}")
+                except (ValueError, TypeError):
+                    print(f"[DEBUG] Invalid target_elements value: {target_val} - using default")
             else:
                 print(f"[DEBUG] target_elements not specified or None - using defaults")
             
@@ -1351,9 +1356,15 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 print(f"[DEBUG] Set strategy_order to: {quality_params['strategy_order']}")
             
             # Update element order (1=Tet4 linear, 2=Tet10 quadratic)
-            if 'element_order' in quality_params:
-                config.mesh_params.element_order = int(quality_params['element_order'])
-                print(f"[DEBUG] Set element_order to: {quality_params['element_order']} ({'Tet10 quadratic' if quality_params['element_order'] == 2 else 'Tet4 linear'})")
+            order_val = quality_params.get('element_order')
+            if order_val is not None and str(order_val).strip():
+                try:
+                    config.mesh_params.element_order = int(order_val)
+                    print(f"[DEBUG] Set element_order to: {config.mesh_params.element_order} ({'Tet10 quadratic' if config.mesh_params.element_order == 2 else 'Tet4 linear'})")
+                except (ValueError, TypeError):
+                    print(f"[DEBUG] Invalid element_order value: {order_val} - using default")
+            else:
+                print(f"[DEBUG] element_order not specified or None - using default")
             
             # Defer quality calculation (show mesh faster)
             if 'defer_quality' in quality_params:

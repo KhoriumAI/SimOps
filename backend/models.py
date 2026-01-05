@@ -110,6 +110,12 @@ class MeshResult(db.Model):
     boundary_zones = db.Column(db.JSON, nullable=True)  # { "ZoneName": [face_indices], ... }
     job_id = db.Column(db.String(50), nullable=True)  # Human-readable job ID (e.g. MSH-0101-ABCD)
     
+    # NEW: Modal compute tracking
+    modal_job_id = db.Column(db.String(100), nullable=True, index=True)
+    modal_status = db.Column(db.String(20), nullable=True)
+    modal_started_at = db.Column(db.DateTime, nullable=True)
+    modal_completed_at = db.Column(db.DateTime, nullable=True)
+    
     
     # Processing info
     processing_time = db.Column(db.Float, nullable=True)  # Time in seconds
@@ -134,6 +140,8 @@ class MeshResult(db.Model):
             'processing_time': self.processing_time,
             'node_count': self.node_count,
             'element_count': self.element_count,
+            'modal_job_id': self.modal_job_id,
+            'modal_status': self.modal_status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
         }

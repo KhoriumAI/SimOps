@@ -131,6 +131,12 @@ class Config:
     # CORS - Add your domain
     CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(',')
 
+    # Modal Configuration
+    USE_MODAL_COMPUTE = os.environ.get('USE_MODAL_COMPUTE', 'false').lower() == 'true'
+    MODAL_APP_NAME = os.environ.get('MODAL_APP_NAME', 'khorium-production')
+    MODAL_MESH_FUNCTION = os.environ.get('MODAL_MESH_FUNCTION', 'generate_mesh')
+    MODAL_PREVIEW_FUNCTION = os.environ.get('MODAL_PREVIEW_FUNCTION', 'generate_preview_mesh')
+
 
 class DevelopmentConfig(Config):
     """Local development - uses local filesystem, no AWS"""

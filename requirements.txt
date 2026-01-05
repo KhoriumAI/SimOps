@@ -71,8 +71,9 @@ email-validator>=2.0.0
 celery>=5.3.4          # Distributed task queue
 redis>=5.0.1           # Message broker & result backend
 
-# --- Cloud Storage ---
+# --- Cloud Storage & Compute ---
 boto3>=1.28.0          # AWS S3 integration
+modal>=2024.1.0        # Modal serverless GPU workers
 
 # ============================================================================
 # OPTIONAL COMPONENTS

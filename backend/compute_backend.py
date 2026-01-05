@@ -265,6 +265,52 @@ class SSHTunnelBackend(HTTPRemoteBackend):
         self._name = f"ssh_tunnel (localhost:{local_port})"
 
 
+class ModalBackend(ComputeBackend):
+    """
+    Modal.com serverless compute backend.
+    Uses Modal GPU workers for preview and mesh generation.
+    """
+    
+    def __init__(self):
+        from backend.modal_client import modal_client
+        self.modal = modal_client
+        self._name = "modal_serverless"
+        
+    @property
+    def name(self) -> str:
+        return self._name
+        
+    def is_available(self) -> bool:
+        """Modal is always theoretically available if tokens are set"""
+        # We could add a more robust check here if needed
+        return True
+        
+    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
+        """Generate preview using Modal"""
+        # Note: modal_client version of this handles S3 uploads if needed
+        # But this method assumes a local path. 
+        # For simplicity in the abstraction, we try to use the remote_mesh method 
+        # which might need adjustment to handle CAD file upload if not on S3.
+        
+        # In the context of the Flask API, the S3 upload happens before this.
+        # This backend might be better suited for the high-level API server calls.
+        
+        # For now, we'll try to use the remote_mesh/synchronous call
+        # but we need to pass a bucket/key if those exist.
+        
+        # Check if we have S3 context
+        from flask import current_app
+        use_s3 = current_app.config.get('USE_S3', False)
+        bucket = current_app.config.get('S3_BUCKET_NAME')
+        
+        # If we have a local path but no S3 info, this backend can't easily work 
+        # without uploading it. 
+        
+        # TODO: Implement local-to-modal upload if needed
+        # For now, assume production environment (S3 active)
+        return {"error": "ModalBackend requires S3-based workflow. Use high-level API integration instead.", "status": "error"}
+
+
 # =============================================================================
 # Backend Factory
 # =============================================================================
@@ -273,6 +319,14 @@ def get_available_backends() -> List[ComputeBackend]:
     """Get list of all configured backends"""
     backends = []
     
+    # Modal (Preferred if enabled)
+    from flask import current_app
+    try:
+        if current_app.config.get('USE_MODAL_COMPUTE', False):
+            backends.append(ModalBackend())
+    except:
+        pass
+
     # SSH tunnel (Threadripper)
     ssh_port = int(os.environ.get('SSH_TUNNEL_PORT', '8080'))
     backends.append(SSHTunnelBackend(local_port=ssh_port))
@@ -317,13 +371,24 @@ def get_preferred_backend(strategy: str = None) -> ComputeBackend:
         return HTTPRemoteBackend(endpoint_url=remote_url)
     
     elif strategy == 'auto':
-        # Try SSH tunnel first
+        # Try Modal first if enabled
+        from flask import current_app
+        try:
+            if current_app.config.get('USE_MODAL_COMPUTE', False):
+                return ModalBackend()
+        except:
+            pass
+
+        # Try SSH tunnel next
         ssh_backend = SSHTunnelBackend()
         if ssh_backend.is_available():
             return ssh_backend
         
         # Fallback to local
         return LocalGMSHBackend()
+    
+    elif strategy == 'modal':
+        return ModalBackend()
     
     else:
         raise ValueError(f"Unknown compute backend strategy: {strategy}")

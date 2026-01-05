@@ -73,7 +73,11 @@ def migrate():
                 ('processing_time', 'FLOAT'),
                 ('node_count', 'INTEGER'),
                 ('element_count', 'INTEGER'),
-                ('completed_at', 'TIMESTAMP')
+                ('completed_at', 'TIMESTAMP'),
+                ('modal_job_id', 'VARCHAR(100)'),
+                ('modal_status', 'VARCHAR(20)'),
+                ('modal_started_at', 'TIMESTAMP'),
+                ('modal_completed_at', 'TIMESTAMP')
             ]
             
             for col_name, col_type in mesh_results_migrations:

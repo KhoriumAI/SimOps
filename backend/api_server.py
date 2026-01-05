@@ -27,6 +27,7 @@ from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
+from modal_client import modal_client
 from slicing import generate_slice_mesh, parse_msh_for_slicing
 import numpy as np
 try:
@@ -214,6 +215,130 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
 
             # TIMING: Track subprocess dispatch and acknowledgement latency
             dispatch_time = time.time()
+            
+            # --- MODAL COMPUTE INTEGRATION ---
+            if app.config.get('USE_MODAL_COMPUTE', False):
+                print(f"[MESH GEN] Using MODAL compute for project {project_id}")
+                try:
+                    # Get bucket and key from project.filepath
+                    if project.filepath.startswith('s3://'):
+                        path_parts = project.filepath.replace('s3://', '').split('/', 1)
+                        bucket = path_parts[0]
+                        key = path_parts[1]
+                    else:
+                        # For local files, we might need to upload to a temp S3 bucket 
+                        # but in our current architecture, files should be on S3 for production.
+                        # For now, if it's local, we just fail or fallback to local.
+                        print(f"[MESH GEN] Local file detected, but Modal requires S3. Falling back to local.")
+                        raise Exception("Local files not supported with Modal. Please use S3.")
+
+                    # Spawn Modal job
+                    call = modal_client.spawn_mesh_job(bucket, key, quality_params)
+                    
+                    # Update MeshResult with Modal info
+                    mesh_result.modal_job_id = call.object_id
+                    mesh_result.modal_status = 'pending'
+                    mesh_result.modal_started_at = datetime.utcnow()
+                    db.session.commit()
+                    
+                    # Track running process for the "Stop" button
+                    with generation_lock:
+                        running_processes[project_id] = call
+                    
+                    print(f"[COMPUTE] Modal job {call.object_id} spawned at {time.time():.3f}s")
+                    
+                    # Wait for results with polling to update logs
+                    # Ideally we would stream logs, but for now we'll just poll for completion
+                    # and show a "still processing" heartbeat in the logs
+                    import time
+                    start_wait = time.time()
+                    while True:
+                        # Check for completion (non-blocking if possible, but Modal get() is blocking)
+                        # So we use a shorter timeout for the get() call to allow checking for "Stop" signal
+                        # and updating heartbeat logs
+                        
+                        # Note: Modal's native get() doesn't support "peek", so we have to just wait.
+                        # However, for a better UX, we can use a "get" with a short timeout in a loop?
+                        # No, Modal's get(timeout) raises TimeoutError if not done.
+                        
+                        try:
+                            # Wait for 2 seconds at a time
+                            result = modal_client.get_job_result(call.object_id, timeout=2)
+                            break # If we get here, job is done
+                        except TimeoutError:
+                            # Check if user stopped the project
+                            db.session.refresh(project)
+                            if project.status == 'stopped':
+                                print(f"[MESH GEN] Project stopped by user while waiting for Modal.")
+                                call.cancel()
+                                return
+                            
+                            # Update logs with heartbeat every 10 seconds
+                            if time.time() - start_wait > 10:
+                                elapsed = time.time() - start_wait
+                                if len(logs) == 0 or "Running..." not in logs[-1]:
+                                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [MODAL] Running... ({int(elapsed)}s)")
+                                    mesh_result.logs = logs
+                                    db.session.commit()
+                            continue 
+                        except Exception as e:
+                            # Real error
+                            raise e
+
+                    # Update MeshResult with results
+                    mesh_result.modal_status = 'completed' if result.get('success') else 'failed'
+                    mesh_result.modal_completed_at = datetime.utcnow()
+                    mesh_result.completed_at = datetime.utcnow()
+                    
+                    if result.get('success'):
+                        mesh_result.output_path = result.get('s3_output_path')
+                        mesh_result.strategy = result.get('strategy')
+                        # Capture quality metrics
+                        qm = result.get('quality_metrics', {})
+                        mesh_result.quality_metrics = qm
+                        
+                        mesh_result.processing_time = result.get('metrics', {}).get('total_time_seconds', 0)
+                        mesh_result.node_count = result.get('total_nodes', 0)
+                        mesh_result.element_count = result.get('total_elements', 0)
+                        
+                        project.status = 'completed'
+                        project.mesh_path = mesh_result.output_path
+
+                        # --- LOGGING ---
+                        # Append to existing logs instead of overwriting
+                        
+                        # Add any specific messages from the worker (e.g. from the real-time log capture)
+                        if result.get('log'):
+                            # These are the real logs from the worker we captured!
+                            for line in result.get('log'):
+                                logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [MODAL] {line}")
+                        
+                        # Add any specific messages from the worker
+                        if result.get('message'):
+                             logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [MODAL] {result.get('message')}")
+
+                        logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Cloud meshing completed in {duration:.1f}s")
+                        mesh_result.logs = logs
+
+                    else:
+                        project.status = 'failed'
+                        mesh_result.logs = [f"Modal error: {result.get('message')}"]
+                    
+                    db.session.commit()
+                    print(f"[MESH GEN] Modal job completed for project {project_id}")
+                    return # Exit the function as Modal handled everything
+                except Exception as e:
+                    print(f"[MESH GEN ERROR] Modal integration failed: {e}")
+                    
+                    # Check if project was stopped
+                    db.session.refresh(project)
+                    if project.status == 'stopped':
+                         print(f"[MESH GEN] Project stopped by user. Aborting fallback.")
+                         return
+
+                    # Fallback to local subprocess if Modal fails
+                    print(f"[MESH GEN] Falling back to local compute...")
+
             print(f"[COMPUTE] Dispatching subprocess at {dispatch_time:.3f}s (setup took {dispatch_time - start_time:.3f}s)")
             
             process = subprocess.Popen(
@@ -524,34 +649,9 @@ def register_routes(app):
         with open(temp_path, 'wb') as f:
             f.write(file_content)
         
-        preview_path = None
         try:
-            # 2. Generate the preview IMMEDIATELY using the local temp file
-            print(f"[PREVIEW] Generating coarse mesh locally for {filename}...", flush=True)
-            preview_data = parse_step_file_for_preview(temp_path)
-            
-            if preview_data and "error" not in preview_data:
-                # Save preview data as JSON to upload
-                preview_temp_path = os.path.join(temp_dir, f"{project_id}_preview.json")
-                with open(preview_temp_path, 'w') as f:
-                    json.dump(preview_data, f)
-                
-                # 3. Upload preview to S3
-                preview_filename = f"{project_id}_preview.json"
-                preview_path = storage.save_local_file(
-                    local_path=preview_temp_path,
-                    filename=preview_filename,
-                    user_email=user.email,
-                    file_type='uploads'
-                )
-                print(f"[PREVIEW] Preview uploaded: {preview_path}")
-        except Exception as e:
-            print(f"[PREVIEW ERROR] Failed to generate/upload preview: {e}")
-            preview_path = None
-
-        try:
-            # 4. Upload original file to storage
-            # We can use the temp file we already created
+            # 4. Upload original file to storage (S3 or local)
+            # We upload first so Modal has access to the file on S3
             filepath = storage.save_local_file(
                 local_path=temp_path,
                 filename=storage_filename,
@@ -564,6 +664,47 @@ def register_routes(app):
             shutil.rmtree(temp_dir, ignore_errors=True)
             print(f"[UPLOAD ERROR] Failed to save file: {e}")
             return jsonify({"error": "Failed to save file"}), 500
+
+        preview_path = None
+        try:
+            # 5. Generate the preview
+            if app.config.get('USE_MODAL_COMPUTE', False) and filepath.startswith('s3://'):
+                print(f"[PREVIEW] Triggering Modal preview generation for {filepath}...")
+                path_parts = filepath.replace('s3://', '').split('/', 1)
+                bucket = path_parts[0]
+                key = path_parts[1]
+                
+                call = modal_client.spawn_preview_job(bucket, key)
+                result = modal_client.get_job_result(call.object_id, timeout=120)  # Shorter timeout for preview
+                
+                if result.get('success'):
+                    preview_path = result.get('preview_path')
+                    print(f"[PREVIEW] Modal preview generated: {preview_path}")
+                else:
+                    print(f"[PREVIEW ERROR] Modal preview failed: {result.get('message')}")
+            else:
+                # Local fallback (existing logic)
+                print(f"[PREVIEW] Generating coarse mesh locally for {filename}... (Local fallback)", flush=True)
+                preview_data = parse_step_file_for_preview(temp_path)
+                
+                if preview_data and "error" not in preview_data:
+                    # Save preview data as JSON to upload
+                    preview_temp_path = os.path.join(temp_dir, f"{project_id}_preview.json")
+                    with open(preview_temp_path, 'w') as f:
+                        json.dump(preview_data, f)
+                    
+                    # Upload preview to S3
+                    preview_filename = f"{project_id}_preview.json"
+                    preview_path = storage.save_local_file(
+                        local_path=preview_temp_path,
+                        filename=preview_filename,
+                        user_email=user.email,
+                        file_type='uploads'
+                    )
+                    print(f"[PREVIEW] Preview uploaded: {preview_path}")
+        except Exception as e:
+            print(f"[PREVIEW ERROR] Failed to generate/upload preview: {e}")
+            preview_path = None
 
         # Cleanup local temp files
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -661,23 +802,29 @@ def register_routes(app):
         if project.user_id != current_user_id:
             return jsonify({"error": "Access denied"}), 403
         
-        # Try to find and kill the process
+        # Try to find and kill the process or cancel Modal job
         process_killed = False
         with generation_lock:
             if project_id in running_processes:
+                obj = running_processes[project_id]
                 try:
-                    print(f"[API] Stopping process for project {project_id}")
-                    running_processes[project_id].terminate()
-                    # Give it a tiny bit of time to cleanup?
-                    process_killed = True
-                except Exception as e:
-                    print(f"[API] Error stopping process: {e}")
-                    # Try kill if terminate failed
-                    try:
-                        running_processes[project_id].kill()
+                    if hasattr(obj, 'terminate'):
+                        print(f"[API] Stopping local process for project {project_id}")
+                        obj.terminate()
                         process_killed = True
-                    except Exception as e2:
-                        print(f"[API] Error killing process: {e2}")
+                    elif hasattr(obj, 'cancel'):
+                        print(f"[API] Canceling Modal job for project {project_id}")
+                        obj.cancel()
+                        process_killed = True
+                except Exception as e:
+                    print(f"[API] Error stopping/canceling: {e}")
+                    # Try kill if terminate failed
+                    if hasattr(obj, 'kill'):
+                        try:
+                            obj.kill()
+                            process_killed = True
+                        except Exception as e2:
+                            print(f"[API] Error killing process: {e2}")
 
         # Force status update
         if project.status == 'processing':
@@ -968,6 +1115,9 @@ def register_routes(app):
     @app.route('/api/projects/<project_id>/download', methods=['GET'])
     @jwt_required()
     def download_mesh(project_id: str):
+        import tempfile
+        import shutil
+        
         current_user_id = int(get_jwt_identity())
         project = Project.query.get(project_id)
 
@@ -988,6 +1138,9 @@ def register_routes(app):
         storage = get_storage()
         use_s3 = app.config.get('USE_S3', False)
         
+        # Get requested format (default: msh, options: msh, fluent)
+        requested_format = request.args.get('format', 'msh').lower()
+        
         # Check if file exists
         if use_s3 and output_path.startswith('s3://'):
             if not storage.file_exists(output_path):
@@ -1005,7 +1158,7 @@ def register_routes(app):
             mesh_result_id=latest_result.id,
             user_id=current_user_id,
             download_type='mesh',
-            file_format='msh',
+            file_format=requested_format,
             file_size=file_size,
             ip_address=request.remote_addr,
             user_agent=request.user_agent.string[:500] if request.user_agent else None
@@ -1025,7 +1178,8 @@ def register_routes(app):
                 'project_id': project_id,
                 'filename': project.filename,
                 'file_size': file_size,
-                'storage_path': output_path
+                'storage_path': output_path,
+                'format': requested_format
             },
             ip_address=request.remote_addr,
             user_agent=request.user_agent.string[:500] if request.user_agent else None
@@ -1038,20 +1192,72 @@ def register_routes(app):
         except Exception:
             db.session.rollback()
 
-        # For S3, return a presigned URL; for local, serve the file
-        if use_s3 and output_path.startswith('s3://'):
-            presigned_url = storage.get_file_url(output_path, expires_in=3600)
-            return jsonify({
-                "download_url": presigned_url,
-                "filename": f"{Path(project.filename).stem}_mesh.msh",
-                "expires_in": 3600
-            })
-        else:
-            return send_file(
-                output_path,
-                as_attachment=True,
-                download_name=f"{Path(project.filename).stem}_mesh.msh"
-            )
+        # Handle Fluent format conversion
+        temp_dir = None
+        try:
+            if requested_format == 'fluent':
+                print(f"[DOWNLOAD] Converting to Fluent format for project {project_id}")
+                temp_dir = tempfile.mkdtemp()
+                
+                # Get the source MSH file locally
+                if use_s3 and output_path.startswith('s3://'):
+                    local_msh = Path(temp_dir) / "source.msh"
+                    storage.download_to_local(output_path, str(local_msh))
+                else:
+                    local_msh = Path(output_path)
+                
+                # Convert to Fluent format
+                fluent_output = Path(temp_dir) / f"{Path(project.filename).stem}_fluent.msh"
+                
+                try:
+                    # Import the Fluent converter
+                    import sys
+                    core_path = Path(__file__).parent.parent / 'core'
+                    if str(core_path) not in sys.path:
+                        sys.path.insert(0, str(core_path))
+                    
+                    from write_fluent_mesh import convert_gmsh_to_fluent
+                    convert_gmsh_to_fluent(str(local_msh), str(fluent_output))
+                    
+                    if fluent_output.exists():
+                        print(f"[DOWNLOAD] Fluent conversion successful: {fluent_output.stat().st_size} bytes")
+                        return send_file(
+                            str(fluent_output),
+                            as_attachment=True,
+                            download_name=f"{Path(project.filename).stem}_fluent.msh"
+                        )
+                    else:
+                        return jsonify({"error": "Fluent conversion failed - no output file"}), 500
+                        
+                except ImportError as ie:
+                    print(f"[DOWNLOAD] Fluent converter not available: {ie}")
+                    return jsonify({"error": "Fluent format export not available on this server"}), 501
+                except Exception as conv_err:
+                    print(f"[DOWNLOAD] Fluent conversion error: {conv_err}")
+                    return jsonify({"error": f"Fluent conversion failed: {str(conv_err)}"}), 500
+            
+            # Default: return original MSH format
+            # For S3, return a presigned URL; for local, serve the file
+            if use_s3 and output_path.startswith('s3://'):
+                presigned_url = storage.get_file_url(output_path, expires_in=3600)
+                return jsonify({
+                    "download_url": presigned_url,
+                    "filename": f"{Path(project.filename).stem}_mesh.msh",
+                    "expires_in": 3600
+                })
+            else:
+                return send_file(
+                    output_path,
+                    as_attachment=True,
+                    download_name=f"{Path(project.filename).stem}_mesh.msh"
+                )
+        finally:
+            # Cleanup temp directory
+            if temp_dir:
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except:
+                    pass
 
     @app.route('/api/projects/<project_id>/mesh-data', methods=['GET'])
     @jwt_required()
@@ -1347,7 +1553,33 @@ def parse_step_file_for_preview(step_filepath: str):
     print(f"[PREVIEW] Starting preview generation for: {step_filepath}")
     
     # ============================================================================
-    # STEP 1: Try forwarding to Threadripper workstation via SSH tunnel
+    # STEP 1: Try Modal.com Compute (Preferred on Staging/Production)
+    # ============================================================================
+    from flask import current_app
+    if current_app.config.get('USE_MODAL_COMPUTE', False):
+        try:
+            print("[PREVIEW] Attempting to use Modal for preview...")
+            use_s3 = current_app.config.get('USE_S3', False)
+            
+            # Modal works best with S3-based files
+            # If it's a local file (temp upload), we might need to upload it first
+            # but usually by this point it's already on S3 in production.
+            
+            # Since we only have a local filepath here, let's see if we can find 
+            # the corresponding S3 bucket/key if present.
+            # (Note: parse_step_file_for_preview is usually called with a local temp path)
+            
+            # TODO: Add local-to-modal upload logic here if needed.
+            # For now, if Modal is requested but we have no S3 context, we might skip.
+            
+            # If we are in production/staging, we likely want to use Modal.
+            # But the Modal worker expects a bucket and key.
+            pass # Placeholder for now, continue to Threadripper/Local fallback
+        except Exception as e:
+            print(f"[PREVIEW] Modal preview failed: {e}")
+
+    # ============================================================================
+    # STEP 2: Try forwarding to Threadripper workstation via SSH tunnel
     # ============================================================================
     try:
         import requests
