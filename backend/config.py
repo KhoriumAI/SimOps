@@ -170,8 +170,8 @@ class ProductionConfig(Config):
 
 
 class StagingConfig(ProductionConfig):
-    """Staging environment - similar to production but may have different resources"""
-    pass
+    """Staging environment - similar to production by default"""
+    USE_MODAL_COMPUTE = True  # Force Modal on staging
 
 
 config = {
