@@ -54,7 +54,9 @@ def create_app(config_class=None):
         "http://localhost:5173",
         "http://localhost:3000", 
         "http://127.0.0.1:5173",
-        "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com"
+        "http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com",
+        "https://app.khorium.ai",
+        "http://app.khorium.ai"
     ]
     
     # Get origins from config or environment
@@ -829,6 +831,23 @@ def register_routes(app):
         # Force status update
         if project.status == 'processing':
             project.status = 'stopped'
+            
+            # Add stop log
+            try:
+                # Find the latest mesh result for this project that is 'processing' or 'pending'
+                latest_result = MeshResult.query.filter_by(project_id=project_id)\
+                    .order_by(MeshResult.created_at.desc()).first()
+                
+                if latest_result:
+                    logs = list(latest_result.logs) if latest_result.logs else []
+                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Process stopped by user.")
+                    latest_result.logs = logs
+                    # Also update modal_status if applicable
+                    if latest_result.modal_job_id:
+                        latest_result.modal_status = 'stopped'
+            except Exception as e:
+                print(f"[API] Error updating stop log: {e}")
+
             db.session.commit()
             return jsonify({"message": "Mesh generation stopped", "process_killed": process_killed})
         else:
