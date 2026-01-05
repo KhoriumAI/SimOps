@@ -327,10 +327,6 @@ def get_available_backends() -> List[ComputeBackend]:
     except:
         pass
 
-    # SSH tunnel (Threadripper)
-    ssh_port = int(os.environ.get('SSH_TUNNEL_PORT', '8080'))
-    backends.append(SSHTunnelBackend(local_port=ssh_port))
-    
     # Local GMSH
     backends.append(LocalGMSHBackend())
     
@@ -379,12 +375,7 @@ def get_preferred_backend(strategy: str = None) -> ComputeBackend:
         except:
             pass
 
-        # Try SSH tunnel next
-        ssh_backend = SSHTunnelBackend()
-        if ssh_backend.is_available():
-            return ssh_backend
-        
-        # Fallback to local
+        # Fallback directly to local (SSH tunnel removed for performance)
         return LocalGMSHBackend()
     
     elif strategy == 'modal':
