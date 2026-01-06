@@ -8,7 +8,7 @@ Write-Host "--- Starting Frontend Deployment ---" -ForegroundColor Cyan
 
 # 1. Frontend Build
 Write-Host "[1/2] Building Frontend..." -ForegroundColor Yellow
-$frontendPath = Join-Path $PSScriptRoot "web-frontend"
+$frontendPath = Join-Path $PSScriptRoot "..\..\web-frontend"
 if (Test-Path $frontendPath) {
     Push-Location $frontendPath
     npm run build

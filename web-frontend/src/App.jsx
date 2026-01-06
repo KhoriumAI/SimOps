@@ -59,6 +59,7 @@ function App() {
 
   const [isPolling, setIsPolling] = useState(false)
   const [isExportingAnsys, setIsExportingAnsys] = useState(false)
+  const [isAnsysDropdownOpen, setIsAnsysDropdownOpen] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
   const [maxElementSize, setMaxElementSize] = useState(10.0)
   const [minElementSize, setMinElementSize] = useState(2.0)
@@ -82,6 +83,9 @@ function App() {
   // Fast Mode - experimental optimized preview (uses SSH compute, skips retries)
   // TODO: Remove this after testing
   const [fastMode, setFastMode] = useState(true)  // Default ON for testing
+
+  // Local Dev Override: Force Modal compute
+  const [useModal, setUseModal] = useState(false)
 
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
@@ -127,6 +131,27 @@ function App() {
     }
     fetchStrategies()
   }, [])
+
+  const handleForceReset = async () => {
+    if (!currentProject) return
+    try {
+      const resp = await fetch(`${API_BASE}/projects/${currentProject}/force-reset`, {
+        method: 'POST',
+      })
+      if (resp.ok) {
+        // Force refresh status
+        setProjectStatus(prev => ({ ...prev, status: 'uploaded' }))
+        setIsGenerating(false)
+        setLogs(prev => [...prev, `[SYSTEM] Force reset triggered manually.`])
+      } else {
+        const err = await resp.json()
+        alert(`Failed to force reset: ${err.error}`)
+      }
+    } catch (err) {
+      console.error(err)
+      alert('Failed to contact server for force reset')
+    }
+  }
 
   // Poll project status
   useEffect(() => {
@@ -477,7 +502,9 @@ function App() {
           element_order: parseInt(elementOrder),
           ansys_mode: ansysMode,
           mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive
+          mesh_strategy: meshStrategy,
+          curvature_adaptive: curvatureAdaptive,
+          use_modal: useModal // Pass local override override
         },
         signal: controller.signal
       })
@@ -504,15 +531,17 @@ function App() {
     }
   }
 
-  const handleAnsysExport = async () => {
+  const handleAnsysExport = async (format = 'fluent') => {
     if (!currentProject) return
 
     setIsExportingAnsys(true)
     try {
-      // Use the new format=fluent query parameter on the download endpoint
-      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=fluent`)
+      // Use the new format query parameter on the download endpoint
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=${format}`)
       if (response.ok) {
         const contentType = response.headers.get('content-type')
+        const extension = format === 'mechanical' ? 'inp' : 'msh'
+        const suffix = format === 'mechanical' ? 'mechanical' : 'fluent'
 
         if (contentType && contentType.includes('application/json')) {
           // Check for error or presigned URL
@@ -525,7 +554,7 @@ function App() {
           if (data.download_url) {
             const a = document.createElement('a')
             a.href = data.download_url
-            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
             a.target = '_blank'
             document.body.appendChild(a)
             a.click()
@@ -537,7 +566,7 @@ function App() {
           const url = window.URL.createObjectURL(blob)
           const a = document.createElement('a')
           a.href = url
-          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
           document.body.appendChild(a)
           a.click()
           a.remove()
@@ -545,11 +574,11 @@ function App() {
         }
       } else {
         const error = await response.json()
-        alert(error.error || 'Failed to export Fluent mesh')
+        alert(error.error || `Failed to export ${format} mesh`)
       }
     } catch (error) {
-      console.error('Failed to export Fluent mesh:', error)
-      alert('Failed to export Fluent mesh')
+      console.error(`Failed to export ${format} mesh:`, error)
+      alert(`Failed to export ${format} mesh`)
     } finally {
       setIsExportingAnsys(false)
     }
@@ -694,17 +723,44 @@ function App() {
                 <Download className="w-3 h-3" />
                 MSH
               </button>
-              <button
-                onClick={handleAnsysExport}
-                disabled={isExportingAnsys}
-                className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                  : 'text-blue-600 hover:text-blue-700'
-                  }`}
-              >
-                {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
-                ANSYS
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setIsAnsysDropdownOpen(!isAnsysDropdownOpen)}
+                  disabled={isExportingAnsys}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'text-blue-600 hover:text-blue-700 hover:bg-blue-50'
+                    }`}
+                >
+                  {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+                  ANSYS
+                  <ChevronDown className="w-3 h-3 ml-0.5 opacity-70" />
+                </button>
+
+                {isAnsysDropdownOpen && (
+                  <>
+                    {/* Click outside listener overlay */}
+                    <div className="fixed inset-0 z-40" onClick={() => setIsAnsysDropdownOpen(false)}></div>
+
+                    <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 w-48 text-xs py-1 overflow-hidden">
+                      <button
+                        onClick={() => { handleAnsysExport('fluent'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+                        Ansys Fluent (.msh)
+                      </button>
+                      <button
+                        onClick={() => { handleAnsysExport('mechanical'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-yellow-500"></div>
+                        Ansys Mechanical (.inp)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -914,6 +970,23 @@ function App() {
                       <span className="text-[9px] text-green-600 bg-green-100 px-1 py-0.5 rounded">BETA</span>
                     </span>
                   </label>
+
+                  {/* Local Dev Only: Modal Toggle */}
+                  {import.meta.env.DEV && (
+                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs mt-1" title="Force run on Modal (Local Dev Only)">
+                      <input
+                        type="checkbox"
+                        checked={useModal}
+                        onChange={(e) => setUseModal(e.target.checked)}
+                        className="accent-purple-500"
+                        disabled={isGenerating}
+                      />
+                      <span className="flex items-center gap-1">
+                        ☁️ Run on Modal
+                        <span className="text-[9px] text-purple-600 bg-purple-100 px-1 py-0.5 rounded">DEV</span>
+                      </span>
+                    </label>
+                  )}
                 </div>
               </div>
 
@@ -962,6 +1035,17 @@ function App() {
                     >
                       <Square className="w-3 h-3 fill-current" />
                       Stop
+                    </button>
+                  )}
+
+                  {/* Local Dev Only: Force Reset Button */}
+                  {import.meta.env.DEV && (
+                    <button
+                      onClick={handleForceReset}
+                      className="w-full px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-colors flex items-center justify-center gap-1 mt-2"
+                      title="Directly resets DB status. Use if job is stuck."
+                    >
+                      ☠️ Force Kill Job (Dev)
                     </button>
                   )}
                 </div>
@@ -1065,7 +1149,7 @@ function App() {
         </div>
 
         {/* Feedback Button - Fixed position */}
-        <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
+        <FeedbackButton userEmail={user?.email} jobId={currentJobId || projectStatus?.latest_result?.job_id} />
       </div>
     </div>
   )

@@ -1521,7 +1521,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("Analyzing final assembly quality...")
         # Reduce complexity for large assemblies to fix 15s+ slowness
         try:
-            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
+            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False, include_cfd_metrics=True)
             
             if metrics:
                 self.log_message(f"[SURGICAL] Final assembly metrics: {metrics['total_elements']} elements, {metrics['total_nodes']} nodes")
@@ -1546,7 +1546,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                             self.log_message(f"  > Applied orientation fix to {len(vol_tags)} volumes")
                             
                             # Re-analyze to check if it worked
-                            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
+                            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False, include_cfd_metrics=True)
                             if metrics.get('gmsh_sicn') and metrics['gmsh_sicn']['min'] >= 0:
                                 self.log_message("  > [SUCCESS] Auto-repair fixed inverted elements!")
                                 # Update stored metrics

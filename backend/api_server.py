@@ -30,6 +30,7 @@ from routes.batch import batch_bp
 from storage import get_storage, S3Storage, LocalStorage
 from modal_client import modal_client
 from slicing import generate_slice_mesh, parse_msh_for_slicing
+from job_logger import generate_job_id, log_mesh_job, log_job_update
 import numpy as np
 try:
     import meshio
@@ -147,7 +148,7 @@ generation_lock = Lock()
 running_processes = {}
 
 
-def run_mesh_generation(app, project_id: str, quality_params: dict = None):
+def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_modal_override: bool = None):
     """Run mesh generation in background thread"""
     import time
     import tempfile
@@ -203,11 +204,17 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             if quality_params:
                 cmd.extend(['--quality-params', json.dumps(quality_params)])
 
+            # Generate Job ID
+            job_id = generate_job_id('MSH')
+            print(f"[MESH GEN] Assigned Job ID: {job_id}")
+
             logs = []
+            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Job Started: {job_id}")
             
             # Create initial mesh result to store logs during processing
             mesh_result = MeshResult(
                 project_id=project_id,
+                job_id=job_id,
                 strategy='processing',
                 logs=logs,
                 params=quality_params
@@ -215,12 +222,25 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             db.session.add(mesh_result)
             db.session.commit()
             result_id = mesh_result.id
+            
+            # Log job start to persistent log
+            log_mesh_job(
+                job_id=job_id,
+                user_email=user.email if user else 'unknown',
+                project_id=project_id,
+                filename=project.filename,
+                status='started',
+                quality_params=quality_params
+            )
 
             # TIMING: Track subprocess dispatch and acknowledgement latency
             dispatch_time = time.time()
             
             # --- MODAL COMPUTE INTEGRATION ---
-            if app.config.get('USE_MODAL_COMPUTE', False):
+            # Use override if provided, otherwise fall back to config default
+            should_use_modal = use_modal_override if use_modal_override is not None else app.config.get('USE_MODAL_COMPUTE', False)
+            
+            if should_use_modal:
                 print(f"[MESH GEN] Using MODAL compute for project {project_id}")
                 try:
                     # Get bucket and key from project.filepath
@@ -322,10 +342,32 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
 
                         logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Cloud meshing completed in {duration:.1f}s")
                         mesh_result.logs = logs
+                        
+                        # Log completion
+                        log_mesh_job(
+                            job_id=job_id,
+                            user_email=user.email if user else 'unknown',
+                            project_id=project_id,
+                            filename=project.filename,
+                            status='completed',
+                            strategy=result.get('strategy'),
+                            details={'processing_time': duration, 'node_count': result.get('total_nodes')}
+                        )
 
                     else:
                         project.status = 'failed'
-                        mesh_result.logs = [f"Modal error: {result.get('message')}"]
+                        error_msg = f"Modal error: {result.get('message')}"
+                        mesh_result.logs = [error_msg]
+                        
+                        # Log failure
+                        log_mesh_job(
+                            job_id=job_id,
+                            user_email=user.email if user else 'unknown',
+                            project_id=project_id,
+                            filename=project.filename,
+                            status='error',
+                            details={'error': error_msg}
+                        )
                     
                     db.session.commit()
                     print(f"[MESH GEN] Modal job completed for project {project_id}")
@@ -470,11 +512,32 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
                                     project.status = 'completed'
                                     project.last_accessed = datetime.utcnow()
                                     logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
+                                    
+                                    # Log completion
+                                    log_mesh_job(
+                                        job_id=job_id,
+                                        user_email=user.email if user else 'unknown',
+                                        project_id=project_id,
+                                        filename=project.filename,
+                                        status='completed',
+                                        strategy=mesh_result.strategy,
+                                        details={'processing_time': mesh_result.processing_time, 'node_count': mesh_result.node_count}
+                                    )
                                 else:
                                     error = result.get('error', 'Unknown error')
                                     project.status = 'error'
                                     project.error_message = error
                                     logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {error}")
+                                    
+                                    # Log failure
+                                    log_mesh_job(
+                                        job_id=job_id,
+                                        user_email=user.email if user else 'unknown',
+                                        project_id=project_id,
+                                        filename=project.filename,
+                                        status='error',
+                                        details={'error': error}
+                                    )
                                 mesh_result.logs = logs
                                 db.session.commit()
                             except json.JSONDecodeError:
@@ -510,6 +573,21 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None):
             project.error_message = str(e)
             db.session.commit()
             print(traceback.format_exc())
+            
+            # Log exception failure
+            # Note: We need to access local variables that might not be defined if error occurred early.
+            # Using try-except block safely.
+            try:
+                log_mesh_job(
+                    job_id=job_id,  # Assumes job_id was generated (it is at the top)
+                    user_email=user.email if user else 'unknown',
+                    project_id=project_id,
+                    filename=project.filename,
+                    status='error',
+                    details={'error': str(e), 'traceback': traceback.format_exc()}
+                )
+            except:
+                print("[MESH GEN] Could not log job failure (job_id might be missing)")
 
 
 def register_routes(app):
@@ -785,9 +863,13 @@ def register_routes(app):
         if project.status not in ["uploaded", "completed", "error"]:
             return jsonify({"error": f"Cannot generate mesh - status is {project.status}"}), 400
 
-        quality_params = request.json if request.is_json else None
+        data = request.json if request.is_json else {}
+        quality_params = data.get('quality_params')
+        # Check for Modal override (only allowed in development/staging or if enabled)
+        # We allow 'use_modal' to override if configured
+        use_modal_override = data.get('use_modal') 
 
-        thread = Thread(target=run_mesh_generation, args=(app, project_id, quality_params))
+        thread = Thread(target=run_mesh_generation, args=(app, project_id, quality_params, use_modal_override))
         thread.daemon = True
         thread.start()
 
@@ -859,16 +941,22 @@ def register_routes(app):
     @app.route('/api/projects/<project_id>/status', methods=['GET'])
     @jwt_required()
     def get_project_status(project_id: str):
-        current_user_id = int(get_jwt_identity())
-        project = Project.query.get(project_id)
+        try:
+            current_user_id = int(get_jwt_identity())
+            project = Project.query.get(project_id)
 
-        if not project:
-            return jsonify({"error": "Project not found"}), 404
+            if not project:
+                return jsonify({"error": "Project not found"}), 404
 
-        if project.user_id != current_user_id:
-            return jsonify({"error": "Access denied"}), 403
+            if project.user_id != current_user_id:
+                return jsonify({"error": "Access denied"}), 403
 
-        return jsonify(project.to_dict(include_results=True))
+            return jsonify(project.to_dict(include_results=True))
+        except Exception as e:
+            print(f"[STATUS ERROR] Failed to get status for {project_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
     @app.route('/api/projects/<project_id>/slice', methods=['POST'])
     @jwt_required()
@@ -1256,6 +1344,43 @@ def register_routes(app):
                     print(f"[DOWNLOAD] Fluent conversion error: {conv_err}")
                     return jsonify({"error": f"Fluent conversion failed: {str(conv_err)}"}), 500
             
+            elif requested_format == 'mechanical':
+                print(f"[DOWNLOAD] Converting to Mechanical format for project {project_id}")
+                temp_dir = tempfile.mkdtemp()
+                
+                # Get the source MSH file locally
+                if use_s3 and output_path.startswith('s3://'):
+                    local_msh = Path(temp_dir) / "source.msh"
+                    storage.download_to_local(output_path, str(local_msh))
+                else:
+                    local_msh = Path(output_path)
+                
+                # Convert to Mechanical format (.inp)
+                mech_output = Path(temp_dir) / f"{Path(project.filename).stem}_mechanical.inp"
+                
+                try:
+                    import meshio
+                    print("[DOWNLOAD] Loading mesh with meshio...")
+                    mesh = meshio.read(str(local_msh))
+                    print(f"[DOWNLOAD] Writing to Abaqus format: {mech_output}")
+                    mesh.write(str(mech_output), file_format="abaqus")
+                    
+                    if mech_output.exists():
+                        print(f"[DOWNLOAD] Mechanical conversion successful: {mech_output.stat().st_size} bytes")
+                        return send_file(
+                            str(mech_output),
+                            as_attachment=True,
+                            download_name=f"{Path(project.filename).stem}_mechanical.inp"
+                        )
+                    else:
+                        return jsonify({"error": "Mechanical conversion failed - no output file"}), 500
+                except ImportError:
+                    print("[DOWNLOAD] meshio not installed")
+                    return jsonify({"error": "Mechanical format export requires 'meshio' library"}), 501
+                except Exception as e:
+                    print(f"[DOWNLOAD] Mechanical conversion error: {e}")
+                    return jsonify({"error": f"Mechanical conversion failed: {str(e)}"}), 500
+            
             # Default: return original MSH format
             # For S3, return a presigned URL; for local, serve the file
             if use_s3 and output_path.startswith('s3://'):
@@ -1397,25 +1522,34 @@ def register_routes(app):
                     return jsonify({"error": "CAD file not found"}), 404
                 
                 try:
-                    # Prefer SSH tunnel, fallback to local GMSH
-                    backend = get_preferred_backend(strategy='auto')
-                    print(f"[PREVIEW] ⚡ Using backend: {backend.name}")
+                    # Detect if this is an MSH file (already meshed)
+                    file_ext = Path(project.filename).suffix.lower() if project.filename else ''
+                    is_msh_file = file_ext in ['.msh', '.mesh']
                     
-                    result = backend.generate_preview(filepath, timeout=120)
-                    elapsed = time.time() - start_time
-                    
-                    if "error" in result:
-                        print(f"[PREVIEW] ⚡ Backend error: {result['error']}")
-                        # Fallback to standard method on error
-                        result = parse_step_file_for_preview(filepath)
+                    if is_msh_file:
+                        # MSH files don't need CAD preview - parse directly
+                        print(f"[PREVIEW] ⚡ Detected MSH file, using parse_msh_file")
+                        result = parse_msh_file(filepath)
                     else:
-                        print(f"[PREVIEW] ⚡ Fast preview complete in {elapsed:.2f}s")
-                        # Add colors for frontend compatibility
-                        vertices = result.get("vertices", [])
-                        result["colors"] = [0.3, 0.6, 0.9] * (len(vertices) // 3)
-                        result["_fast_mode"] = True
-                        result["_backend"] = backend.name
-                        result["_elapsed"] = elapsed
+                        # Prefer SSH tunnel, fallback to local GMSH
+                        backend = get_preferred_backend(strategy='auto')
+                        print(f"[PREVIEW] ⚡ Using backend: {backend.name}")
+                        
+                        result = backend.generate_preview(filepath, timeout=120)
+                        elapsed = time.time() - start_time
+                        
+                        if "error" in result:
+                            print(f"[PREVIEW] ⚡ Backend error: {result['error']}")
+                            # Fallback to standard method on error
+                            result = parse_step_file_for_preview(filepath)
+                        else:
+                            print(f"[PREVIEW] ⚡ Fast preview complete in {elapsed:.2f}s")
+                            # Add colors for frontend compatibility
+                            vertices = result.get("vertices", [])
+                            result["colors"] = [0.3, 0.6, 0.9] * (len(vertices) // 3)
+                            result["_fast_mode"] = True
+                            result["_backend"] = backend.name
+                            result["_elapsed"] = elapsed
                     
                     return jsonify(result)
                 finally:
@@ -1445,18 +1579,34 @@ def register_routes(app):
             # 2. Fallback: Generate preview if not found (Double Hop - for legacy files)
             filepath = project.filepath
             
+            # Detect file type
+            file_ext = Path(project.filename).suffix.lower() if project.filename else ''
+            is_msh_file = file_ext in ['.msh', '.mesh']
+            
             # If S3, download to temp file for parsing
             if use_s3 and filepath.startswith('s3://'):
-                file_ext = Path(project.filename).suffix
-                local_temp = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+                file_ext_temp = Path(project.filename).suffix
+                local_temp = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext_temp)
                 storage.download_to_local(filepath, local_temp.name)
-                preview_data = parse_step_file_for_preview(local_temp.name)
+                
+                if is_msh_file:
+                    # MSH file: use mesh parser
+                    print(f"[PREVIEW] Detected MSH file, using parse_msh_file")
+                    preview_data = parse_msh_file(local_temp.name)
+                else:
+                    preview_data = parse_step_file_for_preview(local_temp.name)
                 # Clean up temp file
                 Path(local_temp.name).unlink(missing_ok=True)
             else:
                 if not Path(filepath).exists():
                     return jsonify({"error": "CAD file not found"}), 404
-                preview_data = parse_step_file_for_preview(filepath)
+                
+                if is_msh_file:
+                    # MSH file: use mesh parser
+                    print(f"[PREVIEW] Detected MSH file, using parse_msh_file")
+                    preview_data = parse_msh_file(filepath)
+                else:
+                    preview_data = parse_step_file_for_preview(filepath)
             
             return jsonify(preview_data)
         except Exception as e:
@@ -1950,6 +2100,71 @@ def parse_msh_file(msh_filepath: str):
                 print(f"[MESH PARSE] Loaded quality data from {data_file.name} for {len(per_element_quality)} elements")
         except Exception as e:
             print(f"[MESH PARSE] Failed to load quality data from {data_file}: {e}")
+    
+    # =====================================================================
+    # COMPUTE QUALITY ON-THE-FLY if no pre-computed data exists
+    # This enables quality coloring for uploaded meshes without companion JSON
+    # =====================================================================
+    if not per_element_quality:
+        try:
+            import gmsh
+            print("[MESH PARSE] No pre-computed quality data - computing with Gmsh...")
+            
+            # Initialize Gmsh and load the mesh
+            gmsh.initialize()
+            gmsh.option.setNumber("General.Terminal", 0)  # Suppress output
+            gmsh.merge(msh_filepath)
+            
+            # Get all 3D elements (tets, hexes)
+            vol_types, vol_tags, vol_nodes = gmsh.model.mesh.getElements(3)
+            
+            for etype, etags, enodes in zip(vol_types, vol_tags, vol_nodes):
+                if etype in [4, 11, 5, 12]:  # Tet4, Tet10, Hex8, Hex27
+                    try:
+                        sicn_vals = gmsh.model.mesh.getElementQualities(etags.tolist(), "minSICN")
+                        gamma_vals = gmsh.model.mesh.getElementQualities(etags.tolist(), "gamma")
+                        
+                        for i, tag in enumerate(etags):
+                            tag_int = int(tag)
+                            sicn = float(sicn_vals[i])
+                            gamma = float(gamma_vals[i])
+                            
+                            per_element_quality[tag_int] = sicn
+                            per_element_gamma[tag_int] = gamma
+                            per_element_skewness[tag_int] = max(0, 1.0 - sicn)
+                            per_element_aspect_ratio[tag_int] = 1.0 / sicn if sicn > 0.01 else 100.0
+                            per_element_min_angle[tag_int] = 60.0  # Default for tets
+                    except Exception as e:
+                        print(f"[MESH PARSE] Warning: Quality calc failed for element type {etype}: {e}")
+            
+            # Also get 2D surface elements (triangles, quads)
+            surf_types, surf_tags, surf_nodes = gmsh.model.mesh.getElements(2)
+            for etype, etags, enodes in zip(surf_types, surf_tags, surf_nodes):
+                if etype in [2, 9, 3, 16]:  # Tri3, Tri6, Quad4, Quad9
+                    try:
+                        sicn_vals = gmsh.model.mesh.getElementQualities(etags.tolist(), "minSICN")
+                        gamma_vals = gmsh.model.mesh.getElementQualities(etags.tolist(), "gamma")
+                        
+                        for i, tag in enumerate(etags):
+                            tag_int = int(tag)
+                            if tag_int not in per_element_quality:  # Don't overwrite 3D-inherited quality
+                                sicn = float(sicn_vals[i])
+                                per_element_quality[tag_int] = sicn
+                                per_element_gamma[tag_int] = float(gamma_vals[i])
+                                per_element_skewness[tag_int] = max(0, 1.0 - sicn)
+                                per_element_aspect_ratio[tag_int] = 1.0 / sicn if sicn > 0.01 else 100.0
+                                per_element_min_angle[tag_int] = 60.0
+                    except:
+                        pass
+            
+            gmsh.finalize()
+            print(f"[MESH PARSE] Computed quality for {len(per_element_quality)} elements on-the-fly")
+        except Exception as e:
+            print(f"[MESH PARSE] On-the-fly quality computation failed: {e}")
+            try:
+                gmsh.finalize()
+            except:
+                pass
 
     # Unified Vivid Color Scale used by all parsing paths
     def get_color(q, metric='sicn'):
@@ -2112,17 +2327,32 @@ def parse_msh_file(msh_filepath: str):
                     colors_aspect_ratio.extend(get_color(q_ar, 'aspect_ratio') * 3)
                     colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
                 
-                # Build quality summary
+                # Build quality summary with key names matching frontend expectations
                 quality_values = [per_element_quality.get(int(t)) for t in element_tags if per_element_quality.get(int(t)) is not None]
+                gamma_values = [per_element_gamma.get(int(t)) for t in element_tags if per_element_gamma.get(int(t)) is not None]
                 quality_summary = {}
                 histogram_data = []
                 if quality_values:
                     quality_summary = {
-                        "min": min(quality_values),
-                        "max": max(quality_values),
-                        "avg": sum(quality_values) / len(quality_values),
-                        "count": len(quality_values)
+                        # Frontend expects these key names
+                        "sicn_min": min(quality_values),
+                        "sicn_max": max(quality_values),
+                        "sicn_avg": sum(quality_values) / len(quality_values),
+                        "total_elements": len(per_element_quality),
+                        "element_count": len(per_element_quality),
+                        # Also add alternate names for compatibility
+                        "min_sicn": min(quality_values),
+                        "max_sicn": max(quality_values),
+                        "avg_sicn": sum(quality_values) / len(quality_values),
                     }
+                    # Add gamma if available
+                    if gamma_values:
+                        quality_summary["gamma_min"] = min(gamma_values)
+                        quality_summary["gamma_max"] = max(gamma_values)
+                        quality_summary["gamma_avg"] = sum(gamma_values) / len(gamma_values)
+                    # Count poor elements (SICN < 0.1)
+                    poor_count = len([q for q in quality_values if q < 0.1])
+                    quality_summary["poor_elements"] = poor_count
                 
                 if not vertices or not element_tags:
                     raise Exception("Meshio returned empty geometry (no boundary faces found)")
@@ -2466,6 +2696,46 @@ def parse_msh_file(msh_filepath: str):
 
 
 app = create_app()
+
+def cleanup_stuck_jobs():
+    """
+    On development server startup, reset any jobs stuck in 'processing' state.
+    This prevents 'zombie' jobs from looking like they are running forever.
+    """
+    with app.app_context():
+        # Only run in development or if explicitly requested
+        if app.config.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1':
+            try:
+                print("==================================================")
+                print("[DEV] Checking for stuck jobs on startup...")
+                stuck_projects = Project.query.filter_by(status='processing').all()
+                count = 0
+                for p in stuck_projects:
+                    # Check if it's actually old? For now, assume process death = job death
+                    print(f"[DEV] Resetting stuck project: {p.id} ({p.filename})")
+                    p.status = 'uploaded'
+                    p.error_message = 'Job killed on server restart'
+                    
+                    latest = p.mesh_results.order_by(MeshResult.created_at.desc()).first()
+                    if latest and latest.status in ['pending', 'processing', 'queued']:
+                        latest.status = 'failed'
+                        latest.error_message = 'Server restarted'
+                        latest.logs = (latest.logs or []) + [f"[{datetime.utcnow().isoformat()}] Server restart detected. Job killed."]
+                    count += 1
+                
+                if count > 0:
+                    db.session.commit()
+                    print(f"[DEV] Reset {count} stuck projects.")
+                else:
+                    print("[DEV] No stuck jobs found.")
+                print("==================================================")
+            except Exception as e:
+                print(f"[DEV] Warning: Job cleanup failed: {e}")
+
+# Run cleanup immediately on import/start
+cleanup_stuck_jobs()
+
+
 
 if __name__ == '__main__':
     print("=" * 70)

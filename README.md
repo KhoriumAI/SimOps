@@ -37,6 +37,13 @@ python main.py
 python scripts/run_mesher.py path/to/model.step
 ```
 
+### Local Cloud Development
+Run code on Modal.com directly from your local machine without pushing to git:
+```bash
+modal run scripts/run_local_modal.py --input-file path/to/model.step
+```
+See [docs/local_development.md](docs/local_development.md) for details.
+
 ## Requirements
 
 - Python 3.11+
@@ -52,11 +59,24 @@ python scripts/run_mesher.py path/to/model.step
 MeshPackageLean/
 ├── apps/
 │   ├── desktop/     # PyQt5 GUI application
-│   └── cli/         # Command-line tools
-├── core/            # Core meshing functionality
+│   ├── web/         # Web app entry point
+│   └── cli/         # Command-line tools (mesh_worker_subprocess.py)
+├── backend/         # Flask API Server (api_server.py, models.py, storage.py)
+├── core/            # Core meshing engine (mesh_generator.py, quality.py)
 ├── strategies/      # Meshing strategy implementations
-├── converters/      # Mesh format converters
-└── tools/           # Utilities and testing
+├── converters/      # Mesh format converters (Ansys Fluent, etc.)
+├── scripts/
+│   ├── debug/       # Utility and debug scripts (check_db.py, etc.)
+│   ├── infra/       # Deployment and infrastructure tools (deploy.ps1)
+│   └── ...          # Other run scripts (run_mesher.py, run_local_modal.py)
+├── config/
+│   └── aws/         # AWS CloudFront and service configurations
+├── metadata/
+│   └── deployment/  # Deployment logs and metadata
+├── samples/         # Sample CAD/mesh files for testing
+├── docs/            # Documentation and ADRs
+├── tools/           # Testing and visualization utilities
+└── web-frontend/    # React/Vite Web Interface
 ```
 
 ## Authors

@@ -635,10 +635,12 @@ export default function MeshViewer({
   loadingStartTime
 }) {
   // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
-  const showWireframe = meshData && !meshData.isPreview && status === 'completed'
-  // Derive quality coloring: ON for completed meshes with quality data
+  // Also allow for uploaded mesh files that aren't preview
+  const isCompletedOrMesh = status === 'completed' || (meshData && !meshData.isPreview && meshData.hasQualityData)
+  const showWireframe = meshData && !meshData.isPreview && isCompletedOrMesh
+  // Derive quality coloring: ON for completed meshes with quality data, OR for uploaded meshes with quality
   const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || (meshData?.qualityColors && Object.keys(meshData.qualityColors).length > 0) || meshData?.hasQualityData
-  const showQuality = status === 'completed' && hasQualityData
+  const showQuality = hasQualityData && (status === 'completed' || meshData?.hasQualityData)
 
   // Clear slice data when project changes to prevent ghosting
   useEffect(() => {
@@ -1317,8 +1319,8 @@ export default function MeshViewer({
                     Show Axes
                   </label>
 
-                  {/* Only show Histogram toggle if metrics are available (Mesh Completed) */}
-                  {isCompleted && qualityMetrics && (
+                  {/* Only show Histogram toggle if metrics are available (Mesh Completed or Uploaded with quality) */}
+                  {(isCompleted || hasQualityData) && qualityMetrics && (
                     <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors">
                       <input
                         type="checkbox"
@@ -1331,8 +1333,8 @@ export default function MeshViewer({
                   )}
                 </div>
 
-                {/* Quality Metrics Content (Only when mesh is completed) */}
-                {isCompleted && qualityMetrics ? (
+                {/* Quality Metrics Content (When mesh is completed or has quality data) */}
+                {(isCompleted || hasQualityData) && qualityMetrics ? (
                   <>
                     <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
 
@@ -1389,7 +1391,64 @@ export default function MeshViewer({
                         <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / (qualityMetrics.total_elements ?? qualityMetrics.element_count)) * 100).toFixed(1)}%)</span>
                       </div>
                     )}
+
+                    {/* CFD Quality Section - Always show if we have SICN metrics */}
+                    <div className="mt-3 pt-2 border-t border-gray-700">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-[9px] text-gray-500 uppercase flex items-center gap-1">
+                          ⚡ CFD Quality
+                        </div>
+                        {qualityMetrics.cfd?.cfd_ready !== undefined && (
+                          <span className={`text-[9px] font-medium ${qualityMetrics.cfd?.cfd_ready ? 'text-green-400' : 'text-yellow-400'}`}>
+                            {qualityMetrics.cfd?.cfd_ready ? 'Ready' : 'Review'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Non-orthogonality */}
+                      <div className="flex justify-between mb-1">
+                        <span className="text-gray-400">Non-Orthogonality:</span>
+                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max <= 65
+                            ? 'text-green-400'
+                            : qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max <= 70
+                              ? 'text-yellow-400'
+                              : 'text-red-400'
+                          }`}>
+                          {qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max?.toFixed(1) ?? 'N/A'}°
+                        </span>
+                      </div>
+
+                      {/* CFD Skewness */}
+                      <div className="flex justify-between mb-1">
+                        <span className="text-gray-400">CFD Skewness:</span>
+                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.skewness?.ok !== false
+                            ? 'text-green-400'
+                            : 'text-yellow-400'
+                          }`}>
+                          {qualityMetrics.cfd?.geometry_checks?.skewness?.max?.toFixed(3) ?? 'N/A'}
+                        </span>
+                      </div>
+
+                      {/* Face Pyramids */}
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Face Pyramids:</span>
+                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok !== false
+                            ? 'text-green-400'
+                            : 'text-red-400'
+                          }`}>
+                          {qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok !== undefined
+                            ? (qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok ? 'OK' : 'FAIL')
+                            : 'N/A'}
+                        </span>
+                      </div>
+
+                      {/* CFD Thresholds info */}
+                      <div className="mt-2 text-[8px] text-gray-600">
+                        65° warn, 70° fail (OpenFOAM)
+                      </div>
+                    </div>
                   </>
+
                 ) : (
                   /* Placeholder or info when no metrics available (e.g. CAD preview or processing) */
                   <div className="text-[9px] text-gray-500 italic text-center py-1">

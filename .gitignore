@@ -88,7 +88,9 @@ test_*.py
 reproduce_*.py
 fix_*.py
 *_working.py
+!verify_*.py
 !scripts/test_core_meshing.py
+!test_guardian_integration.py
 
 # Large Binary Artifacts (Manual Exclusions)
 *.cgns

@@ -1,7 +1,7 @@
-import json
-import time
+from pathlib import Path
+CONFIG_DIR = Path(__file__).parent.parent.parent / "config" / "aws"
 
-with open('dev_cf_config.json', 'r') as f:
+with open(CONFIG_DIR / 'dev_cf_config.json', 'r') as f:
     dev_data = json.load(f)
 
 config = dev_data['DistributionConfig']
@@ -33,5 +33,5 @@ config['CallerReference'] = f"staging-promo-{int(time.time())}"
 # 6. Remove ETag (not needed for creation) và other fields if necessary
 # config.pop('WebACLId', None) # Maybe keep it?
 
-with open('staging_cf_config.json', 'w') as f:
+with open(CONFIG_DIR / 'staging_cf_config.json', 'w') as f:
     json.dump(config, f, indent=4)

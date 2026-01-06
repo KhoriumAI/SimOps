@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 
 # Add backend to path
-sys.path.append(os.path.abspath("backend"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent / "backend"))
 
 from slicing import parse_msh_for_slicing, generate_slice_mesh
 

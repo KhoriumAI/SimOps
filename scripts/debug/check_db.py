@@ -3,8 +3,8 @@ import os
 import sys
 from pathlib import Path
 
-# Add the current directory to sys.path so we can import 'backend'
-sys.path.append(os.getcwd())
+# Add the root directory to sys.path so we can import 'backend'
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.api_server import create_app
 from backend.models import db, User

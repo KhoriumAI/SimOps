@@ -1,7 +1,10 @@
 import sys
 import os
+from pathlib import Path
 # Ensure the backend directory is in the path
-sys.path.append('/home/ec2-user/backend')
+ROOT_DIR = Path(__file__).parent.parent.parent
+sys.path.append(str(ROOT_DIR))
+sys.path.append(str(ROOT_DIR / 'backend'))
 
 try:
     from backend.config import get_database_url

@@ -1002,11 +1002,21 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
         gmsh.option.setNumber("Mesh.MinimumCircleNodes", 12)
         
-        # 1. First Attempt: Rapid Parallel HXT
+        # Get algorithm options (can be overridden by dispatch for specific strategies)
+        mesh_algo_2d = 6   # Default: Frontal-Delaunay 2D
+        mesh_algo_3d = 10  # Default: HXT (Parallel)
+        
+        if quality_params:
+            mesh_algo_2d = quality_params.get('_mesh_algorithm', mesh_algo_2d)
+            mesh_algo_3d = quality_params.get('_mesh_algorithm_3d', mesh_algo_3d)
+        
+        algo_names = {1: 'MeshAdapt', 4: 'Frontal', 5: 'Delaunay', 6: 'Frontal-Delaunay', 10: 'HXT'}
+        print(f"[MESH] Using Algorithm2D={mesh_algo_2d} ({algo_names.get(mesh_algo_2d, '?')}), Algorithm3D={mesh_algo_3d} ({algo_names.get(mesh_algo_3d, '?')})", flush=True)
+        
+        # 1. First Attempt: Selected algorithm
         try:
-            print("[HXT] Attempting fast parallel HXT (Algorithm 10)...", flush=True)
-            gmsh.option.setNumber("Mesh.Algorithm", 6)    # Frontal-Delaunay 2D
-            gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT (Parallel)
+            gmsh.option.setNumber("Mesh.Algorithm", mesh_algo_2d)
+            gmsh.option.setNumber("Mesh.Algorithm3D", mesh_algo_3d)
             gmsh.option.setNumber("Mesh.ElementOrder", element_order)
             gmsh.model.mesh.generate(3)
         except Exception as e:
@@ -1021,18 +1031,28 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
             gmsh.option.setNumber("Mesh.ElementOrder", element_order) # Ensure element order is set for MeshAdapt too
             gmsh.model.mesh.generate(3)
         
-        # Light optimization (fast)
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
-        gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
+        # Check if full optimization is requested (Tetrahedral HXT vs Fast Tet)
+        full_optimization = quality_params.get('_full_optimization', False) if quality_params else False
+        
+        if full_optimization:
+            # FULL OPTIMIZATION: Netgen + heavy smoothing (production quality)
+            print("[HXT] Running FULL optimization (Netgen + heavy smoothing)...", flush=True)
+            gmsh.option.setNumber("Mesh.Optimize", 1)
+            gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)  # Enable Netgen refinement
+            gmsh.option.setNumber("Mesh.Smoothing", 10)      # Heavy smoothing
+        else:
+            # FAST MODE: Light optimization only (speed priority)
+            print("[HXT] Running FAST optimization (no Netgen)...", flush=True)
+            gmsh.option.setNumber("Mesh.Optimize", 1)
+            gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
+            gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
         
         # NOTE: Mesh was already generated in the try/except block above (line ~1011)
         # We only need to run optimization, not regenerate
-        print("[HXT] Running light optimization...", flush=True)
         mesh_start = time.time()
         gmsh.model.mesh.optimize("", force=True)  # Run optimization pass only
         mesh_time = time.time() - mesh_start
-        print(f"[HXT] Optimization: {mesh_time:.2f}s", flush=True)
+        print(f"[HXT] Optimization: {mesh_time:.2f}s (full={full_optimization})", flush=True)
         
         # Count elements
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -1217,6 +1237,27 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         }
 
 
+
+# ==============================================================================
+# Module-level isolated generation function (required for multiprocessing on Windows)
+# ==============================================================================
+def run_isolated_generation(cad_path, out_path, cfg, result_queue):
+    """
+    Runs ExhaustiveMeshGenerator in an isolated subprocess.
+    This function MUST be at module level for Windows multiprocessing to pickle it.
+    """
+    try:
+        from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
+        gen = ExhaustiveMeshGenerator(cfg)
+        res = gen.generate_mesh(cad_path, out_path)
+        result_queue.put(res)
+    except Exception as e:
+        import traceback
+        print(f"[WATCHDOG] Generation subprocess fatal error: {e}")
+        print(traceback.format_exc())
+        result_queue.put(None)
+
+
 def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
     Generate mesh in subprocess
@@ -1283,12 +1324,75 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             print("[DEBUG] Polyhedral strategy detected - using Dual Graph pipeline")
             return generate_polyhedral_mesh(cad_file, output_dir, quality_params)
         
-        # Fast Tet Delaunay - single-pass HXT, skips exhaustive search
-        if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy or 'fast_tet' in mesh_strategy:
-            print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT pipeline")
+        # =====================================================================
+        # Tetrahedral (HXT) - Full HXT pipeline with optimization
+        # This is the "production quality" HXT that includes:
+        # - HXT parallel algorithm (Algorithm3D=10)
+        # - Full optimization pass
+        # - Optional Netgen refinement
+        # =====================================================================
+        if 'Tetrahedral (HXT)' in mesh_strategy or 'tetrahedral_hxt' in mesh_strategy or mesh_strategy == 'Tetrahedral HXT':
+            print("[DEBUG] Tetrahedral (HXT) strategy detected - using FULL HXT pipeline with optimization")
+            if quality_params is None:
+                quality_params = {}
+            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
+            quality_params['_mesh_algorithm_3d'] = 10  # HXT (Parallel)
+            quality_params['_full_optimization'] = True  # Enable full optimization
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
-        # Default: use exhaustive tet strategy
+        # Fast Tet Delaunay - single-pass HXT, skips optimization (speed priority)
+        if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy or 'fast_tet' in mesh_strategy:
+            print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT (NO optimization)")
+            if quality_params is None:
+                quality_params = {}
+            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
+            quality_params['_mesh_algorithm_3d'] = 10  # HXT (Parallel)
+            quality_params['_full_optimization'] = False  # Skip optimization for speed
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
+        
+        # =====================================================================
+        # SINGLE-STRATEGY TET OPTIONS (No parallel search, no exhaustive)
+        # Each maps to the CORRECT Gmsh algorithm
+        # =====================================================================
+        
+        # Tet Delaunay: Standard Delaunay (Algorithm3D=1)
+        if mesh_strategy in ['Tet Delaunay', 'Tet (Delaunay)', 'tet_delaunay']:
+            print("[DEBUG] Tet Delaunay (single-strategy) - Algorithm3D=1 (Delaunay)")
+            if quality_params is None:
+                quality_params = {}
+            quality_params['_mesh_algorithm'] = 5      # Delaunay 2D
+            quality_params['_mesh_algorithm_3d'] = 1   # Delaunay 3D
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
+        
+        # Tet Frontal: Frontal-Delaunay (Algorithm3D=4)
+        if mesh_strategy in ['Tet Frontal', 'Tet (Frontal)', 'tet_frontal']:
+            print("[DEBUG] Tet Frontal (single-strategy) - Algorithm3D=4 (Frontal)")
+            if quality_params is None:
+                quality_params = {}
+            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
+            quality_params['_mesh_algorithm_3d'] = 4   # Frontal 3D
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
+        
+        # Tet MeshAdapt: Classic MeshAdapt (Algorithm=1, Algorithm3D=1)
+        if mesh_strategy in ['Tet MeshAdapt', 'Tet (MeshAdapt)', 'tet_meshadapt']:
+            print("[DEBUG] Tet MeshAdapt (single-strategy) - Algorithm=1 (MeshAdapt)")
+            if quality_params is None:
+                quality_params = {}
+            quality_params['_mesh_algorithm'] = 1      # MeshAdapt 2D
+            quality_params['_mesh_algorithm_3d'] = 1   # Delaunay 3D
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
+
+        # =====================================================================
+        # DEFAULT: Use ExhaustiveMeshGenerator ONLY for 'Exhaustive' or empty strategy
+        # =====================================================================
+        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
+            # Unknown strategy - treat as Fast Tet (HXT) to avoid parallel overhead
+            print(f"[DEBUG] Unknown strategy '{mesh_strategy}' - defaulting to Fast Tet (HXT)")
+            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
+        
+        # Only reach here for explicitly 'Exhaustive' strategy
+        print("[DEBUG] Exhaustive strategy - using parallel ExhaustiveMeshGenerator")
+        
         # Initialize generator
         config = Config()
         
@@ -1386,18 +1490,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # --- DEFINITIVE SAFETY: Isolated Generation Wrapper ---
         # We run the entire ExhaustiveMeshGenerator in a SEPARATE process.
         # This catches main-process SIGSEGV/SIGABRT that would otherwise kill the CLI worker.
-        
-        def run_isolated_generation(cad_path, out_path, cfg, result_queue):
-            try:
-                from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
-                gen = ExhaustiveMeshGenerator(cfg)
-                res = gen.generate_mesh(cad_path, out_path)
-                result_queue.put(res)
-            except Exception as e:
-                import traceback
-                print(f"[WATCHDOG] Generation subprocess fatal error: {e}")
-                print(traceback.format_exc())
-                result_queue.put(None)
+        # NOTE: run_isolated_generation is defined at module level to allow pickling on Windows.
 
         result_queue = multiprocessing.Queue()
         p = multiprocessing.Process(target=run_isolated_generation, args=(cad_file, output_file, config, result_queue))

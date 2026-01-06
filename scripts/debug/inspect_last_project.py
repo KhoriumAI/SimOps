@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 
 # Add backend to path
-sys.path.append(os.path.abspath("backend"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent / "backend"))
 
 from api_server import create_app
 from models import db, Project
