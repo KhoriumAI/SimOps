@@ -137,6 +137,11 @@ class BaseMeshGenerator(ABC):
         self.gmsh_initialized = False
         self.model_loaded = False
 
+        # Temp directory for intermediate files
+        project_root = Path(__file__).parent.parent
+        self.temp_dir = str(project_root / "temp_meshes")
+        os.makedirs(self.temp_dir, exist_ok=True)
+
     def log_message(self, message: str, level: str = "INFO"):
         """Print message with timestamp (millisecond precision)"""
         import datetime
@@ -195,10 +200,13 @@ class BaseMeshGenerator(ABC):
                     active_input_file = g_result.output_path
                     
                 elif g_result.status == GeometryStatus.TERMINAL:
-                    self.log_message("[Guardian] (STOP) Geometry is TERMINAL (Unrepairable).")
+                    # CHANGED: Warn but continue instead of blocking.
+                    # User requested this because the resulting mesh often ends up watertight anyway.
+                    self.log_message("[Guardian] (WARNING) Geometry is flagged as TERMINAL (Unrepairable).")
                     self.log_message(f"           See report: {g_result.report_path}")
-                    result.message = "Geometry Guardian rejected file (Unrepairable)"
-                    return result
+                    self.log_message("[Guardian] Continuing with original file (mesh may still succeed)...")
+                    # Allow meshing to proceed using the original file
+                    active_input_file = input_file
 
             except Exception as e:
                 # FAIL OPEN: Never let the safety system crash the production line

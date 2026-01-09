@@ -44,18 +44,7 @@ function App() {
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
 
-  // DEBUG: Trace meshData changes
-  useEffect(() => {
-    if (meshData) {
-      console.log('[App] meshData updated:', {
-        vertices: meshData.vertices?.length,
-        isPreview: meshData.isPreview,
-        colors: meshData.colors?.length
-      })
-    } else {
-      console.log('[App] meshData set to NULL')
-    }
-  }, [meshData])
+
 
   const [isPolling, setIsPolling] = useState(false)
   const [isExportingAnsys, setIsExportingAnsys] = useState(false)
@@ -80,12 +69,9 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
-  // Fast Mode - experimental optimized preview (uses SSH compute, skips retries)
-  // TODO: Remove this after testing
-  const [fastMode, setFastMode] = useState(true)  // Default ON for testing
+  // Fast Mode - optimized preview generation
+  const [fastMode, setFastMode] = useState(true)
 
-  // Local Dev Override: Force Modal compute
-  const [useModal, setUseModal] = useState(false)
 
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
@@ -132,26 +118,7 @@ function App() {
     fetchStrategies()
   }, [])
 
-  const handleForceReset = async () => {
-    if (!currentProject) return
-    try {
-      const resp = await fetch(`${API_BASE}/projects/${currentProject}/force-reset`, {
-        method: 'POST',
-      })
-      if (resp.ok) {
-        // Force refresh status
-        setProjectStatus(prev => ({ ...prev, status: 'uploaded' }))
-        setIsGenerating(false)
-        setLogs(prev => [...prev, `[SYSTEM] Force reset triggered manually.`])
-      } else {
-        const err = await resp.json()
-        alert(`Failed to force reset: ${err.error}`)
-      }
-    } catch (err) {
-      console.error(err)
-      alert('Failed to contact server for force reset')
-    }
-  }
+
 
   // Poll project status
   useEffect(() => {
@@ -329,11 +296,6 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
       if (response.ok) {
         const data = await response.json()
-        console.log('[App] fetchMeshData success:', {
-          projectId,
-          vertices: data.vertices?.length,
-          resultId: data.result_id || 'N/A'
-        })
         setMeshData(data)
       }
     } catch (error) {
@@ -495,16 +457,16 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${currentProject}/generate`, {
         method: 'POST',
         body: {
-          quality_preset: qualityPreset,
-          target_elements: null,
-          max_size_mm: maxElementSize,
-          min_size_mm: minElementSize,
-          element_order: parseInt(elementOrder),
-          ansys_mode: ansysMode,
-          mesh_strategy: meshStrategy,
-          mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive,
-          use_modal: useModal // Pass local override override
+          quality_params: {
+            quality_preset: qualityPreset,
+            target_elements: null,
+            max_size_mm: maxElementSize,
+            min_size_mm: minElementSize,
+            element_order: parseInt(elementOrder),
+            ansys_mode: ansysMode,
+            mesh_strategy: meshStrategy,
+            curvature_adaptive: curvatureAdaptive,
+          }
         },
         signal: controller.signal
       })
@@ -788,7 +750,6 @@ function App() {
           {mode === 'batch' ? (
             <BatchMode
               onBatchComplete={(batch) => {
-                console.log('Batch completed:', batch)
                 setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
               }}
               onLog={(msg) => setLogs(prev => [...prev, msg])}
@@ -971,22 +932,6 @@ function App() {
                     </span>
                   </label>
 
-                  {/* Local Dev Only: Modal Toggle */}
-                  {import.meta.env.DEV && (
-                    <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs mt-1" title="Force run on Modal (Local Dev Only)">
-                      <input
-                        type="checkbox"
-                        checked={useModal}
-                        onChange={(e) => setUseModal(e.target.checked)}
-                        className="accent-purple-500"
-                        disabled={isGenerating}
-                      />
-                      <span className="flex items-center gap-1">
-                        ☁️ Run on Modal
-                        <span className="text-[9px] text-purple-600 bg-purple-100 px-1 py-0.5 rounded">DEV</span>
-                      </span>
-                    </label>
-                  )}
                 </div>
               </div>
 
@@ -1007,8 +952,8 @@ function App() {
                       <option value="sicn">SICN (Ideal=1)</option>
                       <option value="gamma">Gamma (Ideal=1)</option>
                       <option value="skewness">Skewness</option>
-                      <option value="aspectRatio">Aspect Ratio</option>
-                      <option value="minAngle">Minimum Angle</option>
+                      <option value="aspect_ratio">Aspect Ratio</option>
+                      <option value="min_angle">Minimum Angle</option>
                     </select>
                   </div>
                 </div>
@@ -1038,16 +983,7 @@ function App() {
                     </button>
                   )}
 
-                  {/* Local Dev Only: Force Reset Button */}
-                  {import.meta.env.DEV && (
-                    <button
-                      onClick={handleForceReset}
-                      className="w-full px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-colors flex items-center justify-center gap-1 mt-2"
-                      title="Directly resets DB status. Use if job is stuck."
-                    >
-                      ☠️ Force Kill Job (Dev)
-                    </button>
-                  )}
+
                 </div>
               )}
 

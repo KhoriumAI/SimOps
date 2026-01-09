@@ -161,3 +161,7 @@ To maintain a clean and searchable history, commit titles must follow this struc
 - `0e733b26 - fix/mesh_size_hardcoded`
 - `a1b2c3d4 - feat/add_hexa_mesher`
 - `e5f6g7h8 - debug/trace_vtk_errors`
+
+### 6. Update Changelog
+
+When adding a new feature, documenting a bug fix, or making an architectural change, you must update `CHANGELOG.md`. Ensure your entry is standardized with the current format (categorized by **Added**, **Changed**, **Fixed**, etc.) and properly dated.

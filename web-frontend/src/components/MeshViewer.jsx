@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save, Lightbulb, Hexagon } from 'lucide-react'
 import { API_BASE } from '../config'
 import QualityHistogram from './QualityHistogram'
+import QualityReport from './QualityReport'
 
 /**
  * Compute smooth normals with angle-threshold-based splitting.
@@ -101,14 +102,7 @@ function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30)
 }
 
 function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
-  // Debug log to verify data reception - ensure this runs
-  useEffect(() => {
-    if (sliceData && sliceData.vertices) {
-      console.log(`[SliceMesh] Data Loaded: ${sliceData.vertices.length / 3} vertices. Displaying...`);
-    } else if (sliceData) {
-      console.log("[SliceMesh] sliceData present but empty/invalid:", sliceData);
-    }
-  }, [sliceData]);
+
 
   const geometry = useMemo(() => {
     if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
@@ -769,7 +763,6 @@ export default function MeshViewer({
   const adjacency = useMemo(() => {
     if (!meshData || !meshData.vertices || meshData.vertices.length === 0) return null
 
-    console.log("[FLOOD-FILL] Building adjacency map...")
     const startTime = performance.now()
     const vertices = meshData.vertices
     const numFaces = vertices.length / 9
@@ -971,6 +964,63 @@ export default function MeshViewer({
     { name: 'Gold', color: '#fbbf24' },
     { name: 'Steel', color: '#94a3b8' },
   ]
+
+  // Adaptive Grid Logic
+  const { gridSize, gridDivisions, gridCellSize } = useMemo(() => {
+    // Helper to calculate parameters
+    const calc = (maxDim) => {
+      if (!isFinite(maxDim) || maxDim <= 0) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
+
+      // Target grid to be somewhat larger than object
+      const targetSpan = maxDim * 2.5
+      // Approximate number of subdivisions (around 20 is good for visual context)
+      const targetStep = targetSpan / 20
+
+      // Find "nice" step size: 1, 2, 5, 10, 20...
+      const magnitude = Math.pow(10, Math.floor(Math.log10(targetStep)))
+      const normalized = targetStep / magnitude
+
+      let niceStep
+      if (normalized < 1.5) niceStep = 1 * magnitude
+      else if (normalized < 3.5) niceStep = 2 * magnitude
+      else if (normalized < 7.5) niceStep = 5 * magnitude
+      else niceStep = 10 * magnitude
+
+      // Calculate divisions
+      let div = Math.ceil(targetSpan / niceStep)
+      if (div % 2 !== 0) div += 1 // Ensure even number of divisions so 0 is center
+      if (div < 10) div = 10 // Minimum divisions
+
+      return { gridSize: div * niceStep, gridDivisions: div, gridCellSize: niceStep }
+    }
+
+    // 1. Try geometryInfo first (fastest)
+    if (geometryInfo && geometryInfo.bbox) {
+      const [x, y, z] = geometryInfo.bbox
+      // bbox is [x_len, y_len, z_len] usually in this app context, assume dimensions
+      return calc(Math.max(x, y, z))
+    }
+
+    // 2. Fallback to calculating from vertices
+    // If we have geometryInfo but no bbox, or just meshData
+    if (!meshData || !meshData.vertices || meshData.vertices.length === 0) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
+
+    const v = meshData.vertices
+    let minX = Infinity, minY = Infinity, minZ = Infinity
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+
+    // Check all vertices for bounds
+    for (let i = 0; i < v.length; i += 3) {
+      const x = v[i], y = v[i + 1], z = v[i + 2]
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+
+    if (!isFinite(maxX)) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
+
+    return calc(Math.max(maxX - minX, maxY - minY, maxZ - minZ))
+  }, [meshData, geometryInfo])
 
   return (
     <div className="w-full h-full relative bg-gradient-to-br from-gray-200 to-gray-300">
@@ -1335,119 +1385,7 @@ export default function MeshViewer({
 
                 {/* Quality Metrics Content (When mesh is completed or has quality data) */}
                 {(isCompleted || hasQualityData) && qualityMetrics ? (
-                  <>
-                    <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
-
-                    {/* SICN */}
-                    <div className="mb-2 pb-2 border-b border-gray-700">
-                      <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
-                      <div className="grid grid-cols-3 gap-1 text-center">
-                        <div>
-                          <div className="text-[8px] text-gray-500">Min</div>
-                          <div className={(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn) < 0.1 ? 'text-red-400 font-medium' : 'text-green-400 font-medium'}>
-                            {(qualityMetrics.sicn_min ?? qualityMetrics.min_sicn)?.toFixed(3) || 'N/A'}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[8px] text-gray-500">Avg</div>
-                          <div className="text-blue-400 font-medium">{(qualityMetrics.sicn_avg ?? qualityMetrics.avg_sicn)?.toFixed(3) || 'N/A'}</div>
-                        </div>
-                        <div>
-                          <div className="text-[8px] text-gray-500">Max</div>
-                          <div className="text-green-400 font-medium">{(qualityMetrics.sicn_max ?? qualityMetrics.max_sicn)?.toFixed(3) || 'N/A'}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Gamma */}
-                    {((qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined)) && (
-                      <div className="mb-2 pb-2 border-b border-gray-700">
-                        <div className="text-[9px] text-gray-500 uppercase mb-1">Gamma (Radius Ratio)</div>
-                        <div className="grid grid-cols-3 gap-1 text-center">
-                          <div>
-                            <div className="text-[8px] text-gray-500">Min</div>
-                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_min?.toFixed(3) || 'N/A'}</div>
-                          </div>
-                          <div>
-                            <div className="text-[8px] text-gray-500">Avg</div>
-                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_avg?.toFixed(3) || 'N/A'}</div>
-                          </div>
-                          <div>
-                            <div className="text-[8px] text-gray-500">Max</div>
-                            <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_max?.toFixed(3) || 'N/A'}</div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Element Count */}
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Elements:</span>
-                      <span className="font-medium">{(qualityMetrics.total_elements ?? qualityMetrics.element_count)?.toLocaleString() || 'N/A'}</span>
-                    </div>
-                    {qualityMetrics.poor_elements > 0 && (
-                      <div className="flex justify-between text-yellow-400 mt-0.5">
-                        <span>Poor (&lt;0.1):</span>
-                        <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / (qualityMetrics.total_elements ?? qualityMetrics.element_count)) * 100).toFixed(1)}%)</span>
-                      </div>
-                    )}
-
-                    {/* CFD Quality Section - Always show if we have SICN metrics */}
-                    <div className="mt-3 pt-2 border-t border-gray-700">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="text-[9px] text-gray-500 uppercase flex items-center gap-1">
-                          ⚡ CFD Quality
-                        </div>
-                        {qualityMetrics.cfd?.cfd_ready !== undefined && (
-                          <span className={`text-[9px] font-medium ${qualityMetrics.cfd?.cfd_ready ? 'text-green-400' : 'text-yellow-400'}`}>
-                            {qualityMetrics.cfd?.cfd_ready ? 'Ready' : 'Review'}
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Non-orthogonality */}
-                      <div className="flex justify-between mb-1">
-                        <span className="text-gray-400">Non-Orthogonality:</span>
-                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max <= 65
-                            ? 'text-green-400'
-                            : qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max <= 70
-                              ? 'text-yellow-400'
-                              : 'text-red-400'
-                          }`}>
-                          {qualityMetrics.cfd?.geometry_checks?.non_orthogonality?.max?.toFixed(1) ?? 'N/A'}°
-                        </span>
-                      </div>
-
-                      {/* CFD Skewness */}
-                      <div className="flex justify-between mb-1">
-                        <span className="text-gray-400">CFD Skewness:</span>
-                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.skewness?.ok !== false
-                            ? 'text-green-400'
-                            : 'text-yellow-400'
-                          }`}>
-                          {qualityMetrics.cfd?.geometry_checks?.skewness?.max?.toFixed(3) ?? 'N/A'}
-                        </span>
-                      </div>
-
-                      {/* Face Pyramids */}
-                      <div className="flex justify-between">
-                        <span className="text-gray-400">Face Pyramids:</span>
-                        <span className={`font-medium ${qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok !== false
-                            ? 'text-green-400'
-                            : 'text-red-400'
-                          }`}>
-                          {qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok !== undefined
-                            ? (qualityMetrics.cfd?.geometry_checks?.face_pyramids?.ok ? 'OK' : 'FAIL')
-                            : 'N/A'}
-                        </span>
-                      </div>
-
-                      {/* CFD Thresholds info */}
-                      <div className="mt-2 text-[8px] text-gray-600">
-                        65° warn, 70° fail (OpenFOAM)
-                      </div>
-                    </div>
-                  </>
+                  <QualityReport metrics={qualityMetrics} />
 
                 ) : (
                   /* Placeholder or info when no metrics available (e.g. CAD preview or processing) */
@@ -1588,6 +1526,13 @@ export default function MeshViewer({
             </div>
           )}
 
+          {/* Grid Size Indicator */}
+          {meshData && (
+            <div className="absolute bottom-1 right-2 z-0 text-[10px] text-gray-500 font-mono pointer-events-none select-none opacity-70">
+              Grid: {gridCellSize >= 1 ? gridCellSize : gridCellSize.toFixed(2)} mm
+            </div>
+          )}
+
           {/* Selection Mode Indicator */}
 
 
@@ -1636,7 +1581,7 @@ export default function MeshViewer({
               edgeThreshold={edgeThreshold}
             />
 
-            <gridHelper args={[200, 20, '#aaaaaa', '#dddddd']} />
+            <gridHelper args={[gridSize, gridDivisions, '#aaaaaa', '#dddddd']} />
             <AxesIndicator visible={showAxes} />
           </Canvas>
 

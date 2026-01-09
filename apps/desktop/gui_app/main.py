@@ -755,16 +755,6 @@ class ModernMeshGenGUI(QMainWindow):
         
         quality_layout.addLayout(worker_sublayout)
 
-        # Run on Modal Checkbox (New)
-        self.use_modal = QCheckBox("Run on Modal (Remote)")
-        self.use_modal.setStyleSheet("color: #6610f2; font-weight: bold; font-size: 11px;")
-        self.use_modal.setToolTip(
-            "Execute the meshing job on Modal.com using high-performance cloud GPUs.\n"
-            "Requires local 'modal' setup and AWS configuration."
-        )
-        self.use_modal.setChecked(False)
-        quality_layout.addWidget(self.use_modal)
-
 
         quality_group.setLayout(quality_layout)
         layout.addWidget(quality_group)
@@ -2239,11 +2229,7 @@ class ModernMeshGenGUI(QMainWindow):
             "defer_quality": self.defer_quality.isChecked() if hasattr(self, 'defer_quality') else False,
             "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
             "verbose_preview": self.verbose_preview.isChecked() if hasattr(self, 'verbose_preview') else False,  # Logging toggle
-            "use_modal": self.use_modal.isChecked() if hasattr(self, 'use_modal') else False,  # Run on Modal flag
         }
-
-        if quality_params['use_modal']:
-            self.add_log("[INFO] Modal execution selected - job will run remotely on Modal.com")
 
 
         # Check for pre-generated high-quality STL from Stage 3 background task

@@ -18,8 +18,8 @@ export default function QualityReport({ metrics }) {
   const gammaMax = metrics.gamma_max || metrics['Gamma (Gmsh)']?.max
   const gammaAvg = metrics.gamma_avg || metrics['Gamma (Gmsh)']?.avg
 
-  const skewnessMax = metrics.max_skewness || metrics['Skewness (converted)']?.max
-  const aspectRatioMax = metrics.max_aspect_ratio || metrics['Aspect Ratio (converted)']?.max
+  const skewnessMax = metrics.skewness_max || metrics.max_skewness || metrics['Skewness (converted)']?.max
+  const aspectRatioMax = metrics.aspect_ratio_max || metrics.max_aspect_ratio || metrics['Aspect Ratio (converted)']?.max
 
   const { grade, color } = getQualityGrade(sicnMin, gammaMin)
 
@@ -45,6 +45,19 @@ export default function QualityReport({ metrics }) {
       <div className="flex items-center justify-between">
         <h3 className="font-semibold text-sm uppercase text-gray-400">Quality Report</h3>
         <span className={`text-xs font-bold ${color}`}>{grade}</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div className="bg-gray-800/50 p-2 rounded">
+          <div className="text-[10px] text-gray-500 uppercase">Elements</div>
+          <div className="text-sm font-bold text-white">{(metrics.total_elements || metrics.element_count)?.toLocaleString() || 'N/A'}</div>
+        </div>
+        <div className="bg-gray-800/50 p-2 rounded">
+          <div className="text-[10px] text-gray-500 uppercase">Poor (&lt;0.1)</div>
+          <div className={`text-sm font-bold ${metrics.poor_elements > 0 ? 'text-red-400' : 'text-green-400'}`}>
+            {metrics.poor_elements || 0}
+          </div>
+        </div>
       </div>
 
       {/* FEA Metrics */}

@@ -1,13 +1,11 @@
 import os
 import tempfile
 import logging
+import gmsh
 
 # Lazy imports to prevent worker startup lag
-try:
-    import vtk
-    import gmsh
-except ImportError:
-    pass
+# VTK will be imported inside methods only when needed
+
 
 class TopologyInspector:
     """
@@ -31,19 +29,10 @@ class TopologyInspector:
         """
         if not step_path or not isinstance(step_path, str) or not os.path.exists(step_path):
                 return {'is_manifold': False, 'details': 'File not found or invalid path'}
-        # 1. Silence VTK Logs
-        try:
-            vtk.vtkLogger.SetStderrVerbosity(vtk.vtkLogger.VERBOSITY_OFF)
-        except:
-            pass
-            
-        log_capture = vtk.vtkStringOutputWindow()
-        vtk.vtkOutputWindow.SetInstance(log_capture)
 
         tmp_stl = None
         try:
-            # 2. GMSH Conversion (STEP -> STL)
-            # Use a fresh instance if possible, or careful state management
+            # 1. GMSH Conversion (STEP -> STL) - Common for both Trimesh and VTK
             if not gmsh.isInitialized():
                 gmsh.initialize()
             
@@ -65,8 +54,7 @@ class TopologyInspector:
             os.close(fd)
             gmsh.write(tmp_stl)
             
-            # CRITICAL FIX: Do volume/mass check BEFORE removing model
-            # This was the bug - we were checking volumes on an empty model
+            # Volume/Mass check using Gmsh
             vols = gmsh.model.getEntities(3)
             total_vol = 0.0
             if vols:
@@ -76,54 +64,35 @@ class TopologyInspector:
                     except:
                         pass
             
-            # Detailed logging for diagnostics
             self.logger.info(f"[Guardian] Geometry scan: {len(vols)} volumes, total_mass={total_vol:.6f}")
-            
-            # Now we can safely remove the model
             gmsh.model.remove() 
 
-            # 3. VTK Pipeline
-            reader = vtk.vtkSTLReader()
-            reader.SetFileName(tmp_stl)
-            reader.Update()
-
-            cleaner = vtk.vtkCleanPolyData()
-            cleaner.SetInputData(reader.GetOutput())
-            cleaner.Update()
-            poly_data = cleaner.GetOutput()
-            
-            cell_count = poly_data.GetNumberOfCells()
-            self.logger.info(f"[Guardian] VTK mesh: {cell_count} cells")
-            
-            # Conditional Subdivision (The "Stress Test")
-            if cell_count < self.SKIP_CHECK_THRESHOLD:
-                sub = vtk.vtkLinearSubdivisionFilter()
-                sub.SetInputData(poly_data)
-                sub.SetNumberOfSubdivisions(self.SUBDIVISION_LEVEL)
-                sub.Update() # This triggers errors for bad geometry
-
-            # Normal Generation (catches inverted faces)
-            normals = vtk.vtkPolyDataNormals()
-            normals.SetInputData(poly_data)
-            normals.SetFeatureAngle(self.FEATURE_ANGLE)
-            normals.Update()
-
-            # 4. Log Analysis
-            errors = log_capture.GetOutput()
-            if "Subdivision failed" in errors or "non-manifold" in errors:
-                return {'is_manifold': False, 'details': 'Non-manifold geometry detected'}
-            
-            if "Error" in errors or "ERR" in errors:
-                return {'is_manifold': False, 'details': f'VTK Pipeline Error: {errors[:50]}...'}
-
-            # 5. Volume Check (use pre-computed values from Gmsh)
+            # Volume Check
             if not vols:
                 return {'is_manifold': False, 'details': 'No 3D volumes detected'}
-            
             if total_vol <= 1e-9:
                 return {'is_manifold': False, 'details': 'Zero volume detected (Open Shell/Collapsed)'}
 
-            return {'is_manifold': True, 'details': 'Passed strict topology check'}
+            # 2. Optimized Inspection with Trimesh (Fast, no VTK scan)
+            try:
+                import trimesh
+                mesh = trimesh.load(tmp_stl, force='mesh', process=False)
+                
+                if not mesh.is_watertight:
+                    return {'is_manifold': False, 'details': 'Non-watertight geometry (holes/gaps detected)'}
+                
+                # Basic winding check (optional, but good)
+                try: 
+                    if not mesh.is_winding_consistent:
+                        # Warning only, as it might be fixable
+                        self.logger.warning("[Guardian] Inconsistent winding detected")
+                except: pass
+                
+                return {'is_manifold': True, 'details': 'Passed strict topology check (Trimesh)'}
+                
+            except ImportError:
+                # Fallback to VTK if Trimesh is missing
+                return self._scan_with_vtk(tmp_stl, total_vol)
 
         except Exception as e:
             return {'is_manifold': False, 'details': str(e)}
@@ -132,3 +101,41 @@ class TopologyInspector:
             if tmp_stl and os.path.exists(tmp_stl):
                 try: os.remove(tmp_stl)
                 except: pass
+
+    def _scan_with_vtk(self, stl_path: str, total_vol: float) -> dict:
+        """Legacy VTK-based scanning (slower startup)"""
+        try:
+            import vtk
+            vtk.vtkLogger.SetStderrVerbosity(vtk.vtkLogger.VERBOSITY_OFF)
+            
+            log_capture = vtk.vtkStringOutputWindow()
+            vtk.vtkOutputWindow.SetInstance(log_capture)
+            
+            reader = vtk.vtkSTLReader()
+            reader.SetFileName(stl_path)
+            reader.Update()
+
+            cleaner = vtk.vtkCleanPolyData()
+            cleaner.SetInputData(reader.GetOutput())
+            cleaner.Update()
+            poly_data = cleaner.GetOutput()
+            
+            cell_count = poly_data.GetNumberOfCells()
+            
+            # Conditional Subdivision
+            if cell_count < self.SKIP_CHECK_THRESHOLD:
+                sub = vtk.vtkLinearSubdivisionFilter()
+                sub.SetInputData(poly_data)
+                sub.SetNumberOfSubdivisions(self.SUBDIVISION_LEVEL)
+                sub.Update()
+
+            errors = log_capture.GetOutput()
+            if "Subdivision failed" in errors or "non-manifold" in errors:
+                return {'is_manifold': False, 'details': 'Non-manifold geometry detected (VTK)'}
+            
+            return {'is_manifold': True, 'details': 'Passed strict topology check (VTK)'}
+            
+        except ImportError:
+            return {'is_manifold': False, 'details': 'Inspection failed: Neither Trimesh nor VTK available'}
+        except Exception as e:
+            return {'is_manifold': False, 'details': f'VTK error: {e}'}

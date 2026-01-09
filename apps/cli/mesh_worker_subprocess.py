@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict
 import time
 import multiprocessing
+import gmsh
 
 # Add project root to path FIRST
 # From apps/cli/, go up 2 levels to MeshPackageLean/
@@ -37,15 +38,8 @@ def vprint(*args, **kwargs):
 # ==============================================================================
 # HEAVY IMPORTS - Moved to lazy loading in generate_mesh()
 # ==============================================================================
-vprint("[INIT] Loading NumPy...", flush=True)
-import numpy as np
-
-vprint("[INIT] Loading Gmsh...", flush=True)
-import gmsh
-
-import tempfile
-# Strategies and GPU mesher are now imported lazily in generate_mesh()
-# ==============================================================================
+vprint("[INIT] Loading CFD Analyzer...", flush=True)
+from core.cfd_quality import CFDQualityAnalyzer
 
 vprint("[INIT] Ready.", flush=True)
 # ==============================================================================
@@ -604,6 +598,17 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         gmsh.finalize()
         
+        # Calculate CFD quality metrics
+        try:
+            from core.cfd_quality import CFDQualityAnalyzer
+            print("[GPU Mesher] Running CFD quality analysis...", flush=True)
+            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
+            quality_metrics['cfd'] = cfd_report.to_dict()
+            print(f"[GPU Mesher] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
+        except Exception as cfd_err:
+            print(f"[GPU Mesher] Warning: CFD quality analysis failed: {cfd_err}")
+
         print(f"[GPU Mesher] SUCCESS! Mesh saved to: {output_file}")
         
         return {
@@ -831,6 +836,18 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         gmsh.finalize()
         
+        # Calculate CFD quality metrics
+        cfd_data = None
+        try:
+            from core.cfd_quality import CFDQualityAnalyzer
+            print("[HEX-DOM] Running CFD quality analysis...", flush=True)
+            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
+            cfd_data = cfd_report.to_dict()
+            print(f"[HEX-DOM] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
+        except Exception as cfd_err:
+            print(f"[HEX-DOM] Warning: CFD quality analysis failed: {cfd_err}")
+
         print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)")
         
         return {
@@ -854,7 +871,8 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'quality_metrics': {
                 'min_quality': min(per_element_quality) if per_element_quality else 0,
                 'max_quality': max(per_element_quality) if per_element_quality else 1,
-                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0
+                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0,
+                'cfd': cfd_data
             }
         }
         
@@ -1058,11 +1076,14 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
         num_nodes = len(node_tags)
         
-        # Count 3D elements (type 4 = tet4, type 11 = tet10)
-        elem_types, elem_tags, _ = gmsh.model.mesh.getElements(3)
-        num_elements = sum(len(tags) for tags in elem_tags)
+        # Count elements (Dimension 3 for stats)
+        elem_types_3d, elem_tags_3d, _ = gmsh.model.mesh.getElements(3)
+        num_elements = sum(len(tags) for tags in elem_tags_3d)
         
-        print(f"[HXT] Elements: {num_elements}, Nodes: {num_nodes}", flush=True)
+        # Fetch all elements for quality metrics (Dimensions 2 and 3)
+        elem_types, elem_tags, _ = gmsh.model.mesh.getElements()
+        
+        print(f"[HXT] Elements (3D): {num_elements}, Nodes: {num_nodes}", flush=True)
         
         # Extract quality metrics using Gmsh's built-in functions
         quality_metrics = {}
@@ -1177,12 +1198,39 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                 print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
                 print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
                 
+                # --- CFD QUALITY CHECK ---
+                try:
+                    from core.cfd_quality import CFDQualityAnalyzer
+                    print("[HXT] Running CFD quality analysis...", flush=True)
+                    # We have to do this BEFORE finalize if we want to use current mesh, 
+                    # but analyze_mesh_file is safer as it opens its own session.
+                    cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+                    # Use a temp write if not already written, but here we write after this block.
+                    # Actually, we can just run it on the output_file AFTER gmsh.write()
+                except Exception as cfd_e:
+                    print(f"[HXT] CFD Init Error: {cfd_e}")
+
         except Exception as qe:
             print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
         
         # Write output mesh
         gmsh.write(output_file)
-        gmsh.finalize()
+        
+        # Run CFD analysis on the current mesh (in-memory) to avoid double-init/finalize issues
+        try:
+            from core.cfd_quality import CFDQualityAnalyzer
+            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+            # Use analyze_current_mesh instead of analyze_mesh_file to avoid re-initializing Gmsh
+            cfd_report = cfd_analyzer.analyze_current_mesh()
+            quality_metrics['cfd'] = cfd_report.to_dict()
+            print(f"[HXT] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
+        except Exception as cfd_err:
+             print(f"[HXT] Warning: CFD quality analysis failed: {cfd_err}")
+
+        try:
+            gmsh.finalize()
+        except:
+            pass
         
         total_time = time.time() - start_time
         print(f"[HXT] SUCCESS! Total time: {total_time:.2f}s", flush=True)
@@ -1277,17 +1325,44 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        # =====================================================================
-        # ASSEMBLY DETECTION: Auto-detect multi-volume assemblies
-        # =====================================================================
-        # For tet-based strategies, check if this is an assembly (>3 volumes)
-        # If so, use the optimized assembly pipeline (fail-fast with boxing)
-        is_tet_strategy = any(k in mesh_strategy for k in ['Tet', 'tet', 'Delaunay', 'Exhaustive', '']) or mesh_strategy == ''
+        # DEBUG: Log strategy selection for troubleshooting
+        print(f"[DEBUG] ===== STRATEGY SELECTION DEBUG =====")
+        print(f"[DEBUG] mesh_strategy received: '{mesh_strategy}' (type: {type(mesh_strategy).__name__})")
+        print(f"[DEBUG] quality_params keys: {list(quality_params.keys()) if quality_params else 'None'}")
+        print(f"[DEBUG] =========================================")
         
-        # [REMOVED] Redundant early assembly check load
-        # Generators (Exhaustive/Assembly) now handle their own detection internally
-        # to avoid loading the CAD file multiple times.
-        
+        # =====================================================================
+        # STRATEGY NORMALIZATION: Handle GUI variants and case-insensitivity
+        # =====================================================================
+        if mesh_strategy:
+            import re
+            orig_strat = mesh_strategy
+            
+            # Normalize: lowercase, strip, collapse special chars to underscores
+            norm = mesh_strategy.lower().strip()
+            norm = re.sub(r'[^a-z0-9]', '_', norm)
+            norm = re.sub(r'_+', '_', norm)  # Collapse multiple underscores
+            
+            # Comprehensive mapping for all strategies
+            if 'hxt' in norm or ('tetrahedral' in norm and 'hxt' in norm):
+                mesh_strategy = 'Tetrahedral (HXT)'
+            elif 'fast' in norm and 'tet' in norm:
+                mesh_strategy = 'Fast Tet'
+            elif 'tet' in norm and 'delaunay' in norm:
+                mesh_strategy = 'Tet Delaunay'
+            elif 'tet' in norm and 'frontal' in norm:
+                mesh_strategy = 'Tet Frontal'
+            elif 'tet' in norm and ('meshadapt' in norm or 'mesh_adapt' in norm):
+                mesh_strategy = 'Tet MeshAdapt'
+            elif 'hex' in norm and 'dominant' in norm:
+                mesh_strategy = 'Hex Dominant'
+            elif 'gpu' in norm and 'delaunay' in norm:
+                mesh_strategy = 'GPU Delaunay'
+            elif 'polyhedral' in norm:
+                mesh_strategy = 'Polyhedral'
+            
+            print(f"[DEBUG] Strategy normalization: '{orig_strat}' -> '{mesh_strategy}'")
+            
         # =====================================================================
         # Continue with standard mesh strategy dispatch
         # =====================================================================
@@ -1356,7 +1431,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # =====================================================================
         
         # Tet Delaunay: Standard Delaunay (Algorithm3D=1)
-        if mesh_strategy in ['Tet Delaunay', 'Tet (Delaunay)', 'tet_delaunay']:
+        if 'Tet Delaunay' in mesh_strategy:
             print("[DEBUG] Tet Delaunay (single-strategy) - Algorithm3D=1 (Delaunay)")
             if quality_params is None:
                 quality_params = {}
@@ -1365,7 +1440,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
         # Tet Frontal: Frontal-Delaunay (Algorithm3D=4)
-        if mesh_strategy in ['Tet Frontal', 'Tet (Frontal)', 'tet_frontal']:
+        if 'Tet Frontal' in mesh_strategy:
             print("[DEBUG] Tet Frontal (single-strategy) - Algorithm3D=4 (Frontal)")
             if quality_params is None:
                 quality_params = {}
@@ -1374,7 +1449,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
         # Tet MeshAdapt: Classic MeshAdapt (Algorithm=1, Algorithm3D=1)
-        if mesh_strategy in ['Tet MeshAdapt', 'Tet (MeshAdapt)', 'tet_meshadapt']:
+        if 'Tet MeshAdapt' in mesh_strategy:
             print("[DEBUG] Tet MeshAdapt (single-strategy) - Algorithm=1 (MeshAdapt)")
             if quality_params is None:
                 quality_params = {}
@@ -1391,6 +1466,9 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
         # Only reach here for explicitly 'Exhaustive' strategy
+        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
+            print(f"[WARNING] Unknown strategy '{mesh_strategy}' fell through to ExhaustiveMeshGenerator!")
+            print(f"[WARNING] This may indicate a strategy name mismatch between frontend and backend")
         print("[DEBUG] Exhaustive strategy - using parallel ExhaustiveMeshGenerator")
         
         # Initialize generator
@@ -1780,6 +1858,17 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 import traceback
                 print(f"[ERROR] Failed to extract per-element quality: {e}")
                 traceback.print_exc()
+
+            # --- CFD QUALITY ANALYSIS ---
+            try:
+                from core.cfd_quality import CFDQualityAnalyzer
+                print("[DEBUG] Running CFD quality analysis...", flush=True)
+                cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+                cfd_report = cfd_analyzer.analyze_mesh_file(absolute_output_file)
+                quality_metrics['cfd'] = cfd_report.to_dict()
+                print(f"[DEBUG] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
+            except Exception as cfd_err:
+                print(f"[DEBUG] Warning: CFD quality analysis failed: {cfd_err}")
 
             # Create final result dictionary
             final_result = {

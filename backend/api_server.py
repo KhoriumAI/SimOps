@@ -479,6 +479,7 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
                                                 'per_element_skewness': per_element_skewness,
                                                 'per_element_aspect_ratio': per_element_aspect_ratio,
                                                 'quality_metrics': quality_metrics,
+                                                'cfd': quality_metrics.get('cfd'),  # Include CFD metrics in quality file
                                                 'quality_threshold_10': 0.1,  # 10% threshold
                                             }
                                             with open(quality_filepath, 'w') as f:
@@ -616,56 +617,48 @@ def register_routes(app):
         """
         strategies = [
             {
-                'id': 'fast_tet_delaunay',
-                'name': 'Tet (Fast)',
-                'description': 'Fast single-pass HXT Delaunay - ideal for batch processing',
+                'id': 'tetrahedral_hxt',
+                'name': 'Tetrahedral (HXT)',
+                'description': 'High-performance parallel meshing - recommended default',
                 'element_type': 'tet',
-                'recommended': True,
-                'fast': True
+                'recommended': True
             },
             {
-                'id': 'tetrahedral_delaunay',
-                'name': 'Tetrahedral (Delaunay)',
-                'description': 'Exhaustive strategy search - best quality, slower',
+                'id': 'tet_delaunay',
+                'name': 'Tet Delaunay',
+                'description': 'Standard Delaunay algorithm - robust and reliable',
                 'element_type': 'tet',
                 'recommended': False
             },
             {
-                'id': 'tetrahedral_frontal',
-                'name': 'Tetrahedral (Frontal)',
+                'id': 'tet_frontal',
+                'name': 'Tet Frontal',
                 'description': 'Advancing front method - good for boundary layers',
                 'element_type': 'tet',
                 'recommended': False
             },
             {
-                'id': 'tetrahedral_hxt',
-                'name': 'Tetrahedral (HXT)',
-                'description': 'High-performance parallel meshing',
+                'id': 'tet_meshadapt',
+                'name': 'Tet MeshAdapt',
+                'description': 'Classic MeshAdapt algorithm - very stable',
                 'element_type': 'tet',
                 'recommended': False
             },
             {
-                'id': 'hex_dominant',
-                'name': 'Hex-Dominant',
-                'description': 'Hexahedral mesh with tet fill - best for CFD',
+                'id': 'hex_subdivision',
+                'name': 'Hex Subdivision',
+                'description': 'Hexahedral subdivision - experimental',
                 'element_type': 'hex',
-                'recommended': False
-            },
-            {
-                'id': 'gpu_delaunay',
-                'name': 'GPU Delaunay',
-                'description': 'GPU-accelerated meshing (requires CUDA)',
-                'element_type': 'tet',
-                'recommended': False,
-                'requires': 'cuda'
-            },
-            {
-                'id': 'polyhedral',
-                'name': 'Polyhedral',
-                'description': 'Polyhedral cells - experimental',
-                'element_type': 'poly',
                 'recommended': False,
                 'experimental': True
+            },
+            {
+                'id': 'hex_cartesian',
+                'name': 'Hex Cartesian',
+                'description': 'SnappyHexMesh cartesian grid - requires OpenFOAM',
+                'element_type': 'hex',
+                'recommended': False,
+                'requires': 'openfoam'
             }
         ]
         
@@ -674,7 +667,7 @@ def register_routes(app):
         return jsonify({
             'strategies': strategies,
             'names': [s['name'] for s in strategies],
-            'default': 'Tet (Fast)'
+            'default': 'Tetrahedral (HXT)'
         })
 
     @app.route('/api/upload', methods=['POST'])
@@ -689,7 +682,7 @@ def register_routes(app):
         """
 
         current_user_id = int(get_jwt_identity())
-        user = User.query.get(current_user_id)
+        user = db.session.get(User, current_user_id)
         
         if not user:
             return jsonify({"error": "User not found"}), 404
@@ -864,7 +857,29 @@ def register_routes(app):
             return jsonify({"error": f"Cannot generate mesh - status is {project.status}"}), 400
 
         data = request.json if request.is_json else {}
+        
+        # Robust parameter extraction
         quality_params = data.get('quality_params')
+        if not quality_params:
+            # Fallback: Check if the root level contains meshing parameters
+            # This handles the current web frontend behavior and simple CLI-style requests
+            root_params = {}
+            possible_keys = [
+                'mesh_strategy', 'target_elements', 'max_size_mm', 'min_size_mm', 
+                'curvature_adaptive', 'element_order', 'ansys_mode', 'defer_quality', 
+                'score_threshold', 'strategy_order', 'save_stl', 'worker_count',
+                'quality_preset'
+            ]
+            for key in possible_keys:
+                if key in data:
+                    root_params[key] = data[key]
+            
+            if root_params:
+                quality_params = root_params
+                print(f"[DEBUG] Extracted quality_params from root body: {list(quality_params.keys())}")
+            else:
+                print(f"[DEBUG] No quality_params found in request")
+
         # Check for Modal override (only allowed in development/staging or if enabled)
         # We allow 'use_modal' to override if configured
         use_modal_override = data.get('use_modal') 
@@ -1749,38 +1764,6 @@ def parse_step_file_for_preview(step_filepath: str):
             print(f"[PREVIEW] Modal preview failed: {e}")
 
     # ============================================================================
-    # STEP 2: Try forwarding to Threadripper workstation via SSH tunnel
-    # ============================================================================
-    try:
-        import requests
-        print("[PREVIEW] Attempting to forward to Threadripper via SSH tunnel (localhost:8080)...")
-        
-        with open(step_filepath, 'rb') as f:
-            # SSH tunnel maps localhost:8080 -> Threadripper:8080
-            response = requests.post(
-                "http://localhost:8080/mesh",
-                files={'file': ('model.step', f, 'application/octet-stream')},
-                timeout=120
-            )
-            
-            if response.status_code == 200:
-                print("[PREVIEW] ✓ Threadripper completed successfully - using remote result")
-                result = response.json()
-                # Convert Threadripper response format to our format if needed
-                return result
-            else:
-                print(f"[PREVIEW] Threadripper returned error status {response.status_code}: {response.text[:200]}")
-                
-    except requests.exceptions.ConnectionError as e:
-        print(f"[PREVIEW] Threadripper unavailable (connection refused): {e}")
-    except requests.exceptions.Timeout as e:
-        print(f"[PREVIEW] Threadripper request timed out after 120s: {e}")
-    except Exception as e:
-        print(f"[PREVIEW] Threadripper forwarding failed: {e}")
-    
-    print("[PREVIEW] Falling back to AWS local compute...")
-    
-    # ============================================================================
     # STEP 2: Fallback to AWS local GMSH computation
     # ============================================================================
     
@@ -1855,18 +1838,52 @@ try:
     apply_robust_settings()
 
     print(f"[PREVIEW] Loading CAD file: {step_filepath}")
+    
+    # IMPORTANT: Standard_ConstructionError is a C++ exception that crashes the subprocess
+    # BEFORE Python can catch it. So we cannot loop through tolerances - we must use
+    # the safest approach first.
+    #
+    # Strategy:
+    # 1. Try gmsh.merge() - this is often more lenient and less crash-prone
+    # 2. If that fails, try importShapes with a moderate tolerance (1e-3)
+    #
+    # We set Geometry.Tolerance BEFORE loading to give OCC the best chance.
+    
+    loaded = False
+    
+    # Attempt 1: gmsh.merge() with moderate tolerance (safest approach)
     try:
-        # Ultra-lenient tolerance for loading
-        gmsh.option.setNumber("Geometry.Tolerance", 1.0)
-        gmsh.model.occ.importShapes(step_filepath)
-        gmsh.model.occ.synchronize()
+        print("[PREVIEW] Loading attempt 1: gmsh.merge() with Geometry.Tolerance=1e-3...")
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-3)
+        gmsh.option.setNumber("Geometry.OCCFixDegenerated", 0)  # Don't fix, just load
+        gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 0)
+        gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 0)
+        gmsh.option.setNumber("Geometry.OCCSewFaces", 0)
+        gmsh.option.setNumber("Geometry.OCCMakeSolids", 0)
+        gmsh.merge(step_filepath)
+        
+        # Check if we got anything
+        if gmsh.model.getEntities(3) or gmsh.model.getEntities(2):
+            loaded = True
+            print("[PREVIEW] Success loading with gmsh.merge()")
+        else:
+            print("[PREVIEW] gmsh.merge() loaded but no geometry entities found")
     except Exception as e:
-        print(f"[PREVIEW] Initial open failed ({e}), attempting fallback...")
+        print(f"[PREVIEW] gmsh.merge() failed: {e}")
+    
+    # Attempt 2: importShapes with moderate tolerance
+    if not loaded:
         try:
-            gmsh.merge(step_filepath)
+            print("[PREVIEW] Loading attempt 2: importShapes with Geometry.Tolerance=1e-2...")
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+            gmsh.model.occ.importShapes(step_filepath)
             gmsh.model.occ.synchronize()
-        except Exception as e2:
-            print(f"[PREVIEW] all load attempts failed: {e2}")
+            
+            if gmsh.model.getEntities(3) or gmsh.model.getEntities(2):
+                loaded = True
+                print("[PREVIEW] Success loading with importShapes()")
+        except Exception as e:
+            print(f"[PREVIEW] importShapes() failed: {e}")
     
     # Check if we actually loaded anything
     volumes = gmsh.model.getEntities(3)
@@ -2097,9 +2114,11 @@ def parse_msh_file(msh_filepath: str):
                 per_element_skewness = {int(k): v for k, v in qdata.get('per_element_skewness', {}).items()}
                 per_element_aspect_ratio = {int(k): v for k, v in qdata.get('per_element_aspect_ratio', {}).items()}
                 per_element_min_angle = {int(k): v for k, v in qdata.get('per_element_min_angle', {}).items()}
-                print(f"[MESH PARSE] Loaded quality data from {data_file.name} for {len(per_element_quality)} elements")
+                print(f"[MESH PARSE] Loaded quality data for {len(per_element_quality)} elements")
         except Exception as e:
-            print(f"[MESH PARSE] Failed to load quality data from {data_file}: {e}")
+            print(f"[MESH PARSE] Failed to load quality data: {e}")
+    else:
+        print(f"[MESH PARSE] No sidecar result file found. Colors will be default.")
     
     # =====================================================================
     # COMPUTE QUALITY ON-THE-FLY if no pre-computed data exists
@@ -2189,7 +2208,7 @@ def parse_msh_file(msh_filepath: str):
         elif metric == 'aspect_ratio':
             val = max(0.0, min(1.0, 1.0 - (q - 1.0) / 4.0))
         elif metric == 'minAngle':
-            val = max(0.0, min(1.0, q / 60.0))
+            val = q
             
         t = max(0.0, min(1.0, val))
         if t < 0.5:
@@ -2597,6 +2616,11 @@ def parse_msh_file(msh_filepath: str):
                 
                 q_ang = get_q_value(el_tag, per_element_min_angle)
                 colors_min_angle.extend(get_color(q_ang, 'minAngle') * 3)
+                
+                if q_sicn is not None:
+                    faces_with_quality += 1
+                else:
+                    faces_without_quality += 1
 
         print(f"[MESH PARSE DEBUG] Boundary faces extracted: {boundary_face_count}")
         print(f"[MESH PARSE DEBUG] Faces WITH quality data: {faces_with_quality}")
@@ -2640,6 +2664,8 @@ def parse_msh_file(msh_filepath: str):
                             quality_summary['aspect_ratio_min'] = qmetrics['aspect_ratio_min']
                             quality_summary['aspect_ratio_avg'] = qmetrics['aspect_ratio_avg']
                             quality_summary['aspect_ratio_max'] = qmetrics['aspect_ratio_max']
+                        if 'cfd' in qdata:
+                            quality_summary['cfd'] = qdata['cfd']
             except Exception as e:
                 print(f"[MESH PARSE] Warning: Could not load additional metrics: {e}")
             

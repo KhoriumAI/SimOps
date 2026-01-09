@@ -12,6 +12,13 @@
 
 $ErrorActionPreference = "Stop"
 
+# Determine project root relative to this script
+$ScriptPath = $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path $ScriptPath
+$ProjectRoot = Split-Path $ScriptDir -Parent
+Write-Host "Changing working directory to project root: $ProjectRoot" -ForegroundColor DarkGray
+Set-Location $ProjectRoot
+
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host "   Khorium MeshGen - Local Full Stack Launcher" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
@@ -51,11 +58,22 @@ function Start-MyProcess {
 }
 
 # -----------------------------------------------------------------------------
+# Determine Python Interpreter
+# -----------------------------------------------------------------------------
+$PythonCmd = "python"
+if (Test-Path "$ProjectRoot\venv\Scripts\python.exe") {
+    $PythonCmd = "$ProjectRoot\venv\Scripts\python.exe"
+    Write-Host "Using virtual environment: $PythonCmd" -ForegroundColor Cyan
+} else {
+    Write-Warning "Virtual environment not found in $ProjectRoot\venv. Using system python."
+}
+
+# -----------------------------------------------------------------------------
 # Start Backend
 # -----------------------------------------------------------------------------
 Write-Host "Launching Backend (Flask)..." -ForegroundColor Green
 # We use 'cmd /k' to keep the window open if it crashes, for debugging
-$BackendProcess = Start-MyProcess -Name "Backend" -Command "cmd.exe" -Arguments "/c start ""Flask Backend"" cmd /k ""python backend\api_server.py""" -WorkingDirectory "."
+$BackendProcess = Start-MyProcess -Name "Backend" -Command "cmd.exe" -Arguments "/c start ""Flask Backend"" cmd /k ""$PythonCmd backend\api_server.py""" -WorkingDirectory "."
 
 # -----------------------------------------------------------------------------
 # Start Frontend

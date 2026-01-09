@@ -177,7 +177,44 @@ class PreviewWorker(QThread):
                 print(msg)
                 self.log.emit(msg)
             
-            # --- PREVIEW TESSELLATION SUBPROCESS ---
+            # Determine file type
+            file_ext = os.path.splitext(self.filepath)[1].lower()
+            mesh_formats = ['.stl', '.vtk', '.vtu', '.msh', '.ply', '.obj']
+            
+            # --- PATH 1: DIRECT MESH LOADING (No GMSH Subprocess) ---
+            if file_ext in mesh_formats:
+                if verbose:
+                    msg = f"[PreviewWorker] Detected mesh format ({file_ext}), loading directly with PyVista..."
+                    print(msg)
+                    self.log.emit(msg)
+                
+                try:
+                    # Direct load
+                    mesh = pv.read(self.filepath)
+                    
+                    # Generate basic complexity info
+                    complexity = {
+                        "surface_count": 0, # Not easily available without topological analysis
+                        "mesh_size_max": 0,
+                        "quality_level": "Imported Mesh",
+                        "bbox_diagonal": mesh.length,
+                        "volume": mesh.volume if mesh.is_manifold else 0
+                    }
+                    
+                    if verbose:
+                        print(f"[PreviewWorker] Mesh loaded: {mesh.n_points} points, {mesh.n_cells} cells")
+                        
+                    self.finished.emit((mesh, complexity))
+                    return
+
+                except Exception as e:
+                    print(f"[PreviewWorker] Failed to load mesh directly: {e}")
+                    self.error.emit(f"Failed to load mesh: {str(e)}")
+                    return
+
+            # --- PATH 2: CAD TESSELLATION (GMSH Subprocess) ---
+            # Existing logic for CAD files (.step, .stp, .iges, etc.)
+            
             tmp_stl = tempfile.mktemp(suffix='.stl')
             
             script_content = f"""
