@@ -141,6 +141,15 @@ def create_app(config_class=None):
     # Register routes
     register_routes(app)
     
+    # Run cleanup of stuck jobs on startup
+    with app.app_context():
+        try:
+            from api_server import cleanup_stuck_jobs
+            cleanup_stuck_jobs(app)
+        except ImportError:
+            # Fallback if cleanup_stuck_jobs is not yet available in namespace
+            pass
+    
     return app
 
 
@@ -2720,10 +2729,7 @@ def parse_msh_file(msh_filepath: str):
         traceback.print_exc()
         return {"error": str(e), "vertices": [], "colors": []}
 
-
-app = create_app()
-
-def cleanup_stuck_jobs():
+def cleanup_stuck_jobs(app):
     """
     On development server startup, reset any jobs stuck in 'processing' state.
     This prevents 'zombie' jobs from looking like they are running forever.
@@ -2758,8 +2764,11 @@ def cleanup_stuck_jobs():
             except Exception as e:
                 print(f"[DEV] Warning: Job cleanup failed: {e}")
 
-# Run cleanup immediately on import/start
-cleanup_stuck_jobs()
+app = create_app()
+
+
+
+# cleanup_stuck_jobs() - MOVED to create_app and if __name__ == '__main__'
 
 
 
