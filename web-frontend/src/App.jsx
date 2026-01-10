@@ -483,6 +483,9 @@ function App() {
         // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
+        // CRITICAL: Immediately update local status to 'processing' to prevent duplicate clicks
+        // This ensures the UI reflects the correct state before the next poll cycle
+        setProjectStatus(prev => prev ? { ...prev, status: 'processing' } : { status: 'processing' })
       } else {
         const error = await response.json()
         alert(error.error || 'Failed to start mesh generation')
