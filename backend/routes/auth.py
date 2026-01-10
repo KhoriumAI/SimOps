@@ -189,8 +189,7 @@ def reset_password():
         return jsonify({'error': 'Token has expired'}), 400
         
     # Update password
-    # Note: Using bcrypt via a helper might be better but here we follow the pattern in the file
-    from .auth import hash_password
+    # Updated password (using hash_password defined in this file)
     user.password_hash = hash_password(password)
     user.reset_token = None
     user.reset_token_expires = None

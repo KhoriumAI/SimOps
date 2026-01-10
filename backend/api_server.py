@@ -178,7 +178,6 @@ def create_app(config_class=None):
     if app.config.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1':
         with app.app_context():
             cleanup_stuck_jobs(app)
-
     return app
 
 
@@ -2758,9 +2757,13 @@ def parse_msh_file(msh_filepath: str):
         traceback.print_exc()
         return {"error": str(e), "vertices": [], "colors": []}
 
+<<<<<<< HEAD
 
 app = create_app()
 
+
+# Note: cleanup_stuck_jobs(app) is called within create_app() in development.
+=======
 
 # Note: cleanup_stuck_jobs(app) is called within create_app() in development.
 

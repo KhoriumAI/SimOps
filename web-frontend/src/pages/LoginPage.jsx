@@ -122,7 +122,7 @@ export default function LoginPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <p className="text-gray-700 mb-4 font-medium">Check your internal console for the reset link</p>
+            <p className="text-gray-700 mb-2 font-medium">Check your email for the reset link</p>
             <p className="text-gray-500 text-sm mb-6">If an account exists for {formData.email}, you will receive a password reset link.</p>
             <button
               onClick={toggleForgotPassword}
@@ -162,7 +162,18 @@ export default function LoginPage() {
 
             {!isForgotPassword && (
               <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">Password</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-sm font-medium text-gray-600">Password</label>
+                  {!isRegister && (
+                    <button
+                      type="button"
+                      onClick={toggleForgotPassword}
+                      className="text-xs text-blue-600 hover:text-blue-700 hover:underline"
+                    >
+                      Forgot password?
+                    </button>
+                  )}
+                </div>
                 <input
                   type="password"
                   name="password"
@@ -190,18 +201,6 @@ export default function LoginPage() {
               </div>
             )}
 
-            {!isRegister && !isForgotPassword && (
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={toggleForgotPassword}
-                  className="text-xs text-blue-600 hover:text-blue-700"
-                >
-                  Forgot Password?
-                </button>
-              </div>
-            )}
-
             <button
               type="submit"
               disabled={isSubmitting}
@@ -210,32 +209,19 @@ export default function LoginPage() {
               {isSubmitting ? 'Please wait...' : (isForgotPassword ? 'Send Reset Link' : (isRegister ? 'Create Account' : 'Sign In'))}
             </button>
 
-            {isForgotPassword && (
-              <div className="text-center mt-4">
-                <button
-                  type="button"
-                  onClick={toggleForgotPassword}
-                  className="text-sm text-gray-500 hover:text-gray-700"
-                >
-                  Back to Sign In
-                </button>
-              </div>
-            )}
+            <div className="mt-6 text-center">
+              <span className="text-gray-500 text-sm">
+                {isForgotPassword ? 'Remember your password?' : (isRegister ? 'Already have an account?' : "Don't have an account?")}
+              </span>
+              <button
+                type="button"
+                onClick={isForgotPassword ? toggleForgotPassword : (isRegister ? toggleMode : toggleMode)}
+                className="ml-2 text-blue-600 hover:text-blue-700 font-medium text-sm"
+              >
+                {isForgotPassword ? 'Sign In' : (isRegister ? 'Sign In' : 'Create One')}
+              </button>
+            </div>
           </form>
-        )}
-
-        {!isForgotPassword && (
-          <div className="mt-6 text-center text-sm">
-            <span className="text-gray-500">
-              {isRegister ? 'Already have an account?' : "Don't have an account?"}
-            </span>
-            <button
-              onClick={toggleMode}
-              className="ml-2 text-blue-600 hover:text-blue-700 font-medium"
-            >
-              {isRegister ? 'Sign In' : 'Create One'}
-            </button>
-          </div>
         )}
       </div>
     </div>
