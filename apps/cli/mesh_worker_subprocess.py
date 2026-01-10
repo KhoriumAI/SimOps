@@ -1223,9 +1223,9 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                             per_element_aspect_ratio[tag_str] = float(tri_ar[i])
                             per_element_min_angle[tag_str] = 60.0 # Default for triangles
                             
-                        print(f\"[HXT] Included quality for {len(tri_tags)} surface elements\", flush=True)
+                        print(f"[HXT] Included quality for {len(tri_tags)} surface elements", flush=True)
                     except Exception as e:
-                        print(f\"[HXT] Warning: Could not compute surface quality: {e}\", flush=True)
+                        print(f"[HXT] Warning: Could not compute surface quality: {e}", flush=True)
 
                 print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
                 print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
