@@ -38,6 +38,39 @@ except ImportError:
     meshio = None
 
 
+def cleanup_stuck_jobs(app):
+    """
+    On development server startup, reset any jobs stuck in 'processing' state.
+    This prevents 'zombie' jobs from looking like they are running forever.
+    """
+    # Only run in development or if explicitly requested
+    if app.config.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1':
+        try:
+            print("==================================================")
+            print("[DEV] Checking for stuck jobs on startup...")
+            stuck_projects = Project.query.filter_by(status='processing').all()
+            count = 0
+            for p in stuck_projects:
+                print(f"[DEV] Resetting stuck project: {p.id} ({p.filename})")
+                p.status = 'uploaded'
+                p.error_message = 'Job killed on server restart'
+                
+                latest = p.mesh_results.order_by(MeshResult.created_at.desc()).first()
+                if latest and latest.status in ['pending', 'processing', 'queued']:
+                    latest.status = 'failed'
+                    latest.error_message = 'Server restarted'
+                    latest.logs = (latest.logs or []) + [f"[{datetime.utcnow().isoformat()}] Server restart detected. Job killed."]
+                count += 1
+            
+            if count > 0:
+                db.session.commit()
+                print(f"[DEV] Reset {count} stuck projects.")
+            else:
+                print("[DEV] No stuck jobs found.")
+            print("==================================================")
+        except Exception as e:
+            print(f"[DEV] Warning: Job cleanup failed: {e}")
+
 def create_app(config_class=None):
     """Application factory"""
     app = Flask(__name__)
@@ -141,6 +174,11 @@ def create_app(config_class=None):
     # Register routes
     register_routes(app)
     
+    # Run cleanup of stuck jobs on development startup
+    if app.config.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1':
+        with app.app_context():
+            cleanup_stuck_jobs(app)
+
     return app
 
 
@@ -2723,43 +2761,8 @@ def parse_msh_file(msh_filepath: str):
 
 app = create_app()
 
-def cleanup_stuck_jobs():
-    """
-    On development server startup, reset any jobs stuck in 'processing' state.
-    This prevents 'zombie' jobs from looking like they are running forever.
-    """
-    with app.app_context():
-        # Only run in development or if explicitly requested
-        if app.config.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1':
-            try:
-                print("==================================================")
-                print("[DEV] Checking for stuck jobs on startup...")
-                stuck_projects = Project.query.filter_by(status='processing').all()
-                count = 0
-                for p in stuck_projects:
-                    # Check if it's actually old? For now, assume process death = job death
-                    print(f"[DEV] Resetting stuck project: {p.id} ({p.filename})")
-                    p.status = 'uploaded'
-                    p.error_message = 'Job killed on server restart'
-                    
-                    latest = p.mesh_results.order_by(MeshResult.created_at.desc()).first()
-                    if latest and latest.status in ['pending', 'processing', 'queued']:
-                        latest.status = 'failed'
-                        latest.error_message = 'Server restarted'
-                        latest.logs = (latest.logs or []) + [f"[{datetime.utcnow().isoformat()}] Server restart detected. Job killed."]
-                    count += 1
-                
-                if count > 0:
-                    db.session.commit()
-                    print(f"[DEV] Reset {count} stuck projects.")
-                else:
-                    print("[DEV] No stuck jobs found.")
-                print("==================================================")
-            except Exception as e:
-                print(f"[DEV] Warning: Job cleanup failed: {e}")
 
-# Run cleanup immediately on import/start
-cleanup_stuck_jobs()
+# Note: cleanup_stuck_jobs(app) is called within create_app() in development.
 
 
 

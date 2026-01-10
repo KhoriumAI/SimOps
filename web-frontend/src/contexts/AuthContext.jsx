@@ -222,7 +222,48 @@ export function AuthProvider({ children }) {
       console.error('Logout error:', error)
     }
     clearTokens()
+    clearTokens()
     setUser(null)
+  }
+
+  const requestPasswordReset = async (email) => {
+    setError(null)
+    try {
+      const response = await fetch(`${API_BASE}/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setError(data.error || 'Request failed')
+        return { success: false, error: data.error }
+      }
+      return { success: true, message: data.message }
+    } catch (error) {
+      setError('Network error')
+      return { success: false, error: 'Network error' }
+    }
+  }
+
+  const resetPassword = async (token, password) => {
+    setError(null)
+    try {
+      const response = await fetch(`${API_BASE}/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, password })
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        setError(data.error || 'Reset failed')
+        return { success: false, error: data.error }
+      }
+      return { success: true, message: data.message }
+    } catch (error) {
+      setError('Network error')
+      return { success: false, error: 'Network error' }
+    }
   }
 
   return (
@@ -234,6 +275,8 @@ export function AuthProvider({ children }) {
       login,
       logout,
       register,
+      requestPasswordReset,
+      resetPassword,
       authFetch,
       clearError: () => setError(null)
     }}>
