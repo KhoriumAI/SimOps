@@ -1699,8 +1699,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             
             # Since the main orchestrator might have crashed, we do a raw Bounding Box here
             try:
-                import gmsh
-                gmsh.initialize()
+                if not gmsh.isInitialized():
+                    gmsh.initialize()
                 gmsh.model.add("Emergency_BBox")
                 gmsh.model.occ.importShapes(cad_file)
                 gmsh.model.occ.synchronize()
