@@ -165,6 +165,17 @@ def _run_tet_strategy(cad_file: str, output_dir: str, quality_params: dict,
         
         # Write output
         gmsh.write(output_file)
+        
+        # CFD Quality Analysis
+        try:
+            from core.cfd_quality import CFDQualityAnalyzer
+            print(f"[{name.upper()}] Running CFD quality analysis...")
+            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
+            quality_metrics['cfd'] = cfd_report.to_dict()
+        except Exception as cfd_err:
+            print(f"[{name.upper()}] Warning: CFD quality analysis failed: {cfd_err}")
+
         gmsh.finalize()
         
         total_time = time.time() - start_time
@@ -433,6 +444,16 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         num_nodes = len(node_tags)
         num_elements = sum(len(tags) for tags in elem_tags)
         
+        # CFD Quality Analysis (Important for Assembly)
+        final_cfd_report = None
+        try:
+            from core.cfd_quality import CFDQualityAnalyzer
+            print("[Modal] Running CFD quality analysis on merged assembly...")
+            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
+            final_cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
+        except Exception as cfd_err:
+             print(f"[Modal] Warning: Assembly CFD analysis failed: {cfd_err}")
+
         gmsh.finalize()
         
         # Calculate timings
@@ -483,6 +504,9 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
             merged_quality['min_quality'] = global_min_q
             merged_quality['max_quality'] = global_max_q
             merged_quality['avg_quality'] = total_avg_q_weighted / total_elems
+        
+        if final_cfd_report:
+            merged_quality['cfd'] = final_cfd_report.to_dict()
 
         result_data = {
             'success': True,
@@ -504,15 +528,26 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         
         try:
-            if 'Hex Dominant' in mesh_strategy or 'hex_dominant' in mesh_strategy:
+            # Normalize strategy string for robust matching
+            strat_norm = mesh_strategy.lower().strip()
+            
+            if 'hex dominant' in strat_norm or 'hex_dominant' in strat_norm:
                 result_data = generate_hex_dominant_mesh(str(local_input_file), str(local_output_dir), quality_params)
-            elif 'Tet Delaunay' in mesh_strategy or 'tet_delaunay' in mesh_strategy:
+            elif 'tet delaunay' in strat_norm or 'tet_delaunay' in strat_norm:
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=1, name="tet_delaunay")
-            elif 'Tet Frontal' in mesh_strategy or 'tet_frontal' in mesh_strategy:
+            elif 'tet frontal' in strat_norm or 'tet_frontal' in strat_norm:
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=4, name="tet_frontal")
-            elif 'Tet HXT' in mesh_strategy or 'tet_hxt' in mesh_strategy or 'HXT' in mesh_strategy:
+            elif 'tet' in strat_norm and ('meshadapt' in strat_norm or 'mesh_adapt' in strat_norm):
+                result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=1, algorithm_3d=1, name="tet_meshadapt")
+            elif 'gpu' in strat_norm and 'delaunay' in strat_norm:
+                # GPU meshing not yet supported in Modal, fallback to HXT
+                print(f"[Modal] GPU Delaunay requested but not available in Modal, using HXT fallback")
+                result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)
+            elif 'hxt' in strat_norm or 'tetrahedral' in strat_norm:
+                # Handle 'Tetrahedral (HXT)' or just 'Tetrahedral'
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)
             else:
+                 print(f"[Modal] Strategy '{mesh_strategy}' not explicitly matched, using default fast_tet (HXT fallback)")
                  result_data = generate_fast_tet_delaunay_mesh(str(local_input_file), str(local_output_dir), quality_params)
         except Exception as e:
             import traceback

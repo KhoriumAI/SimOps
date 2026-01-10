@@ -44,21 +44,11 @@ function App() {
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
 
-  // DEBUG: Trace meshData changes
-  useEffect(() => {
-    if (meshData) {
-      console.log('[App] meshData updated:', {
-        vertices: meshData.vertices?.length,
-        isPreview: meshData.isPreview,
-        colors: meshData.colors?.length
-      })
-    } else {
-      console.log('[App] meshData set to NULL')
-    }
-  }, [meshData])
+
 
   const [isPolling, setIsPolling] = useState(false)
   const [isExportingAnsys, setIsExportingAnsys] = useState(false)
+  const [isAnsysDropdownOpen, setIsAnsysDropdownOpen] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
   const [maxElementSize, setMaxElementSize] = useState(10.0)
   const [minElementSize, setMinElementSize] = useState(2.0)
@@ -79,9 +69,9 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
-  // Fast Mode - experimental optimized preview (uses SSH compute, skips retries)
-  // TODO: Remove this after testing
-  const [fastMode, setFastMode] = useState(true)  // Default ON for testing
+  // Fast Mode - optimized preview generation
+  const [fastMode, setFastMode] = useState(true)
+
 
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
@@ -127,6 +117,8 @@ function App() {
     }
     fetchStrategies()
   }, [])
+
+
 
   // Poll project status
   useEffect(() => {
@@ -304,11 +296,6 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
       if (response.ok) {
         const data = await response.json()
-        console.log('[App] fetchMeshData success:', {
-          projectId,
-          vertices: data.vertices?.length,
-          resultId: data.result_id || 'N/A'
-        })
         setMeshData(data)
       }
     } catch (error) {
@@ -470,14 +457,16 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${currentProject}/generate`, {
         method: 'POST',
         body: {
-          quality_preset: qualityPreset,
-          target_elements: null,
-          max_size_mm: maxElementSize,
-          min_size_mm: minElementSize,
-          element_order: parseInt(elementOrder),
-          ansys_mode: ansysMode,
-          mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive
+          quality_params: {
+            quality_preset: qualityPreset,
+            target_elements: null,
+            max_size_mm: maxElementSize,
+            min_size_mm: minElementSize,
+            element_order: parseInt(elementOrder),
+            ansys_mode: ansysMode,
+            mesh_strategy: meshStrategy,
+            curvature_adaptive: curvatureAdaptive,
+          }
         },
         signal: controller.signal
       })
@@ -504,15 +493,17 @@ function App() {
     }
   }
 
-  const handleAnsysExport = async () => {
+  const handleAnsysExport = async (format = 'fluent') => {
     if (!currentProject) return
 
     setIsExportingAnsys(true)
     try {
-      // Use the new format=fluent query parameter on the download endpoint
-      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=fluent`)
+      // Use the new format query parameter on the download endpoint
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=${format}`)
       if (response.ok) {
         const contentType = response.headers.get('content-type')
+        const extension = format === 'mechanical' ? 'inp' : 'msh'
+        const suffix = format === 'mechanical' ? 'mechanical' : 'fluent'
 
         if (contentType && contentType.includes('application/json')) {
           // Check for error or presigned URL
@@ -525,7 +516,7 @@ function App() {
           if (data.download_url) {
             const a = document.createElement('a')
             a.href = data.download_url
-            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
             a.target = '_blank'
             document.body.appendChild(a)
             a.click()
@@ -537,7 +528,7 @@ function App() {
           const url = window.URL.createObjectURL(blob)
           const a = document.createElement('a')
           a.href = url
-          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
           document.body.appendChild(a)
           a.click()
           a.remove()
@@ -545,11 +536,11 @@ function App() {
         }
       } else {
         const error = await response.json()
-        alert(error.error || 'Failed to export Fluent mesh')
+        alert(error.error || `Failed to export ${format} mesh`)
       }
     } catch (error) {
-      console.error('Failed to export Fluent mesh:', error)
-      alert('Failed to export Fluent mesh')
+      console.error(`Failed to export ${format} mesh:`, error)
+      alert(`Failed to export ${format} mesh`)
     } finally {
       setIsExportingAnsys(false)
     }
@@ -694,17 +685,44 @@ function App() {
                 <Download className="w-3 h-3" />
                 MSH
               </button>
-              <button
-                onClick={handleAnsysExport}
-                disabled={isExportingAnsys}
-                className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                  : 'text-blue-600 hover:text-blue-700'
-                  }`}
-              >
-                {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
-                ANSYS
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setIsAnsysDropdownOpen(!isAnsysDropdownOpen)}
+                  disabled={isExportingAnsys}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'text-blue-600 hover:text-blue-700 hover:bg-blue-50'
+                    }`}
+                >
+                  {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+                  ANSYS
+                  <ChevronDown className="w-3 h-3 ml-0.5 opacity-70" />
+                </button>
+
+                {isAnsysDropdownOpen && (
+                  <>
+                    {/* Click outside listener overlay */}
+                    <div className="fixed inset-0 z-40" onClick={() => setIsAnsysDropdownOpen(false)}></div>
+
+                    <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 w-48 text-xs py-1 overflow-hidden">
+                      <button
+                        onClick={() => { handleAnsysExport('fluent'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+                        Ansys Fluent (.msh)
+                      </button>
+                      <button
+                        onClick={() => { handleAnsysExport('mechanical'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-yellow-500"></div>
+                        Ansys Mechanical (.inp)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -732,7 +750,6 @@ function App() {
           {mode === 'batch' ? (
             <BatchMode
               onBatchComplete={(batch) => {
-                console.log('Batch completed:', batch)
                 setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
               }}
               onLog={(msg) => setLogs(prev => [...prev, msg])}
@@ -914,6 +931,7 @@ function App() {
                       <span className="text-[9px] text-green-600 bg-green-100 px-1 py-0.5 rounded">BETA</span>
                     </span>
                   </label>
+
                 </div>
               </div>
 
@@ -934,8 +952,8 @@ function App() {
                       <option value="sicn">SICN (Ideal=1)</option>
                       <option value="gamma">Gamma (Ideal=1)</option>
                       <option value="skewness">Skewness</option>
-                      <option value="aspectRatio">Aspect Ratio</option>
-                      <option value="minAngle">Minimum Angle</option>
+                      <option value="aspect_ratio">Aspect Ratio</option>
+                      <option value="min_angle">Minimum Angle</option>
                     </select>
                   </div>
                 </div>
@@ -964,6 +982,8 @@ function App() {
                       Stop
                     </button>
                   )}
+
+
                 </div>
               )}
 
@@ -1065,7 +1085,7 @@ function App() {
         </div>
 
         {/* Feedback Button - Fixed position */}
-        <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
+        <FeedbackButton userEmail={user?.email} jobId={currentJobId || projectStatus?.latest_result?.job_id} />
       </div>
     </div>
   )

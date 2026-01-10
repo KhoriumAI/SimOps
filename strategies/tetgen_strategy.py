@@ -21,15 +21,31 @@ from core.mesh_generator import BaseMeshGenerator
 from core.config import Config
 import gmsh
 
-# Check if tetgen is available
+# Check if tetgen is available (without importing pyvista yet - that triggers 15s VTK scan)
 TETGEN_AVAILABLE = False
+PYVISTA_AVAILABLE = False
 try:
     import tetgen
-    import pyvista as pv
-    import numpy as np
     TETGEN_AVAILABLE = True
+    # Don't import pyvista here - do it lazily in the class methods
 except ImportError:
     pass
+
+# Lazy import helper - only loads PyVista when actually needed
+def _ensure_pyvista():
+    """Lazily import PyVista (which triggers VTK loading) only when needed"""
+    global PYVISTA_AVAILABLE, pv, np
+    if PYVISTA_AVAILABLE:
+        return True
+    try:
+        import pyvista as pv_module
+        import numpy as np_module
+        globals()['pv'] = pv_module
+        globals()['np'] = np_module
+        PYVISTA_AVAILABLE = True
+        return True
+    except ImportError:
+        return False
 
 
 class TetGenMeshGenerator(BaseMeshGenerator):
@@ -62,6 +78,11 @@ class TetGenMeshGenerator(BaseMeshGenerator):
         """
         if not TETGEN_AVAILABLE:
             self.log_message("[X] TetGen not installed - skipping")
+            return False
+        
+        # Lazy-load PyVista/VTK only when TetGen is actually used
+        if not _ensure_pyvista():
+            self.log_message("[X] PyVista not available (required for TetGen) - skipping")
             return False
 
         self.log_message("\n" + "=" * 60)
@@ -109,6 +130,7 @@ class TetGenMeshGenerator(BaseMeshGenerator):
 
     def _extract_surface_mesh_pyvista(self) -> Optional[object]:
         """Extract surface mesh from Gmsh as PyVista PolyData"""
+        # pv and np are now guaranteed available (checked in run_meshing_strategy)
         try:
             # Get 2D mesh elements (triangles on surfaces)
             element_types, element_tags, node_tags = gmsh.model.mesh.getElements(dim=2)

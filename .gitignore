@@ -71,11 +71,26 @@ backend/outputs/
 backend/instance/
 
 # Logs
+logs/
 *.log
+promotion_log_*.log
 
 # Temporary files
+temp_meshes/
+temp_parts/
+temp_stls/
 temp_*
 *.tmp
+bbox_temp_*.msh
+last_ditch_bbox_*.msh
+temp_mesh_*.msh
+
+# Infrastructure metadata
+metadata/staging_dist_info.txt
+cf_dev_distconfig*.json
+cf_staging_config*.json
+cf_staging_distconfig*.json
+ssm_*.json
 
 # CAD files (optional - uncomment if you don't want to track them)
 # *.step
@@ -88,7 +103,9 @@ test_*.py
 reproduce_*.py
 fix_*.py
 *_working.py
+!verify_*.py
 !scripts/test_core_meshing.py
+!test_guardian_integration.py
 
 # Large Binary Artifacts (Manual Exclusions)
 *.cgns
@@ -98,8 +115,8 @@ fix_*.py
 fused_*.stl
 dirty_*.stl
 temp_*.stl
-temp_stls/
 robust_mesh*.msh
+test_modal_result.msh
 final_assembly_*.msh
 final_assembly_*.vtk
 shell_connectivity_mesh.vtk
@@ -112,3 +129,9 @@ jobs_log/*.log*
 # Working copies and backups
 *_working.py
 *.backup_*
+
+# Modal outputs
+modal_cube_*.txt
+modal_final_run_*.txt
+modal_poc_output.txt
+modal_run_output.txt

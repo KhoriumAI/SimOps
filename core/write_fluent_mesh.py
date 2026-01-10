@@ -133,11 +133,84 @@ def write_fluent_msh(filename, points, cells):
 def convert_gmsh_to_fluent(input_msh, output_fluent):
     import meshio
     import os
+    
     if not os.path.exists(input_msh):
         print(f"Error: Input file {input_msh} not found.")
-        return
+        return False
+        
     try:
+        print(f"[FluentConverter] Reading {input_msh}...")
         mesh = meshio.read(input_msh)
-        write_fluent_msh(output_fluent, mesh.points, mesh.cells)
+        
+        # --- Extract Boundary Surface Mappings ---
+        # We need to map extracted tet faces to the original surface names
+        # Key: tuple(sorted(nodes)), Value: zone_name
+        boundary_face_map = {}
+        
+        # 1. Build tag-to-name lookup
+        # field_data maps Name -> [tag, dimension]
+        tag_to_name = {}
+        if mesh.field_data:
+            for name, data in mesh.field_data.items():
+                # data is usually [tag, dim]
+                tag_to_name[data[0]] = name
+                
+        # 2. Iterate over triangle cells (surfaces)
+        if 'triangle' in mesh.cells_dict:
+            tris = mesh.cells_dict['triangle']
+            
+            # Get physical tags for triangles
+            # meshio stores generic data in cell_data_dict['gmsh:physical'] 
+            # or sometimes just 'physical' depending on version/format
+            phys_tags = None
+            if 'gmsh:physical' in mesh.cell_data_dict:
+                 # Check if we have data for 'triangle' block
+                 if 'triangle' in mesh.cell_data_dict['gmsh:physical']:
+                     phys_tags = mesh.cell_data_dict['gmsh:physical']['triangle']
+            
+            if phys_tags is not None:
+                for tri, tag in zip(tris, phys_tags):
+                    key = tuple(sorted(tri))
+                    # Map tag to name, or use "zone_TAG" if name missing
+                    zone_name = tag_to_name.get(tag, f"zone_{tag}")
+                    boundary_face_map[key] = zone_name
+            else:
+                print("[FluentConverter] No physical tags found for triangles. Using default 'wall'.")
+
+        print(f"[FluentConverter] Mapped {len(boundary_face_map)} boundary faces from input.")
+
+        # --- Call Exporter ---
+        # We need to pass the boundary_face_map to the exporter
+        # The exporter will use this to name the zones correctly
+        
+
+            
+        # Prepare tets (handle quadratic -> linear if needed)
+        tets = None
+        if 'tetra' in mesh.cells_dict:
+            tets = mesh.cells_dict['tetra']
+        elif 'tetra10' in mesh.cells_dict:
+            print("[FluentConverter] Found Quadratic (tetra10). Converting to Linear (tetra4)...")
+            tets = mesh.cells_dict['tetra10'][:, :4]
+            
+        if tets is None or len(tets) == 0:
+            print("[FluentConverter] No tetrahedra found to export!")
+            return False
+
+        # Import the advanced exporter
+        from core.export_fluent_msh import export_fluent_msh
+
+        return export_fluent_msh(
+            output_fluent, 
+            mesh.points, 
+            tets,
+            boundary_classifier=None, 
+            boundary_lookup=boundary_face_map,
+            verbose=True
+        )
+        
     except Exception as e:
         print(f"Conversion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False

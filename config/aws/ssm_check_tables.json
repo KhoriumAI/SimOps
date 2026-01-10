@@ -1,0 +1,11 @@
+{
+    "InstanceIds": [
+        "i-0bdb1e0eaa658cc7c"
+    ],
+    "DocumentName": "AWS-RunShellScript",
+    "Parameters": {
+        "commands": [
+            "runuser -l ec2-user -c \"/home/ec2-user/backend/venv/bin/python -c 'import sqlite3; conn=sqlite3.connect(\\\"backend/instance/mesh_app.db\\\"); cur=conn.cursor(); cur.execute(\\\"SELECT name FROM sqlite_master WHERE type=\\\\\\\"table\\\\\\\";\\\"); print(cur.fetchall());'\""
+        ]
+    }
+}
