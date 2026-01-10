@@ -2757,18 +2757,9 @@ def parse_msh_file(msh_filepath: str):
         traceback.print_exc()
         return {"error": str(e), "vertices": [], "colors": []}
 
-<<<<<<< HEAD
-
 app = create_app()
 
-
 # Note: cleanup_stuck_jobs(app) is called within create_app() in development.
-=======
-
-# Note: cleanup_stuck_jobs(app) is called within create_app() in development.
-
-
-
 if __name__ == '__main__':
     print("=" * 70)
     print("MESH GENERATION API SERVER v2.0")
