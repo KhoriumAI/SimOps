@@ -1223,9 +1223,9 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                             per_element_aspect_ratio[tag_str] = float(tri_ar[i])
                             per_element_min_angle[tag_str] = 60.0 # Default for triangles
                             
-                        print(f"[HXT] Included quality for {len(tri_tags)} surface elements")
+                        print(f\"[HXT] Included quality for {len(tri_tags)} surface elements\", flush=True)
                     except Exception as e:
-                        print(f"[HXT] Warning: Could not compute surface quality: {e}")
+                        print(f\"[HXT] Warning: Could not compute surface quality: {e}\", flush=True)
 
                 print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
                 print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
@@ -1244,11 +1244,13 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
 
         except Exception as qe:
             print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
-        
+        print("[HXT] Step 4: Writing mesh to disk...", flush=True)
         # Write output mesh
         gmsh.write(output_file)
+        print(f"[HXT] Mesh saved: {output_file}", flush=True)
         
         # Run CFD analysis on the current mesh (in-memory) to avoid double-init/finalize issues
+        print("[HXT] Step 5: Running CFD quality analysis...", flush=True)
         try:
             from core.cfd_quality import CFDQualityAnalyzer
             cfd_analyzer = CFDQualityAnalyzer(verbose=False)
