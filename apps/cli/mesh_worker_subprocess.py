@@ -65,7 +65,38 @@ def get_node_to_element_map(types, tags, nodes):
                 node_to_elem[nid].append(int(tag))
     return node_to_elem
 
+
 # ==============================================================================
+# CANARY WORKER (Isolated Process)
+# ==============================================================================
+def _canary_worker(file_path, results_queue):
+    """Worker function for 3D/2D meshing canary. Isolated in separate process."""
+    try:
+        import gmsh
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.option.setNumber("General.Verbosity", 1)
+        
+        # Ultra-stable settings for canary
+        gmsh.option.setNumber("General.NumThreads", 1)  # Disable OpenMP
+        gmsh.option.setNumber("Geometry.OCCAutoFix", 0) # Disable auto-healing
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
+        gmsh.option.setNumber("Mesh.Algorithm", 1)      # MeshAdapt (stable)
+        
+        gmsh.model.add("Canary")
+        gmsh.model.occ.importShapes(file_path)
+        gmsh.model.occ.synchronize()
+        
+        # Fast 2D mesh
+        gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt
+        gmsh.model.mesh.generate(2)
+        
+        gmsh.finalize()
+        results_queue.put(True)
+    except Exception as e:
+        # results_queue.put(False)
+        pass
+
 
 def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
@@ -73,17 +104,17 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
     
     Converts STEP to STL first, then runs cfMesh.
     """
-    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
+    print("[OpenFOAM-HEX] Step 0: Starting OpenFOAM hex mesh generation...", flush=True)
     
     try:
         # Step 1: Get STL path (either cached HQ STL or convert STEP now)
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[OpenFOAM-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            print(f"[OpenFOAM-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
             temp_stl = hq_stl_path
         else:
-            print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...")
+            print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...", flush=True)
             from strategies.hex_dominant_strategy import HighFidelityDiscretization
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
@@ -109,13 +140,13 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
         
         # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
+        print("[OpenFOAM-HEX] Step 2: Running cfMesh...", flush=True)
         result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
         
         if not result['success']:
             return result
         
-        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
+        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}", flush=True)
         
         return result
         
@@ -136,7 +167,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
     4. Generate conformal hex mesh
     5. Validate and save
     """
-    print("[CONFORMAL-HEX] Starting conformal hex mesh generation...")
+    print("[CONFORMAL-HEX] Step 0: Starting conformal hex mesh generation...", flush=True)
     
     try:
         import trimesh
@@ -145,10 +176,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[CONFORMAL-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            print(f"[CONFORMAL-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
             temp_stl = hq_stl_path
         else:
-            print("[CONFORMAL-HEX] Step 1: Converting STEP to STL (on-demand)...")
+            print("[CONFORMAL-HEX] Step 1: Converting STEP to STL (on-demand)...", flush=True)
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
             success = discretizer.convert_step_to_stl(
@@ -163,7 +194,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
 
         
         # Step 2: CoACD decomposition
-        print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...")
+        print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...", flush=True)
         decomposer = ConvexDecomposition(verbose=True)
         threshold = quality_params.get('coacd_threshold', 0.05) if quality_params else 0.05
         parts, stats = decomposer.decompose_mesh(temp_stl, threshold=threshold)
@@ -171,10 +202,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         if len(parts) == 0:
             return {'success': False, 'message': 'CoACD produced no parts'}
         
-        print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)))
+        print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)), flush=True)
         
         # Step 3: Generate ADAPTIVE conformal hex mesh (STRICT QUALITY MODE)
-        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...")
+        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...", flush=True)
         
         # Strict adaptive parameters for high-quality curved surface meshing
         quality_target = quality_params.get('quality_target', 0.98) if quality_params else 0.98  # 98% valid!
@@ -201,10 +232,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         hexes = result['hexes']
         
         print("[CONFORMAL-HEX] Generated {} hexes with {} vertices".format(
-            len(hexes), len(vertices)))
+            len(hexes), len(vertices)), flush=True)
         
         # Step 4: Save mesh (Gmsh 2.2 ASCII format for GUI compatibility)
-        print("[CONFORMAL-HEX] Step 4: Saving mesh...")
+        print("[CONFORMAL-HEX] Step 4: Saving mesh...", flush=True)
         mesh_folder = Path(__file__).parent / "generated_meshes"
         mesh_folder.mkdir(exist_ok=True)
         mesh_name = Path(cad_file).stem
@@ -245,7 +276,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
                 boundary_faces.append(face_to_elem[face_nodes])
                 boundary_face_parents.append(face_to_hex_idx[face_nodes])
         
-        print("[CONFORMAL-HEX] Extracted {} boundary quads for visualization".format(len(boundary_faces)))
+        print("[CONFORMAL-HEX] Extracted {} boundary quads for visualization".format(len(boundary_faces)), flush=True)
 
         with open(output_file, 'w') as f:
             f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
@@ -657,7 +688,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         import trimesh
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
+        print("[HEX-DOM] Step 0: Starting hex-dominant meshing pipeline...", flush=True)
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -673,10 +704,10 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[HEX-DOM] Step 1: Using cached high-quality STL: {hq_stl_path}")
+            print(f"[HEX-DOM] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
             stl_file = Path(hq_stl_path)
         else:
-            print("[HEX-DOM] Step 1: Converting STEP to STL (on-demand)...")
+            print("[HEX-DOM] Step 1: Converting STEP to STL (on-demand)...", flush=True)
             step1 = HighFidelityDiscretization()
             stl_file = temp_dir / f"{mesh_name}_step1.stl"
             success = step1.convert_step_to_stl(cad_file, str(stl_file))
@@ -687,17 +718,17 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
             import shutil
             shutil.copy(stl_file, saved_stl_step1)
-            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
+            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}", flush=True)
         
         # Step 2: CoACD Decomposition
-        print("[HEX-DOM] Step 2: CoACD convex decomposition...")
+        print("[HEX-DOM] Step 2: CoACD convex decomposition...", flush=True)
         step2 = ConvexDecomposition()
         parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
         
         if not parts:
             return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
         
-        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
+        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)", flush=True)
         
         # INTERMEDIATE UPDATE: CoACD Parts
         try:
@@ -738,7 +769,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                 gmsh.finalize()
         
         # Step 3-5: Hex Meshing
-        print("[HEX-DOM] Step 3-5: Generating hex mesh via subdivision...")
+        print("[HEX-DOM] Step 3: Generating hex mesh via subdivision...", flush=True)
         
         gmsh.initialize()
         gmsh.model.add("hex_dom_final")
@@ -771,7 +802,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             gmsh.model.geo.addVolume([l])
             gmsh.model.geo.synchronize()
             
-            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces")
+            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces", flush=True)
         except Exception as e:
             gmsh.finalize()
             return {'success': False, 'message': f'Step 3 failed: Surface classification - {e}'}
@@ -779,7 +810,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         # Generate 3D tet mesh first
         try:
             gmsh.model.mesh.generate(3)
-            print("[HEX-DOM] Generated intermediate tet mesh")
+            print("[HEX-DOM] Generated intermediate tet mesh", flush=True)
             
             # INTERMEDIATE UPDATE: Unstructured Tet Mesh (Before subdivision)
             tet_temp = str(mesh_folder / f"{mesh_name}_tet_temp.msh")
@@ -791,7 +822,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             return {'success': False, 'message': f'Step 4 failed: Tet meshing - {e}'}
         
         # Apply subdivision (tet → hex)
-        print("[HEX-DOM] Applying subdivision algorithm...")
+        print("[HEX-DOM] Applying subdivision algorithm...", flush=True)
         gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
         gmsh.model.mesh.refine()
         
@@ -830,7 +861,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                     per_element_skewness.append(1.0 - quality)
                     per_element_aspect_ratio.append(1.0 / max(quality, 0.01))
                 
-                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
+                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements", flush=True)
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
         
@@ -848,7 +879,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         except Exception as cfd_err:
             print(f"[HEX-DOM] Warning: CFD quality analysis failed: {cfd_err}")
 
-        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)")
+        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)", flush=True)
         
         return {
             'success': True,
@@ -890,7 +921,7 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
     Generate polyhedral mesh using Dual Graph strategy
     """
     try:
-        print("[POLYHEDRAL] Starting Polyhedral (Dual) meshing pipeline...")
+        print("[POLYHEDRAL] Step 0: Starting Polyhedral (Dual) meshing pipeline...", flush=True)
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -963,7 +994,7 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
     Optimization: Standard (no slow Netgen)
     """
     try:
-        print("[HXT] Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
+        print("[HXT] Step 0: Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
         start_time = time.time()
         
         # Determine output path - include quality preset and unique ID to avoid overwrites
@@ -982,10 +1013,10 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         # Load CAD (either cached HQ STL or convert STEP now)
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[HXT] Using cached high-quality STL: {hq_stl_path}", flush=True)
+            print(f"[HXT] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
             gmsh.merge(hq_stl_path)
         else:
-            print(f"[HXT] Loading CAD: {cad_file}", flush=True)
+            print(f"[HXT] Step 1: Loading CAD: {cad_file}", flush=True)
             gmsh.model.occ.importShapes(cad_file)
         gmsh.model.occ.synchronize()
         
@@ -1032,6 +1063,7 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         print(f"[MESH] Using Algorithm2D={mesh_algo_2d} ({algo_names.get(mesh_algo_2d, '?')}), Algorithm3D={mesh_algo_3d} ({algo_names.get(mesh_algo_3d, '?')})", flush=True)
         
         # 1. First Attempt: Selected algorithm
+        print(f"[HXT] Step 2: Generating Mesh (Algo2D={mesh_algo_2d}, Algo3D={mesh_algo_3d})...", flush=True)
         try:
             gmsh.option.setNumber("Mesh.Algorithm", mesh_algo_2d)
             gmsh.option.setNumber("Mesh.Algorithm3D", mesh_algo_3d)
@@ -1054,13 +1086,13 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         
         if full_optimization:
             # FULL OPTIMIZATION: Netgen + heavy smoothing (production quality)
-            print("[HXT] Running FULL optimization (Netgen + heavy smoothing)...", flush=True)
+            print("[HXT] Step 3: Running FULL optimization (Netgen + heavy smoothing)...", flush=True)
             gmsh.option.setNumber("Mesh.Optimize", 1)
             gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)  # Enable Netgen refinement
             gmsh.option.setNumber("Mesh.Smoothing", 10)      # Heavy smoothing
         else:
             # FAST MODE: Light optimization only (speed priority)
-            print("[HXT] Running FAST optimization (no Netgen)...", flush=True)
+            print("[HXT] Step 3: Running FAST optimization (no Netgen)...", flush=True)
             gmsh.option.setNumber("Mesh.Optimize", 1)
             gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
             gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
@@ -1364,7 +1396,74 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             print(f"[DEBUG] Strategy normalization: '{orig_strat}' -> '{mesh_strategy}'")
             
         # =====================================================================
-        # Continue with standard mesh strategy dispatch
+        # UNIVERSAL CANARY (All Strategies)
+        # =====================================================================
+        # Skip canary for Exhaustive since it has its own built-in robust checks
+        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
+            import multiprocessing
+            print("\n[CANARY] ----------------------------------------", flush=True)
+            print("[CANARY] Running Universal Pre-Flight Checks...", flush=True)
+            
+            # 1. Complexity Analysis (1D) using simple Gmsh load
+            try:
+                gmsh.initialize()
+                gmsh.model.add("Canary_Analyzer")
+                gmsh.option.setNumber("General.Terminal", 0)
+                gmsh.option.setNumber("General.Verbosity", 0)
+                
+                # Check extension to decide import method
+                ext = Path(cad_file).suffix.lower()
+                if ext in ['.stl', '.obj']:
+                    gmsh.merge(cad_file)
+                else:
+                    gmsh.model.occ.importShapes(cad_file)
+                    gmsh.model.occ.synchronize()
+                
+                v_count = len(gmsh.model.getEntities(3))
+                s_count = len(gmsh.model.getEntities(2))
+                c_count = len(gmsh.model.getEntities(1))
+                p_count = len(gmsh.model.getEntities(0))
+                
+                print(f"[CANARY] Geometry Stats: {v_count} Volumes, {s_count} Surfaces, {c_count} Curves", flush=True)
+                
+                # 2. 2D Surface Canary (Universal)
+                # This is critical for assemblies (>= 3 volumes) to identify problematic parts early.
+                print(f"[CANARY] Running 2D surface canary (timeout: 10s)...", flush=True)
+                
+                q = multiprocessing.Queue()
+                p = multiprocessing.Process(target=_canary_worker, args=(cad_file, q))
+                p.start()
+                p.join(10)
+                
+                if p.is_alive():
+                    print("[CANARY] [WARNING] 2D Canary timed out! One or more parts in this assembly are complex.", flush=True)
+                    p.terminate()
+                    p.join()
+                else:
+                    if not q.empty() and q.get() is True:
+                        print("[CANARY] [OK] 2D Surface Meshable.", flush=True)
+                    else:
+                        print("[CANARY] [WARNING] 2D Canary failed (crashed/errored).", flush=True)
+                
+                gmsh.finalize()
+                
+            except Exception as e:
+                print(f"[CANARY] [WARNING] Canary analysis failed: {e}", flush=True)
+                if gmsh.isInitialized():
+                    try: 
+                        gmsh.finalize()
+                    except: 
+                        pass
+            
+            print("[CANARY] ----------------------------------------\n", flush=True)
+
+            # Strategy Announcement
+            print(f"[INFO] ==================================================", flush=True)
+            print(f"[INFO] Selected Strategy: {mesh_strategy}", flush=True)
+            print(f"[INFO] ==================================================", flush=True)
+            
+        # =====================================================================
+        # Validate strategy again in case it was normalized (above code handles normalization)
         # =====================================================================
         
         if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
