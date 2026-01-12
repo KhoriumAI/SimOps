@@ -1,0 +1,44 @@
+{
+  "summary": {
+    "total_count": 1,
+    "completed_count": 1,
+    "failed_count": 0,
+    "passed_count": 1,
+    "success_rate": 1.0,
+    "pass_rate": 1.0,
+    "total_time_s": 2.6431875228881836
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "mesh_name": "Cube_test",
+      "composite_score": 0.725,
+      "scores": {
+        "max_temp": 1.0,
+        "uniformity": 0.5,
+        "gradient": 0.5,
+        "solve_time": 1.0,
+        "mesh_quality": 0.5
+      },
+      "max_temp_c": 85.0,
+      "passed": true
+    }
+  ],
+  "results": [
+    {
+      "mesh_name": "Cube_test",
+      "mesh_file": "verification_lab\\Cube_test.msh",
+      "success": true,
+      "passed": true,
+      "fail_reason": null,
+      "solver_used": "calculix",
+      "min_temp_c": 85.0,
+      "max_temp_c": 85.0,
+      "avg_temp_c": 85.0,
+      "solve_time_s": 0.5963752269744873,
+      "num_elements": 0,
+      "vtk_file": "verification_lab\\report_test_output\\Cube_test\\Cube_test.vtu",
+      "error": null
+    }
+  ]
+}

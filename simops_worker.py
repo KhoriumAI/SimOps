@@ -1498,6 +1498,8 @@ def run_cfd_simulation(
             
         if hasattr(phy, 'kinematic_viscosity'):
             solver_config['kinematic_viscosity'] = phy.kinematic_viscosity
+            if hasattr(phy, 'mesh_scale_factor') and phy.mesh_scale_factor is not None:
+                solver_config['mesh_scale_factor'] = phy.mesh_scale_factor
             
         # Log CFD Metadata
         if hasattr(phy, 'inlet_velocity'):

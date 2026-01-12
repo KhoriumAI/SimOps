@@ -1,0 +1,73 @@
+{
+  "summary": {
+    "total_count": 2,
+    "completed_count": 2,
+    "failed_count": 0,
+    "passed_count": 2,
+    "success_rate": 1.0,
+    "pass_rate": 1.0,
+    "total_time_s": 36.503315687179565
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "mesh_name": "00040000_fc21414ac8dd4a879b485b51_step_001_mesh",
+      "composite_score": 0.6410369480759116,
+      "scores": {
+        "max_temp": 1.0,
+        "uniformity": 0.004147792303646294,
+        "gradient": 0.5,
+        "solve_time": 1.0,
+        "mesh_quality": 0.9
+      },
+      "max_temp_c": 85.0,
+      "passed": true
+    },
+    {
+      "rank": 2,
+      "mesh_name": "Airfoil_mesh",
+      "composite_score": 0.509659383111423,
+      "scores": {
+        "max_temp": 1.0,
+        "uniformity": 0.0386375324456921,
+        "gradient": 0.5,
+        "solve_time": 0.0,
+        "mesh_quality": 1.0
+      },
+      "max_temp_c": 85.0,
+      "passed": true
+    }
+  ],
+  "results": [
+    {
+      "mesh_name": "00040000_fc21414ac8dd4a879b485b51_step_001_mesh",
+      "mesh_file": "apps\\cli\\generated_meshes\\00040000_fc21414ac8dd4a879b485b51_step_001_mesh.msh",
+      "success": true,
+      "passed": true,
+      "fail_reason": null,
+      "solver_used": "calculix",
+      "min_temp_c": 25.0,
+      "max_temp_c": 85.0,
+      "avg_temp_c": 55.61660247008879,
+      "solve_time_s": 0.9972414970397949,
+      "num_elements": 9000,
+      "vtk_file": "verification_lab\\demo_output\\00040000_fc21414ac8dd4a879b485b51_step_001_mesh\\00040000_fc21414ac8dd4a879b485b51_step_001_mesh.vtu",
+      "error": null
+    },
+    {
+      "mesh_name": "Airfoil_mesh",
+      "mesh_file": "apps\\cli\\generated_meshes\\Airfoil_mesh.msh",
+      "success": true,
+      "passed": true,
+      "fail_reason": null,
+      "solver_used": "calculix",
+      "min_temp_c": 25.0,
+      "max_temp_c": 85.0,
+      "avg_temp_c": 31.87970760585995,
+      "solve_time_s": 19.162829875946045,
+      "num_elements": 210010,
+      "vtk_file": "verification_lab\\demo_output\\Airfoil_mesh\\Airfoil_mesh.vtu",
+      "error": null
+    }
+  ]
+}

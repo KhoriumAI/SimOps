@@ -255,22 +255,45 @@ class CalculiXAdapter(ISolver):
             
             # Fallback to geometric heuristic if no semantic tags found
             if not heat_source_found:
-                z = node_coords[:, 2]
-                z_min, z_max = np.min(z), np.max(z)
-                z_rng = z_max - z_min
+                # Find best axis for gradient (avoid flat axes)
+                ranges = [
+                    np.max(node_coords[:, 0]) - np.min(node_coords[:, 0]),
+                    np.max(node_coords[:, 1]) - np.min(node_coords[:, 1]),
+                    np.max(node_coords[:, 2]) - np.min(node_coords[:, 2])
+                ]
+                
+                # Default to Z, but if it's too flat, pick the largest dimension
+                axis_idx = 2
+                if ranges[2] < 1e-4 or (ranges[2] < 0.01 * max(ranges[0], ranges[1])):
+                    axis_idx = np.argmax(ranges)
+                    logger.info(f"[CalculiX] Mesh flat in Z ({ranges[2]:.4f}). Auto-selecting axis {axis_idx} (range={ranges[axis_idx]:.4f})")
+
+                coords = node_coords[:, axis_idx]
+                c_min, c_max = np.min(coords), np.max(coords)
+                c_rng = c_max - c_min if c_max > c_min else 1.0
                 tol = config.get("bc_tolerance", 0.01)
                 
-                # NEW: heat_source_at_z_min option (default True for typical "base heater" scenario)
+                # NEW: heat_source_at_min option (applies to the selected axis)
                 if config.get("heat_source_at_z_min", True):
-                    hot_mask = z < (z_min + tol * z_rng)
-                    cold_mask = z > (z_max - tol * z_rng)
+                    hot_mask = coords < (c_min + tol * c_rng)
+                    cold_mask = coords > (c_max - tol * c_rng)
                 else:
-                    hot_mask = z > (z_max - tol * z_rng)
-                    cold_mask = z < (z_min + tol * z_rng)
+                    hot_mask = coords > (c_max - tol * c_rng)
+                    cold_mask = coords < (c_min + tol * c_rng)
                 
                 hot_tags = node_tags[hot_mask].astype(int)
                 cold_tags = node_tags[cold_mask].astype(int)
-                logger.info(f"[CalculiX] Using geometric fallback for boundaries (heat_source_at_z_min={config.get('heat_source_at_z_min', True)})")
+                
+                # Safety: Ensure we don't select the entire mesh if it's truly degenerate
+                if len(hot_tags) >= len(node_tags) * 0.9:
+                    # Just grab top/bottom few nodes
+                    sort_idx = np.argsort(coords)
+                    hot_tags = node_tags[sort_idx[:max(1, len(node_tags)//100)]].astype(int)
+                    cold_tags = node_tags[sort_idx[-max(1, len(node_tags)//100):]].astype(int)
+                    logger.warning("[CalculiX] BC selection too broad. Capping to top/bottom 1% of nodes.")
+
+                logger.info(f"[CalculiX] Using geo-fallback (axis {axis_idx}) for boundaries: {len(hot_tags)} hot, {len(cold_tags)} cold nodes.")
+
             
             # Write INP
             with open(inp_file, 'w') as f:
@@ -474,10 +497,11 @@ class CalculiXAdapter(ISolver):
                     for tag in hot_tags:
                         f.write(f"{tag}, 11, 11, {t_hot}\n")
                         
-                # Cold BC (Z-Min) - Optional (e.g. for convection-only tip)
-                if config.get("fix_cold_boundary", False):  # Default to False for natural convection
+                # Cold BC - Default to True for a clear gradient unless explicitly disabled
+                if config.get("fix_cold_boundary", True): 
                     for tag in cold_tags:
                         f.write(f"{tag}, 11, 11, {t_cold}\n")
+                    logger.info(f"   [Physics] Fixed Cold Boundary at {t_cold_in}C ({len(cold_tags)} nodes)")
                     
                 # Convection (*SFILM on *SURFACE)
                 # The old *FILM on E_Skin shell elements fails in CCX 2.17.
@@ -613,7 +637,9 @@ class CalculiXAdapter(ISolver):
                 
             return {
                 'node_map': dict(zip(node_tags, node_coords)),
-                'elements': remapped_elems # Now 0-based indices
+                'elements': remapped_elems, # Now 0-based indices
+                'num_nodes': len(node_tags),
+                'num_elements': len(remapped_elems)
             }
         finally:
             gmsh.finalize()

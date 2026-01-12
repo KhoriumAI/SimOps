@@ -72,6 +72,7 @@ class PhysicsConfig(BaseModel):
     # CFD Specifics
     kinematic_viscosity: float = Field(default=1e-5, description="Fluid kinematic viscosity (m2/s)")
     virtual_wind_tunnel: Optional[bool] = Field(default=None, description="Enable Virtual Wind Tunnel (External Flow). If None, auto-detects based on velocity.")
+    mesh_scale_factor: Optional[float] = Field(default=1.0, description="Scale geometry (e.g. 0.001 for mm->m)")
     
     # Structural - Gravity
     gravity_load_g: float = Field(default=0.0, description="Gravity load in Gs")

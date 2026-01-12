@@ -50,13 +50,13 @@ class ThermalPDFReportGenerator:
         
         # Key Metrics Table
         c.setFillColorRGB(0, 0, 0)
-        y_start = self.height - 4.8 * cm # Compressed header
+        y_start = self.height - 6.0 * cm # Increased clearance from 4.8cm
         c.setFont("Helvetica-Bold", 14)
         c.drawString(2 * cm, y_start + 0.5 * cm, "Thermal Metrics")
         
         # Format metrics
-        max_temp = data.get('max_temp_k') or 0.0
-        min_temp = data.get('min_temp_k') or 0.0
+        max_temp = data.get('max_temp_k') or data.get('max_temp_c', 0.0) + 273.15
+        min_temp = data.get('min_temp_k') or data.get('min_temp_c', 0.0) + 273.15
         delta_t = max_temp - min_temp
         
         metrics = [

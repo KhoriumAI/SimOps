@@ -172,6 +172,11 @@ class CFDMeshStrategy:
             
             # Write output
             self._log(f"Writing mesh to: {output_file}")
+            
+            # [Critical] Force MSH 2.2 for OpenFOAM compatibility
+            # gmshToFoam often results in "bad stream" or "unknown element" with MSH 4.1
+            gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+            
             gmsh.write(output_file)
             
             # Also write VTK
