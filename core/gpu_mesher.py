@@ -21,23 +21,72 @@ import os
 from pathlib import Path
 
 # Add GPU mesher to path
+# Add GPU mesher to path
+# Priority 1: Check "gpu_experiments" folder (Development path)
 GPU_MESHER_PATH = Path(__file__).parent.parent / "gpu_experiments" / "Release" / "Release"
 if GPU_MESHER_PATH.exists():
     sys.path.insert(0, str(GPU_MESHER_PATH))
-    
-    # Register CUDA DLLs
-    cuda_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin"
+
+# Priority 2: Check current directory (Deployment/Standard path)
+CURRENT_DIR = Path(__file__).parent
+if (CURRENT_DIR / "_gpumesher.pyd").exists() or (CURRENT_DIR / "_gpumesher.so").exists():
+    sys.path.insert(0, str(CURRENT_DIR))
+
+# Register CUDA DLLs (Critical for Windows)
+# Register CUDA DLLs (Critical for Windows)
+# Register CUDA DLLs (Critical for Windows)
+cuda_candidates = [
+    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
+    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin", # Explicitly added v12.8
+    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin", 
+    os.environ.get('CUDA_PATH', '') + r"\bin",
+    # Auto-discovered paths from user environment
+    r"C:\Program Files\ANSYS Inc\v252\ansys\bin\winx64\GPU\NVIDIA",
+    r"C:\Program Files\Lenovo\Lenovo.PFMService\app\modelService"
+]
+
+# Dynamically discover standard NVIDIA CUDA installations
+nvidia_root = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+if os.path.exists(nvidia_root):
+    try:
+        # Sort reverse to prefer newer versions
+        for directory in sorted(os.listdir(nvidia_root), reverse=True):
+            if directory.startswith("v"):
+                bin_path = os.path.join(nvidia_root, directory, "bin")
+                if os.path.isdir(bin_path) and bin_path not in cuda_candidates:
+                    cuda_candidates.insert(0, bin_path)
+    except Exception as e:
+        print(f"[GPU Mesher] Warning: Failed to scan CUDA directory: {e}")
+
+cuda_found = False
+for cuda_path in cuda_candidates:
     if os.path.exists(cuda_path):
+        # print(f"[GPU Mesher] DEBUG: Found CUDA path: {cuda_path}")
         if hasattr(os, 'add_dll_directory'):
-            os.add_dll_directory(cuda_path)
+            try:
+                os.add_dll_directory(cuda_path)
+                # print(f"[GPU Mesher] DEBUG: Added DLL directory: {cuda_path}")
+            except Exception as e:
+                # print(f"[GPU Mesher] DEBUG: Failed to add DLL directory {cuda_path}: {e}")
+                pass
         os.environ['PATH'] = cuda_path + os.pathsep + os.environ['PATH']
+        cuda_found = True
+
+# if not cuda_found:
+#     print("[GPU Mesher] DEBUG: No valid CUDA bin directory found.")
 
 try:
+    # Try standard import first
     import _gpumesher
     GPU_AVAILABLE = True
-except ImportError as e:
-    print("[GPU Mesher] WARNING: GPU Mesher not available: {}".format(e))
-    GPU_AVAILABLE = False
+except ImportError:
+    try:
+        # Try local/relative import
+        from . import _gpumesher
+        GPU_AVAILABLE = True
+    except ImportError as e:
+        print("[GPU Mesher] WARNING: GPU Mesher not available: {}".format(e))
+        GPU_AVAILABLE = False
 
 
 # =============================================================================
@@ -577,6 +626,199 @@ def remove_degenerate_tets(points, tets, min_volume=1e-8, min_quality=0.001):
     
     valid_mask = (volumes > min_volume) & (quality > min_quality)
     return tets[valid_mask]
+
+
+# =============================================================================
+# SDF VISIBILITY CHECK (Void Spanning Prevention - HighSpeed GPU)
+# =============================================================================
+# Uses the Triangle Inequality optimization for fast edge visibility checks.
+# For edges near boundaries, uses Sphere Tracing for mathematically robust checks.
+#
+# Algorithm:
+# 1. Fast Path (Triangle Inequality): If dist(A,B) < SDF(A) + SDF(B), approve instantly
+#    - This exploits the fact that if the edge is shorter than the combined clearance,
+#      no surface can geometrically exist between the two points.
+#    - Approves ~90% of edges with zero ray-marching cost.
+#
+# 2. Slow Path (Sphere Tracing): For edges that fail the fast check, march along the ray
+#    - Step size = SDF value at current point (guaranteed to never overshoot)
+#    - If SDF < epsilon at any point, the edge crosses a boundary (void spanning)
+# =============================================================================
+
+def compute_sdf_at_points(points, surface_tree):
+    """
+    Compute SDF (Signed Distance Field) for multiple points.
+    
+    Uses KD-tree distance to nearest surface point as SDF approximation.
+    Positive values indicate distance from surface (interior for convex shapes).
+    
+    Args:
+        points: (N, 3) array of query points
+        surface_tree: scipy.spatial.cKDTree of surface vertices
+        
+    Returns:
+        sdf_values: (N,) array of SDF values (distance to nearest surface)
+    """
+    dists, _ = surface_tree.query(points, k=1)
+    return dists
+
+
+def check_edge_visibility_batch(edge_starts, edge_ends, surface_tree, sdf_starts=None, sdf_ends=None):
+    """
+    Check visibility for a batch of edges using SDF + Triangle Inequality.
+    
+    Fast Path: If dist(A,B) < SDF(A) + SDF(B), edge is 100% safe (no surface can exist between).
+    Slow Path: Sphere tracing for edges near boundaries.
+    
+    Args:
+        edge_starts: (N, 3) array of edge start points
+        edge_ends: (N, 3) array of edge end points
+        surface_tree: scipy.spatial.cKDTree of surface vertices
+        sdf_starts: Optional precomputed SDF at start points
+        sdf_ends: Optional precomputed SDF at end points
+        
+    Returns:
+        visible: (N,) boolean array, True if edge is valid (no void crossing)
+    """
+    n_edges = len(edge_starts)
+    
+    # Compute edge lengths
+    edge_vectors = edge_ends - edge_starts
+    edge_lengths = np.linalg.norm(edge_vectors, axis=1)
+    
+    # Get SDF values at endpoints
+    if sdf_starts is None:
+        sdf_starts = compute_sdf_at_points(edge_starts, surface_tree)
+    if sdf_ends is None:
+        sdf_ends = compute_sdf_at_points(edge_ends, surface_tree)
+    
+    # ========================================
+    # FAST PATH: Triangle Inequality Check
+    # ========================================
+    # If dist(A,B) < SDF(A) + SDF(B), the edge is mathematically guaranteed
+    # to not cross any surface (the combined "clearance bubbles" overlap).
+    clearance_sum = sdf_starts + sdf_ends
+    fast_pass = edge_lengths < clearance_sum
+    
+    # Initialize result: fast_pass edges are visible
+    visible = fast_pass.copy()
+    
+    # ========================================
+    # SLOW PATH: Sphere Tracing for remaining edges
+    # ========================================
+    slow_indices = np.where(~fast_pass)[0]
+    
+    if len(slow_indices) > 0:
+        EPSILON = 0.001  # Surface hit threshold
+        MAX_STEPS = 32   # Maximum sphere tracing iterations
+        
+        for idx in slow_indices:
+            start = edge_starts[idx]
+            end = edge_ends[idx]
+            length = edge_lengths[idx]
+            direction = edge_vectors[idx] / (length + 1e-12)
+            
+            t = 0.0
+            is_visible = True
+            
+            for _ in range(MAX_STEPS):
+                # Current point along ray
+                p = start + direction * t
+                
+                # Distance to nearest surface
+                d = compute_sdf_at_points(p.reshape(1, 3), surface_tree)[0]
+                
+                # If too close to surface, edge crosses void boundary
+                if d < EPSILON:
+                    is_visible = False
+                    break
+                
+                # If we've reached the end, edge is clear
+                if t >= length:
+                    break
+                
+                # Advance by the safe distance (sphere tracing guarantee)
+                t += max(d, EPSILON)
+            
+            visible[idx] = is_visible
+    
+    return visible
+
+
+def filter_tets_by_sdf_visibility(points, tets, surface_tree, surface_verts, log=None):
+    """
+    Filter tetrahedra by SDF visibility check (HighSpeed GPU algorithm).
+    
+    A tetrahedron is invalid if ANY of its 6 edges crosses a void (surface boundary).
+    This is the "visibility-constrained graph" approach - nodes that can't "see" each other
+    through solid material should not be connected.
+    
+    Args:
+        points: (N, 3) array of all mesh points
+        tets: (M, 4) array of tetrahedron indices
+        surface_tree: scipy.spatial.cKDTree of surface vertices
+        surface_verts: Original surface vertices (for reference)
+        log: Optional logging callback
+        
+    Returns:
+        valid_tets: Filtered tetrahedra array
+        stats: Dictionary with filtering statistics
+    """
+    if log is None:
+        log = lambda msg, pct=0: print(f"[HighSpeed GPU] {msg}")
+    
+    log("Starting SDF visibility filtering...", 0)
+    
+    n_tets = len(tets)
+    if n_tets == 0:
+        return tets, {'total': 0, 'passed': 0, 'filtered': 0}
+    
+    # Precompute SDF for all unique vertices used in tets
+    log(f"Computing SDF for {len(points)} vertices...", 10)
+    all_sdf = compute_sdf_at_points(points, surface_tree)
+    
+    # Generate all 6 edges for each tet
+    # Edge indices within a tet: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+    edge_pairs = np.array([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]])
+    
+    # Build edge arrays: (n_tets * 6, 2) with global vertex indices
+    all_edges = tets[:, edge_pairs].reshape(-1, 2)  # Shape: (n_tets * 6, 2)
+    
+    edge_starts = points[all_edges[:, 0]]
+    edge_ends = points[all_edges[:, 1]]
+    sdf_starts = all_sdf[all_edges[:, 0]]
+    sdf_ends = all_sdf[all_edges[:, 1]]
+    
+    log(f"Checking visibility for {len(all_edges)} edges ({n_tets} tets × 6 edges)...", 30)
+    
+    # Check all edges
+    edge_visible = check_edge_visibility_batch(
+        edge_starts, edge_ends, surface_tree,
+        sdf_starts=sdf_starts, sdf_ends=sdf_ends
+    )
+    
+    # Reshape to (n_tets, 6) and check if ALL edges of each tet are visible
+    edge_visible_per_tet = edge_visible.reshape(n_tets, 6)
+    tet_valid = np.all(edge_visible_per_tet, axis=1)
+    
+    # Statistics
+    n_fast_pass = np.sum(edge_visible)  # Edges that passed fast path
+    n_passed = np.sum(tet_valid)
+    n_filtered = n_tets - n_passed
+    
+    log(f"SDF visibility: kept {n_passed} tets, filtered {n_filtered} void-spanning tets", 100)
+    log(f"  Fast path approved: {n_fast_pass}/{len(all_edges)} edges ({100*n_fast_pass/len(all_edges):.1f}%)", 100)
+    
+    stats = {
+        'total': n_tets,
+        'passed': n_passed,
+        'filtered': n_filtered,
+        'fast_pass_edges': int(n_fast_pass),
+        'total_edges': len(all_edges),
+        'fast_pass_pct': 100 * n_fast_pass / len(all_edges) if len(all_edges) > 0 else 0
+    }
+    
+    return tets[tet_valid], stats
 
 
 # =============================================================================

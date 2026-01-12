@@ -69,8 +69,6 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
-  // Fast Mode - optimized preview generation
-  const [fastMode, setFastMode] = useState(true)
 
 
   // UX states for input boxes to allow typing (including blank)
@@ -306,9 +304,7 @@ function App() {
   const fetchCadPreview = async (projectId, filename, useFastMode = false) => {
     try {
       // Pass fast_mode as query parameter
-      const url = useFastMode
-        ? `${API_BASE}/projects/${projectId}/preview?fast_mode=true`
-        : `${API_BASE}/projects/${projectId}/preview`
+      const url = `${API_BASE}/projects/${projectId}/preview?fast_mode=true`
 
       const response = await authFetch(url)
       if (response.ok) {
@@ -341,7 +337,7 @@ function App() {
 
           setLogs(prev => [
             ...prev,
-            `[INFO] Loaded CAD: ${filename}${useFastMode ? ' ⚡ Fast Mode' : ''}`,
+            `[INFO] Loaded CAD: ${filename} ⚡`,
             ``,
             `📐 CAD Geometry Info:`,
             `   • Volumes: ${geo.volumes}`,
@@ -430,7 +426,7 @@ function App() {
       setIsPolling(false)
 
       // Fetch CAD preview to show geometry before meshing
-      await fetchCadPreview(data.project_id, file.name, fastMode)
+      await fetchCadPreview(data.project_id, file.name, true)
       setIsUploading(false)
       setUploadProgress(0)
     } catch (error) {
@@ -920,20 +916,6 @@ function App() {
                     Curvature-Adaptive
                   </label>
 
-                  {/* Fast Mode Toggle - Experimental */}
-                  <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs mt-1" title="Uses SSH compute with optimized settings. Faster but experimental.">
-                    <input
-                      type="checkbox"
-                      checked={fastMode}
-                      onChange={(e) => setFastMode(e.target.checked)}
-                      className="accent-green-500"
-                      disabled={isGenerating}
-                    />
-                    <span className="flex items-center gap-1">
-                      ⚡ Fast Mode
-                      <span className="text-[9px] text-green-600 bg-green-100 px-1 py-0.5 rounded">BETA</span>
-                    </span>
-                  </label>
 
                 </div>
               </div>
@@ -996,7 +978,7 @@ function App() {
         </div>
 
         {/* Center Panel - Viewer + Console */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
           {/* 3D Viewer - Takes most of the space */}
           <div className="flex-1 relative min-h-0">
             <MeshViewer

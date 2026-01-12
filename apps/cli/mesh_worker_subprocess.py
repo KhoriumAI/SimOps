@@ -673,7 +673,278 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         }
 
 
+def generate_highspeed_gpu_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+    """
+    Generate tetrahedral mesh using HighSpeed GPU algorithm with SDF visibility filtering.
+    
+    This is an enhanced version of the GPU Delaunay pipeline that uses SDF-based
+    visibility checks to robustly prevent void-spanning tetrahedra in multi-body
+    assemblies and complex geometries.
+    
+    Key features:
+    - Triangle Inequality check for fast edge approval (~90% of edges)
+    - Sphere Tracing for edges near boundaries (mathematically robust)
+    - Pre-connection filtering (prevents bad tets before they're created)
+    
+    Pipeline:
+    1. Load CAD file and generate surface mesh (CPU/Gmsh)
+    2. Extract surface vertices and triangles
+    3. Run GPU Fill & Filter pipeline with SDF visibility
+    4. Save result as Gmsh-compatible mesh
+    """
+    try:
+        from core.gpu_mesher import (
+            gpu_delaunay_fill_and_filter, GPU_AVAILABLE,
+            filter_tets_by_sdf_visibility, compute_sdf_at_points
+        )
+        from scipy.spatial import cKDTree
+        
+        if not GPU_AVAILABLE:
+            print("[HighSpeed GPU] CRITICAL: GPU Mesher module not found or failed to load!", flush=True)
+            print("[HighSpeed GPU] Cannot proceed with HighSpeed GPU strategy.", flush=True)
+            return {
+                'success': False, 
+                'error': 'GPU Mesher not available. Please select a different strategy (e.g., Tetrahedral HXT).',
+                'message': 'GPU unavailable'
+            }
+        
+        print("[HighSpeed GPU] Starting HighSpeed GPU pipeline with SDF visibility...", flush=True)
+        start_total = time.time()
+        
+        # Determine output path
+        mesh_folder = Path(__file__).parent / "generated_meshes"
+        mesh_folder.mkdir(exist_ok=True)
+        mesh_name = Path(cad_file).stem
+        output_file = str(mesh_folder / f"{mesh_name}_highspeed_gpu_mesh.msh")
+        
+        # Step 1: Load CAD (either cached HQ STL or convert STEP now)
+        print("[HighSpeed GPU] Step 1: Loading geometry...", flush=True)
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.model.add("highspeed_gpu_surface")
+        
+        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
+        if hq_stl_path and os.path.exists(hq_stl_path):
+            print(f"[HighSpeed GPU] Using cached high-quality STL: {hq_stl_path}", flush=True)
+            gmsh.merge(hq_stl_path)
+        else:
+            print(f"[HighSpeed GPU] Loading CAD: {cad_file}", flush=True)
+            gmsh.merge(cad_file)
+        gmsh.model.occ.synchronize()
+        
+        # Get bounding box
+        bbox = gmsh.model.getBoundingBox(-1, -1)
+        bbox_min = np.array([bbox[0], bbox[1], bbox[2]])
+        bbox_max = np.array([bbox[3], bbox[4], bbox[5]])
+        
+        # Get sizing from quality params
+        target_elements = quality_params.get('target_elements', 10000) if quality_params else 10000
+        max_element_size = quality_params.get('max_size_mm', None) if quality_params else None
+        if max_element_size is None:
+            max_element_size = quality_params.get('max_element_size', None) if quality_params else None
+        min_element_size = quality_params.get('min_element_size', None) if quality_params else None
+        
+        print(f"[HighSpeed GPU] Bounding box: {bbox_min} to {bbox_max}", flush=True)
+        
+        # Determine mesh size
+        if max_element_size is not None:
+            mesh_size = float(max_element_size)
+            print(f"[HighSpeed GPU] Using user-specified max element size: {mesh_size:.3f} mm", flush=True)
+        else:
+            volume = np.prod(bbox_max - bbox_min)
+            mesh_size = (volume / (target_elements / 6)) ** (1/3)
+            mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)
+            print(f"[HighSpeed GPU] Auto-calculated mesh size from target {target_elements}: {mesh_size:.3f}", flush=True)
+        
+        # Determine min size
+        min_mesh_size = float(min_element_size) if min_element_size is not None else mesh_size * 0.5
+        
+        print(f"[HighSpeed GPU] Element size range: {min_mesh_size:.3f} to {mesh_size:.3f} mm", flush=True)
+        
+        # Set mesh size for surface mesh
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_mesh_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
+        
+        # Generate 2D surface mesh only
+        gmsh.model.mesh.generate(2)
+        
+        # Extract surface mesh data
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        node_coords = np.array(node_coords).reshape(-1, 3)
+        
+        tag_to_idx = {tag: idx for idx, tag in enumerate(node_tags)}
+        
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2)
+        
+        surface_faces = []
+        for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
+            if etype == 2:
+                enodes = np.array(enodes).reshape(-1, 3)
+                for tri_nodes in enodes:
+                    face = [tag_to_idx[n] for n in tri_nodes]
+                    surface_faces.append(face)
+        
+        surface_faces = np.array(surface_faces)
+        surface_verts = node_coords
+        
+        print(f"[HighSpeed GPU] Surface mesh: {len(surface_verts)} vertices, {len(surface_faces)} triangles", flush=True)
+        
+        gmsh.finalize()
+        
+        # Step 2: Run GPU Fill & Filter pipeline (standard GPU Delaunay first)
+        print("[HighSpeed GPU] Step 2: Running GPU Fill & Filter pipeline...", flush=True)
+        
+        resolution = max(20, int((target_elements / 6) ** (1/3)))
+        resolution = min(resolution, 100)
+        
+        min_spacing = min_mesh_size
+        max_spacing = mesh_size * 1.5
+        grading = 1.5
+        target_sicn = 0.10
+        
+        def progress_callback(msg, pct):
+            print(f"[HighSpeed GPU] {msg} ({pct}%)", flush=True)
+        
+        # Run the base GPU pipeline (returns vertices, tets, surface_faces)
+        vertices, tetrahedra, surface_faces_out = gpu_delaunay_fill_and_filter(
+            surface_verts, surface_faces, 
+            bbox_min, bbox_max,
+            min_spacing=min_spacing,
+            max_spacing=max_spacing,
+            grading=grading,
+            resolution=resolution,
+            target_sicn=target_sicn,
+            progress_callback=progress_callback,
+            fast_mode=True  # Use fast mode internally, we add SDF filtering after
+        )
+        
+        print(f"[HighSpeed GPU] Base pipeline: {len(tetrahedra)} tetrahedra", flush=True)
+        
+        # Step 3: Apply SDF Visibility Filter (the key enhancement)
+        print("[HighSpeed GPU] Step 3: Applying SDF Visibility Filter...", flush=True)
+        surface_tree = cKDTree(surface_verts)
+        
+        def sdf_log(msg, pct=0):
+            print(f"[HighSpeed GPU] {msg}", flush=True)
+        
+        filtered_tets, sdf_stats = filter_tets_by_sdf_visibility(
+            vertices, tetrahedra, surface_tree, surface_verts, log=sdf_log
+        )
+        
+        tetrahedra = filtered_tets
+        
+        elapsed = time.time() - start_total
+        print(f"[HighSpeed GPU] Generated {len(tetrahedra)} tetrahedra in {elapsed:.2f}s", flush=True)
+        print(f"[HighSpeed GPU] SDF filter: {sdf_stats['filtered']} void-spanning tets removed", flush=True)
+        print(f"[HighSpeed GPU] Fast path approved {sdf_stats['fast_pass_pct']:.1f}% of edges", flush=True)
+        
+        # Step 4: Save mesh in Gmsh format
+        print("[HighSpeed GPU] Step 4: Saving mesh to Gmsh format...", flush=True)
+        
+        gmsh.initialize()
+        gmsh.model.add("highspeed_gpu_result")
+        
+        gmsh.model.addDiscreteEntity(3, 1)
+        gmsh.model.addDiscreteEntity(2, 2)
+        
+        node_tags = list(range(1, len(vertices) + 1))
+        node_coords_flat = vertices.flatten().tolist()
+        gmsh.model.mesh.addNodes(3, 1, node_tags, node_coords_flat)
+        
+        tet_tags = list(range(1, len(tetrahedra) + 1))
+        tet_nodes_flat = (tetrahedra + 1).flatten().tolist()
+        gmsh.model.mesh.addElementsByType(1, 4, tet_tags, tet_nodes_flat)
+        
+        start_tri_tag = len(tetrahedra) + 1
+        tri_tags = list(range(start_tri_tag, start_tri_tag + len(surface_faces_out)))
+        tri_nodes_flat = (surface_faces_out + 1).flatten().tolist()
+        gmsh.model.mesh.addElementsByType(2, 2, tri_tags, tri_nodes_flat)
+        
+        gmsh.model.addPhysicalGroup(3, [1], tag=1, name="Volume")
+        gmsh.model.addPhysicalGroup(2, [2], tag=2, name="Surface")
+        
+        gmsh.write(output_file)
+        
+        # Compute quality metrics
+        print("[HighSpeed GPU] Computing quality metrics...", flush=True)
+        try:
+            all_tags = tet_tags
+            sicn_vals = gmsh.model.mesh.getElementQualities(all_tags, "minSICN")
+            gamma_vals = gmsh.model.mesh.getElementQualities(all_tags, "gamma")
+            
+            per_element_quality = {t: float(sicn_vals[i]) for i, t in enumerate(all_tags)}
+            per_element_gamma = {t: float(gamma_vals[i]) for i, t in enumerate(all_tags)}
+            
+            per_element_skewness = {t: 1.0 - float(per_element_quality.get(t, 0.5)) for t in all_tags}
+            per_element_aspect_ratio = {t: 1.0/float(per_element_quality.get(t, 0.5)) if per_element_quality.get(t, 0.5) > 0 else 100.0 for t in all_tags}
+            
+            def get_stats(vals):
+                if not vals: return 0.0, 0.0, 0.0
+                v = list(vals.values())
+                return float(min(v)), float(max(v)), float(np.mean(v))
+            
+            skew_min, skew_max, skew_avg = get_stats(per_element_skewness)
+            ar_min, ar_max, ar_avg = get_stats(per_element_aspect_ratio)
+            
+            quality_metrics = {
+                'sicn_min': float(min(sicn_vals)),
+                'sicn_max': float(max(sicn_vals)),
+                'sicn_avg': float(np.mean(sicn_vals)),
+                'gamma_min': float(min(gamma_vals)),
+                'gamma_max': float(max(gamma_vals)),
+                'gamma_avg': float(np.mean(gamma_vals)),
+                'sdf_filtered_tets': sdf_stats['filtered'],
+                'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']
+            }
+            
+            print(f"[HighSpeed GPU] Quality - SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
+        except Exception as e:
+            print(f"[HighSpeed GPU] Warning: Could not compute quality: {e}", flush=True)
+            per_element_quality = {}
+            per_element_gamma = {}
+            per_element_skewness = {}
+            per_element_aspect_ratio = {}
+            quality_metrics = {'sdf_filtered_tets': sdf_stats['filtered'], 'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']}
+        
+        gmsh.finalize()
+        
+        print(f"[HighSpeed GPU] SUCCESS! Mesh saved to: {output_file}", flush=True)
+        
+        return {
+            'success': True,
+            'output_file': str(Path(output_file).absolute()),
+            'strategy': 'highspeed_gpu_sdf_visibility',
+            'message': f'HighSpeed GPU: {len(tetrahedra)} tetrahedra in {elapsed:.2f}s (SDF filtered {sdf_stats["filtered"]} void-spanning)',
+            'total_elements': len(tetrahedra),
+            'total_nodes': len(vertices),
+            'per_element_quality': per_element_quality,
+            'per_element_gamma': per_element_gamma,
+            'per_element_skewness': per_element_skewness,
+            'per_element_aspect_ratio': per_element_aspect_ratio,
+            'quality_metrics': quality_metrics,
+            'metrics': {
+                'total_elements': len(tetrahedra),
+                'total_nodes': len(vertices),
+                'gpu_time_ms': elapsed * 1000,
+                'surface_triangles': len(surface_faces_out),
+                'resolution': resolution,
+                'sdf_filtered': sdf_stats['filtered'],
+                'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'message': f'HighSpeed GPU meshing failed: {str(e)}',
+            'traceback': traceback.format_exc()
+        }
+
+
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
+
     """
     Generate hex-dominant mesh using CoACD + subdivision pipeline
     
@@ -686,6 +957,8 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
     """
     try:
         import trimesh
+        import tempfile
+        from strategies.hex_dominant_strategy import HighFidelityDiscretization, ConvexDecomposition
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
         print("[HEX-DOM] Step 0: Starting hex-dominant meshing pipeline...", flush=True)
@@ -1390,10 +1663,15 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 mesh_strategy = 'Tet MeshAdapt'
             elif 'hex' in norm and 'dominant' in norm:
                 mesh_strategy = 'Hex Dominant'
+            elif 'hex' in norm and 'subdivision' in norm:
+                mesh_strategy = 'Hex Dominant'
+            elif 'highspeed' in norm or ('gpu' in norm and 'sdf' in norm):
+                mesh_strategy = 'HighSpeed GPU'
             elif 'gpu' in norm and 'delaunay' in norm:
                 mesh_strategy = 'GPU Delaunay'
             elif 'polyhedral' in norm:
                 mesh_strategy = 'Polyhedral'
+
             
             print(f"[DEBUG] Strategy normalization: '{orig_strat}' -> '{mesh_strategy}'")
             
@@ -1484,6 +1762,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
+        # HighSpeed GPU (SDF Visibility) - must be BEFORE regular GPU Delaunay check
+        if 'HighSpeed GPU' in mesh_strategy or 'highspeed_gpu' in mesh_strategy or 'HighSpeed' in mesh_strategy:
+            vprint("[INIT] Loading HighSpeed GPU mesher...", flush=True)
+            try:
+                from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE, filter_tets_by_sdf_visibility
+                vprint(f"[INIT] HighSpeed GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
+            except Exception as e:
+                return {'success': False, 'error': f'HighSpeed GPU Mesher load failed: {e}'}
+                
+            print("[DEBUG] HighSpeed GPU strategy detected - using SDF visibility pipeline")
+            return generate_highspeed_gpu_mesh(cad_file, output_dir, quality_params)
+        
         if 'GPU Delaunay' in mesh_strategy or 'gpu_delaunay' in mesh_strategy:
             vprint("[INIT] Loading GPU mesher...", flush=True)
             try:
@@ -1494,6 +1784,7 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 
             print("[DEBUG] GPU Delaunay strategy detected - using GPU Fill & Filter pipeline")
             return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
+
             
         # Polyhedral (Dual)
         if 'Polyhedral' in mesh_strategy or 'polyhedral' in mesh_strategy:

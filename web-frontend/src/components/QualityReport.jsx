@@ -4,10 +4,12 @@ export default function QualityReport({ metrics }) {
   if (!metrics) return null
 
   const getQualityGrade = (sicn, gamma) => {
-    if (sicn >= 0.7 && gamma >= 0.7) return { grade: 'Excellent', color: 'text-green-400' }
-    if (sicn >= 0.5 && gamma >= 0.5) return { grade: 'Good', color: 'text-blue-400' }
-    if (sicn >= 0.3 && gamma >= 0.3) return { grade: 'Fair', color: 'text-yellow-400' }
-    return { grade: 'Poor', color: 'text-red-400' }
+    // Pass/Fail Simplification
+    // Thresholds: SICN >= 0.2 and Gamma >= 0.2 are technically usable
+    if (sicn >= 0.2 && gamma >= 0.2) return { grade: 'PASS', color: 'text-green-400' }
+
+    // Fail
+    return { grade: 'FAIL', color: 'text-red-400' }
   }
 
   const sicnMin = metrics.sicn_min || metrics['SICN (Gmsh)']?.min

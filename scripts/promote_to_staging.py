@@ -17,6 +17,7 @@ Features:
 
 import boto3
 import os
+from pathlib import Path
 
 import subprocess
 import sys

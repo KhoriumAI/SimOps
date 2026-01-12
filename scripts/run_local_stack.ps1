@@ -85,6 +85,12 @@ Write-Host "`n=======================================================" -Foregrou
 Write-Host "   Stack Running!" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host "Backend: http://localhost:5000" -ForegroundColor Gray
-Write-Host "Frontend: http://localhost:3000 (usually)" -ForegroundColor Gray
+Write-Host "Frontend: http://localhost:3000" -ForegroundColor Gray
+
+# Automatically open the browser
+Write-Host "`nOpening browser to http://localhost:3000..." -ForegroundColor Green
+Start-Sleep -Seconds 2
+Start-Process "http://localhost:3000"
+
 Write-Host "`nPress any key to close the launcher (the app windows will stay open)..." -ForegroundColor Yellow
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

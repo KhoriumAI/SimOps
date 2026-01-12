@@ -113,6 +113,10 @@ class Config:
     S3_UPLOADS_FOLDER = 'uploads'
     S3_MESH_FOLDER = 'mesh'
     
+    # Compute Mode (Refactored)
+    # Options: 'LOCAL', 'CLOUD'
+    COMPUTE_MODE = os.environ.get('COMPUTE_MODE', 'LOCAL')
+
     # Compute Backend Configuration
     # Options: 'auto', 'local', 'ssh_tunnel', 'remote_http'
     # - 'auto': Try SSH tunnel first, fallback to local GMSH
