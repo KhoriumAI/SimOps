@@ -22,10 +22,6 @@ class User(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = db.Column(db.DateTime, nullable=True)
     
-    # Password Reset
-    reset_token = db.Column(db.String(100), nullable=True, unique=True, index=True)
-    reset_token_expires = db.Column(db.DateTime, nullable=True)
-    
     # Storage quota (in bytes) - default 1GB
     storage_quota = db.Column(db.BigInteger, default=1073741824)
     storage_used = db.Column(db.BigInteger, default=0)

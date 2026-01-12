@@ -22,18 +22,6 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 import platform
-import os
-from datetime import datetime
-
-# Optional imports for Cloud/Modal
-try:
-    import modal
-    import boto3
-    MODAL_AVAILABLE = True
-except ImportError:
-    modal = None
-    boto3 = None
-    MODAL_AVAILABLE = False
 
 
 def check_wsl_available() -> bool:
@@ -697,119 +685,6 @@ def run_cartesian_mesh(case_dir: Path, verbose: bool = True) -> bool:
     return False
 
 
-def generate_via_modal(
-    stl_path: str,
-    output_path: str,
-    cell_size: float = 2.0,
-    verbose: bool = True,
-    mesh_scope: str = 'Internal',
-    timeout: int = 2400
-) -> Dict:
-    """
-    Run snappyHexMesh via Modal cloud service.
-    
-    Args:
-        stl_path: Local path to STL file
-        output_path: Local path for result .msh
-        
-    Returns:
-        Dict with success status and potential error
-    """
-    if not MODAL_AVAILABLE:
-        return {'success': False, 'error': 'Modal or boto3 not installed'}
-        
-    try:
-        # Configuration
-        bucket = os.environ.get('S3_BUCKET_NAME', 'muaz-webdev-assets')
-        app_name = os.environ.get('MODAL_OPENFOAM_APP', 'khorium-openfoam-snappy')
-        fn_name = "run_snappy_hex_mesh"
-        
-        # 1. Upload Input
-        s3 = boto3.client('s3')
-        file_name = Path(stl_path).name
-        # Add timestamp to key to avoid collisions
-        ts = int(time.time())
-        input_key = f"uploads/modal_mesh/{ts}_{file_name}"
-        
-        if verbose:
-            print(f"[Modal] Uploading {file_name} to s3://{bucket}/{input_key}...")
-            
-        s3.upload_file(stl_path, bucket, input_key)
-        
-        # 2. Trigger Modal
-        if verbose:
-            print(f"[Modal] Spawning {app_name}/{fn_name}...")
-            
-        f = modal.Function.from_name(app_name, fn_name)
-        
-        # Call remote function synchronously (blocks until done)
-        params = {
-            'mesh_scope': mesh_scope,
-            'cell_size': cell_size
-        }
-        
-        result = f.remote(bucket, input_key, params)
-        
-        if not result.get('success'):
-            err = result.get('message') or result.get('error', 'Unknown remote error')
-            logs = result.get('stdout', '')
-            print(f"[Modal] Remote Error: {err}")
-            if verbose:
-                print(f"[Modal] Remote Logs:\n{logs}")
-            return {'success': False, 'error': f"Modal Error: {err}"}
-            
-        # 3. Download Output
-        s3_output_path = result.get('s3_output_path') # e.g. s3://bucket/mesh/...
-        # The service returns s3_output_path if successful, OR we construct it?
-        # Let's check the service. service returns 's3_msh_key' and bucket actually
-        # Wait, the deployed service returns a dict. Let's look at openfoam_snappy_service.py again to be sure what keys it returns.
-        # It returns: {success, mesh_storage_key, bucket, ...}
-        
-        output_key = result.get('mesh_storage_key')
-        if not output_key:
-            # Print function stdout (contains directory listing)
-            print("[Modal] Function STDOUT (File Listing):")
-            print(result.get('stdout', 'No stdout captured'))
-            
-            # Print explicit file listing from result
-            if 'file_listing' in result:
-                print("[Modal] File Listing from Service:")
-                for f in result['file_listing']:
-                    print(f"  {f}")
-            
-            logs = result.get('logs', {})
-            # Print logs if available
-            if logs:
-                print("[Modal] MISSING KEY - Remote Logs Snippets:")
-                for log_name, content in logs.items():
-                    print(f"--- {log_name} ---")
-                    print(content)
-                    print("-------------------")
-            return {'success': False, 'error': "Modal succeeded but no mesh key returned"}
-            
-        if verbose:
-            print(f"[Modal] Downloading result from s3://{bucket}/{output_key}...")
-            
-        s3.download_file(bucket, output_key, output_path)
-        
-        # Check if we also want the VTK
-        vtk_key = result.get('vtk_storage_key')
-        if vtk_key:
-            vtk_out = str(Path(output_path).with_suffix('.vtu'))
-            try:
-                s3.download_file(bucket, vtk_key, vtk_out)
-                if verbose: print(f"[Modal] Downloaded VTK visualization to {vtk_out}")
-            except Exception as e:
-                print(f"[Modal] Warning: Failed to download VTK: {e}")
-
-        return {'success': True}
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {'success': False, 'error': str(e)}
-
-
 def generate_openfoam_hex_mesh(
     stl_path: str,
     output_path: str,
@@ -840,20 +715,6 @@ def generate_openfoam_hex_mesh(
         if enclosure_config:
             print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}")
     
-    # 0. CHECK CLOUD COMPUTE
-    # If configured to use Modal, bypass local WSL entirely
-    use_modal = os.environ.get('USE_MODAL_COMPUTE', 'false').lower() == 'true'
-    # Also check if we specifically want local execution override
-    force_local = os.environ.get('FORCE_LOCAL_OPENFOAM', 'false').lower() == 'true'
-    
-    if use_modal and not force_local:
-        if verbose:
-            print("[OpenFOAM] Cloud compute enabled. Offloading to Modal...")
-        return generate_via_modal(
-            stl_path, output_path, cell_size, 
-            verbose, mesh_scope
-        )
-            
     # Check prerequisites
     if platform.system() == 'Windows':
         if not check_wsl_available():

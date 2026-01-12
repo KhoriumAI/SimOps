@@ -4,28 +4,10 @@ project(GpuMesherTest)
 # ==========================================
 # 1. SETUP ENV & CUDA
 # ==========================================
-# Auto-detect CUDA installation (forward-compatible)
-find_package(CUDAToolkit REQUIRED)
-if(NOT CUDAToolkit_FOUND)
-    # Fallback: Try manual discovery
-    file(GLOB CUDA_VERSIONS "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*")
-    list(SORT CUDA_VERSIONS)
-    list(REVERSE CUDA_VERSIONS) # Prefer newest
-    list(GET CUDA_VERSIONS 0 CUDA_TOOLKIT_ROOT_DIR)
-    message(STATUS "Auto-detected CUDA: ${CUDA_TOOLKIT_ROOT_DIR}")
-else()
-    set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}")
-    message(STATUS "Found CUDA Toolkit: ${CUDA_TOOLKIT_ROOT_DIR}")
-endif()
-
+set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9")
 find_package(CUDA REQUIRED)
 
 # Need Python & Pybind11 found EARLY so we can use their paths in manual commands
-set(Python3_FIND_STRATEGY LOCATION)
-# Try to find python from the active environment
-if(DEFINED ENV{CONDA_PREFIX})
-    set(Python3_ROOT_DIR "$ENV{CONDA_PREFIX}")
-endif()
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
 include(FetchContent)

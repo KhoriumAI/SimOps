@@ -1,23 +1,18 @@
 """
-Compute Backend Abstraction Layer (Adapter Pattern)
+Compute Backend Abstraction Layer
 
 Provides a pluggable interface for dispatching preview/mesh generation
-to different compute providers (local, cloud/modal).
-
-Refactored to support Adapter Pattern:
-- ComputeProvider (Abstract)
-- LocalProvider (Subprocess/In-process)
-- CloudProvider (Modal.com)
+to different compute providers (local, SSH tunnel, HTTP remote, Modal.com).
 
 Usage:
-    from compute_backend import get_compute_provider
+    from compute_backend import get_preferred_backend
     
-    provider = get_compute_provider()
-    job_id = provider.submit_job(file_path=..., ...)
+    backend = get_preferred_backend()
+    result = backend.generate_preview("/path/to/model.step")
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List
 import time
 import os
 import subprocess
@@ -25,119 +20,110 @@ import sys
 import json
 import tempfile
 from pathlib import Path
-from threading import Thread, Lock
-import queue
 
-# Global state for local jobs (since they are stateful processes)
-# Key: job_id, Value: JobState object
-_LOCAL_JOBS = {}
-_LOCAL_JOBS_LOCK = Lock()
 
-class JobState:
-    def __init__(self, process=None, log_queue=None):
-        self.process = process
-        self.log_queue = log_queue or queue.Queue()
-        self.logs = []
-        self.status = "initializing"
-        self.result = None
-        self.error = None
-        self.start_time = time.time()
-        self.files_to_cleanup = []
-
-class ComputeProvider(ABC):
-    """Abstract compute provider (Adapter Interface)"""
+class ComputeBackend(ABC):
+    """Abstract compute backend for preview/mesh generation"""
     
     @property
     @abstractmethod
     def name(self) -> str:
-        """Human-readable provider name"""
-        pass
-    
-    @property
-    @abstractmethod
-    def mode(self) -> str:
-        """'LOCAL' or 'CLOUD'"""
+        """Human-readable backend name"""
         pass
     
     @abstractmethod
     def is_available(self) -> bool:
-        """Check if this provider is operational"""
+        """Check if this backend is currently reachable"""
         pass
     
     @abstractmethod
-    def submit_job(self, task_type: str, *args, **kwargs) -> str:
-        """
-        Submit a job for execution.
-        Args:
-            task_type: 'mesh' or 'preview'
-            **kwargs: Arguments specific to the task
-        Returns:
-            job_id (str): Unique identifier for the job
-        """
-        pass
-    
-    @abstractmethod
-    def get_status(self, job_id: str) -> Dict:
-        """
-        Get current status and new logs for a job.
-        Returns:
-            Dict: {
-                'status': 'pending'|'running'|'completed'|'failed',
-                'logs': [list of new log strings],
-                'error': str (optional)
-            }
-        """
-        pass
-    
-    @abstractmethod
-    def fetch_results(self, job_id: str) -> Dict:
-        """
-        Get final results for a completed job.
-        Returns:
-            Dict containing result data (paths, metrics, etc)
-        """
-        pass
-
-    @abstractmethod
-    def cancel_job(self, job_id: str):
-        """Cancel a running job"""
-        pass
-        
-    # Legacy/Convenience method for synchronous preview (compat)
     def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
         """
-        Generate preview synchronously (helper wrapper).
+        Generate preview mesh from a CAD file.
+        
+        Args:
+            cad_file_path: Path to the input CAD file (STEP, etc.)
+            timeout: Maximum time in seconds to wait for result
+            
+        Returns:
+            Dict with keys:
+                - vertices: List of floats [x1,y1,z1, x2,y2,z2, ...]
+                - numVertices: Number of vertices
+                - numTriangles: Number of triangles
+                - isPreview: True
+                - status: 'success' or 'error'
+                - error: Error message (if status is 'error')
         """
         pass
+    
+    def benchmark(self, cad_file_path: str, iterations: int = 3) -> Dict:
+        """
+        Run benchmark on this backend.
+        
+        Args:
+            cad_file_path: Path to test CAD file
+            iterations: Number of iterations to average
+            
+        Returns:
+            Dict with timing statistics
+        """
+        times = []
+        errors = []
+        
+        for i in range(iterations):
+            start = time.time()
+            try:
+                result = self.generate_preview(cad_file_path)
+                elapsed = time.time() - start
+                
+                if "error" in result:
+                    errors.append(result["error"])
+                else:
+                    times.append(elapsed)
+                    
+            except Exception as e:
+                errors.append(str(e))
+        
+        if not times:
+            return {
+                "backend": self.name,
+                "available": self.is_available(),
+                "error": errors[0] if errors else "All iterations failed",
+                "errors": errors
+            }
+        
+        return {
+            "backend": self.name,
+            "available": True,
+            "avg_time": sum(times) / len(times),
+            "min_time": min(times),
+            "max_time": max(times),
+            "times": times,
+            "iterations": len(times),
+            "failed_iterations": len(errors)
+        }
 
 
-class LocalProvider(ComputeProvider):
+class LocalGMSHBackend(ComputeBackend):
     """
-    Local Compute Provider.
-    Executes mesh generation via subprocess and previews via direct GMSH calls.
+    Local GMSH compute backend.
+    Runs GMSH directly on the current machine.
     """
     
     @property
     def name(self) -> str:
-        return "Local Compute (Docker/Subprocess)"
-        
-    @property
-    def mode(self) -> str:
-        return "LOCAL"
+        return "local_gmsh"
     
     def is_available(self) -> bool:
-        # Local requires GMSH and generic python environment
+        """Check if GMSH is available"""
         try:
             import gmsh
             return True
         except ImportError:
             return False
-
+    
     def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
-        """
-        Generate preview using local GMSH (In-process for speed).
-        This replaces the old LocalGMSHBackend.generate_preview.
-        """
+        """Generate preview using local GMSH"""
         try:
             import gmsh
         except ImportError:
@@ -182,6 +168,7 @@ class LocalProvider(ComputeProvider):
             
             for etype, enodes in zip(elem_types, node_tags_list):
                 if etype == 2:  # 3-node triangle
+                    # Handle both numpy arrays and lists
                     try:
                         enodes_list = enodes.astype(int).tolist()
                     except AttributeError:
@@ -208,274 +195,231 @@ class LocalProvider(ComputeProvider):
             except:
                 pass
 
-    def submit_job(self, task_type: str, **kwargs) -> str:
-        import uuid
-        job_id = f"local-{uuid.uuid4()}"
-        
-        if task_type == 'mesh':
-            input_path = kwargs.get('input_path')
-            output_dir = kwargs.get('output_dir')
-            quality_params = kwargs.get('quality_params', {})
-            
-            # Locate worker script
-            # Assuming we are in backend/compute_backend.py, worker is at ../apps/cli/mesh_worker_subprocess.py
-            base_dir = Path(__file__).parent.parent
-            worker_script = base_dir / "apps" / "cli" / "mesh_worker_subprocess.py"
-            
-            if not worker_script.exists():
-                raise FileNotFoundError(f"Worker script not found: {worker_script}")
-            
-            cmd = [sys.executable, str(worker_script), input_path, str(output_dir)]
-            if quality_params:
-                cmd.extend(['--quality-params', json.dumps(quality_params)])
-                
-            # Start subprocess
-            # We use bufsize=1 (line buffered) and text=True
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-            
-            # Setup job state
-            job_state = JobState(process)
-            job_state.status = "running"
-            
-            with _LOCAL_JOBS_LOCK:
-                _LOCAL_JOBS[job_id] = job_state
-                
-            # Start log reader thread
-            def log_reader(jid, proc, q):
-                try:
-                    for line in proc.stdout:
-                        line = line.strip()
-                        if line:
-                            q.put(line)
-                except Exception as e:
-                    q.put(f"ERROR reading logs: {e}")
-                finally:
-                    # When stdout closes, process is done
-                    proc.wait()
-            
-            t = Thread(target=log_reader, args=(job_id, process, job_state.log_queue), daemon=True)
-            t.start()
-            
-            return job_id
-            
-        elif task_type == 'preview':
-            # Local preview is synchronous in existing code, but strictly for the pattern 
-            # we could make it async. However, existing callers expect sync preview.
-            # We'll support async preview via thread wrapper if needed, but for now 
-            # we'll assume submit_job is for long running stuff mainly.
-            # But let's implement async preview effectively:
-            
-            # ... For now, keeping mesh focus for submit_job.
-            raise NotImplementedError("Async preview submission not yet implemented for LocalProvider")
 
-    def get_status(self, job_id: str) -> Dict:
-        with _LOCAL_JOBS_LOCK:
-            job_state = _LOCAL_JOBS.get(job_id)
-            
-        if not job_state:
-            return {'status': 'failed', 'error': 'Job not found'}
-            
-        # Check process status
-        if job_state.process.poll() is not None:
-             if job_state.process.returncode == 0:
-                 job_state.status = 'completed'
-             else:
-                 job_state.status = 'failed'
-                 if not job_state.error:
-                     job_state.error = f"Process exited with code {job_state.process.returncode}"
-
-        # Collect new logs
-        new_logs = []
-        while not job_state.log_queue.empty():
-            try:
-                line = job_state.log_queue.get_nowait()
-                job_state.logs.append(line)
-                new_logs.append(line)
-                
-                # Check for RESULT JSON in logs (how local worker passes data back)
-                if line.startswith('{') and '"success"' in line:
-                    try:
-                        data = json.loads(line)
-                        job_state.result = data
-                    except:
-                        pass
-            except queue.Empty:
-                break
-                
-        return {
-            'status': job_state.status,
-            'logs': new_logs,
-            'error': job_state.error
-        }
-
-    def fetch_results(self, job_id: str) -> Dict:
-        with _LOCAL_JOBS_LOCK:
-            job_state = _LOCAL_JOBS.get(job_id)
-
-        if not job_state or not job_state.result:
-            return {}
-            
-        return job_state.result
-
-    def cancel_job(self, job_id: str):
-        with _LOCAL_JOBS_LOCK:
-            job_state = _LOCAL_JOBS.get(job_id)
-        
-        if job_state and job_state.process and job_state.process.poll() is None:
-            job_state.process.kill()
-            job_state.status = 'cancelled'
-
-class CloudProvider(ComputeProvider):
+class HTTPRemoteBackend(ComputeBackend):
     """
-    Cloud Provider (Modal.com).
+    HTTP-based remote compute backend.
+    Sends CAD files to a remote HTTP endpoint for processing.
+    Used for SSH tunnel to Threadripper and future Modal.com integration.
     """
-    def __init__(self):
-        self._name = "Cloud Compute (AWS/Modal)"
+    
+    def __init__(self, endpoint_url: str = "http://localhost:8080", endpoint_path: str = "/mesh"):
+        self.endpoint_url = endpoint_url.rstrip('/')
+        self.endpoint_path = endpoint_path
+        self._name = f"http_remote ({endpoint_url})"
     
     @property
     def name(self) -> str:
         return self._name
-        
-    @property
-    def mode(self) -> str:
-        return "CLOUD"
-
+    
     def is_available(self) -> bool:
-        return True # Assumed available if configured
-
+        """Check if remote endpoint is reachable"""
+        try:
+            import requests
+            response = requests.get(
+                f"{self.endpoint_url}{self.endpoint_path}",
+                timeout=5
+            )
+            return response.status_code == 200
+        except:
+            return False
+    
     def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
-        # Use Modal for preview
-        # NOTE: Requires S3 path for modal!
-        # This wrapper expects cad_file_path to be S3 URI if in Cloud mode theoretically,
-        # but the LocalProvider uses local path. 
-        # If cad_file_path is local, we can't easily use Modal without upload.
-        # But api_server typically passes S3 path for Cloud mode.
-        
-        if not cad_file_path.startswith("s3://"):
-             # Fallback to local if file is not on S3
-             # This handles the case where we are in CLOUD mode but have a local file
-             # (though strictly we should upload it, but for preview speed, local is often better)
-             # User requirement: "The frontend shouldn't know".
-             # If we return error, frontend fails.
-             # We will fallback to local gmsh for preview as it's just a preview.
-             # Or we should implement upload.
-             # Let's fallback to Local logic for PREVIEW only, to be safe/fast.
-             return LocalProvider().generate_preview(cad_file_path, timeout)
+        """Send CAD file to remote endpoint for preview generation"""
+        try:
+            import requests
+        except ImportError:
+            return {"error": "requests library not installed", "status": "error"}
         
         try:
-             # Lazy import
-             from backend.modal_client import modal_client
-             path_parts = cad_file_path.replace('s3://', '').split('/', 1)
-             bucket = path_parts[0]
-             key = path_parts[1]
-             
-             call = modal_client.spawn_preview_job(bucket, key)
-             result = modal_client.get_job_result(call.object_id, timeout=timeout)
-             
-             if not result.get('success'):
-                 return {"error": result.get('message', 'Unknown Modal error'), "status": "error"}
-                 
-             # Map Modal result to expected format
-             # (Modal result usually contains s3 path to preview.json)
-             # We might need to fetch the json content to return 'vertices' etc directly 
-             # OR the backend expects just the path? 
-             # backend/compute_backend.py original implementation returned 'vertices' list.
-             # modal_service.py generate_preview returns 'preview_path'.
-             # We might need to read that S3 file??
-             # For now, let's assume the caller handles s3 path or we fetch it.
-             # Actually, original code returned dict with vertices.
-             # modal_service.py generate_preview returns `preview_path`.
-             # We should probably download it here to match interface.
-             
-             # ... For this specific task, focusing on ADAPTER PATTERN for MAIN MESH JOB.
-             # I will defer detailed preview implementation fixup to avoid breaking too much.
-             # If I return result as is, it might break. 
-             # But let's assume CloudProvider is mostly for Mesh Generation as per user task.
-             return result
-
+            with open(cad_file_path, 'rb') as f:
+                response = requests.post(
+                    f"{self.endpoint_url}{self.endpoint_path}",
+                    files={'file': (Path(cad_file_path).name, f, 'application/octet-stream')},
+                    timeout=timeout
+                )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {
+                    "error": f"Remote returned status {response.status_code}: {response.text[:200]}",
+                    "status": "error"
+                }
+                
         except Exception as e:
             return {"error": str(e), "status": "error"}
 
-    def submit_job(self, task_type: str, **kwargs) -> str:
-        if task_type == 'mesh':
-            from backend.modal_client import modal_client
-            
-            input_path = kwargs.get('input_path')
-            quality_params = kwargs.get('quality_params', {})
-            
-            if not input_path.startswith("s3://"):
-                raise ValueError("CloudProvider requires s3:// input path")
-                
-            path_parts = input_path.replace('s3://', '').split('/', 1)
-            bucket = path_parts[0]
-            key = path_parts[1]
-            
-            call = modal_client.spawn_mesh_job(bucket, key, quality_params)
-            return call.object_id
-            
-        else:
-            raise NotImplementedError("CloudProvider only supports mesh tasks via submit_job")
 
-    def get_status(self, job_id: str) -> Dict:
+class SSHTunnelBackend(HTTPRemoteBackend):
+    """
+    SSH Tunnel backend - specialized HTTPRemoteBackend for Threadripper.
+    Assumes SSH tunnel is already established mapping localhost:8080 -> Threadripper:8080
+    """
+    
+    def __init__(self, local_port: int = 8080):
+        super().__init__(
+            endpoint_url=f"http://localhost:{local_port}",
+            endpoint_path="/mesh"
+        )
+        self._name = f"ssh_tunnel (localhost:{local_port})"
+
+
+class ModalBackend(ComputeBackend):
+    """
+    Modal.com serverless compute backend.
+    Uses Modal GPU workers for preview and mesh generation.
+    """
+    
+    def __init__(self):
         from backend.modal_client import modal_client
+        self.modal = modal_client
+        self._name = "modal_serverless"
         
-        # Modal doesn't have a simple "check status" without wait in the client wrapper usually,
-        # but let's assume we can call get_job_result with short timeout
-        try:
-            # We use a very short timeout to poll
-            result = modal_client.get_job_result(job_id, timeout=0.5)
-            # If we get result, it's done
-            
-            status = 'completed' if result.get('success') else 'failed'
-            # Convert Modal logs to list
-            logs = result.get('log', []) 
-            if result.get('message'):
-                logs.append(result.get('message'))
-                
-            return {
-                'status': status,
-                'logs': logs,
-                'result': result,
-                'error': result.get('message') if not result.get('success') else None
-            }
-            
-        except TimeoutError:
-             return {'status': 'running', 'logs': []}
-        except Exception as e:
-             return {'status': 'failed', 'error': str(e), 'logs': [str(e)]}
+    @property
+    def name(self) -> str:
+        return self._name
+        
+    def is_available(self) -> bool:
+        """Modal is always theoretically available if tokens are set"""
+        # We could add a more robust check here if needed
+        return True
+        
+    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
+        """Generate preview using Modal"""
+        # Note: modal_client version of this handles S3 uploads if needed
+        # But this method assumes a local path. 
+        # For simplicity in the abstraction, we try to use the remote_mesh method 
+        # which might need adjustment to handle CAD file upload if not on S3.
+        
+        # In the context of the Flask API, the S3 upload happens before this.
+        # This backend might be better suited for the high-level API server calls.
+        
+        # For now, we'll try to use the remote_mesh/synchronous call
+        # but we need to pass a bucket/key if those exist.
+        
+        # Check if we have S3 context
+        from flask import current_app
+        use_s3 = current_app.config.get('USE_S3', False)
+        bucket = current_app.config.get('S3_BUCKET_NAME')
+        
+        # If we have a local path but no S3 info, this backend can't easily work 
+        # without uploading it. 
+        
+        # TODO: Implement local-to-modal upload if needed
+        # For now, assume production environment (S3 active)
+        return {"error": "ModalBackend requires S3-based workflow. Use high-level API integration instead.", "status": "error"}
 
-    def fetch_results(self, job_id: str) -> Dict:
-        # In this adapter, get_status returns result when done, so we can duplicate or just call get_status
-        # But since get_status consumes the modal result (it returns it), we might want to store it?
-        # Modal jobs are persistent-ish.
-        from backend.modal_client import modal_client
-        try:
-             return modal_client.get_job_result(job_id, timeout=5)
-        except Exception:
-             return {}
 
-    def cancel_job(self, job_id: str):
-        # modal_client needs support for this, assuming it has
-        # For now, we might not be able to easily cancel without the FunctionCall object
+# =============================================================================
+# Backend Factory
+# =============================================================================
+
+def get_available_backends() -> List[ComputeBackend]:
+    """Get list of all configured backends"""
+    backends = []
+    
+    # Modal (Preferred if enabled)
+    from flask import current_app
+    try:
+        if current_app.config.get('USE_MODAL_COMPUTE', False):
+            backends.append(ModalBackend())
+    except:
         pass
 
+    # Local GMSH
+    backends.append(LocalGMSHBackend())
+    
+    # Custom remote endpoint
+    remote_url = os.environ.get('REMOTE_COMPUTE_URL')
+    if remote_url:
+        backends.append(HTTPRemoteBackend(endpoint_url=remote_url))
+    
+    return backends
 
-def get_compute_provider(mode: str = None) -> ComputeProvider:
-    """Factory to get the configured compute provider"""
-    if not mode:
-        mode = os.environ.get('COMPUTE_MODE', 'LOCAL').upper()
-        
-    if mode == 'CLOUD':
-        return CloudProvider()
+
+def get_preferred_backend(strategy: str = None) -> ComputeBackend:
+    """
+    Get the preferred compute backend based on configuration.
+    
+    Args:
+        strategy: Override strategy. Options:
+            - 'auto': Try SSH tunnel first, fallback to local (default)
+            - 'local': Use local GMSH only
+            - 'ssh_tunnel': Use SSH tunnel only (fail if unavailable)
+            - 'remote_http': Use custom remote URL
+            
+    Returns:
+        ComputeBackend instance
+    """
+    if strategy is None:
+        strategy = os.environ.get('COMPUTE_BACKEND', 'auto')
+    
+    if strategy == 'local':
+        return LocalGMSHBackend()
+    
+    elif strategy == 'ssh_tunnel':
+        ssh_port = int(os.environ.get('SSH_TUNNEL_PORT', '8080'))
+        return SSHTunnelBackend(local_port=ssh_port)
+    
+    elif strategy == 'remote_http':
+        remote_url = os.environ.get('REMOTE_COMPUTE_URL', 'http://localhost:8080')
+        return HTTPRemoteBackend(endpoint_url=remote_url)
+    
+    elif strategy == 'auto':
+        # Try Modal first if enabled
+        from flask import current_app
+        try:
+            if current_app.config.get('USE_MODAL_COMPUTE', False):
+                return ModalBackend()
+        except:
+            pass
+
+        # Fallback directly to local (SSH tunnel removed for performance)
+        return LocalGMSHBackend()
+    
+    elif strategy == 'modal':
+        return ModalBackend()
+    
     else:
-        return LocalProvider()
+        raise ValueError(f"Unknown compute backend strategy: {strategy}")
 
-# Backwards compatibility alias
-ComputeBackend = ComputeProvider 
-get_preferred_backend = lambda strategy=None: get_compute_provider()
+
+class FallbackBackend(ComputeBackend):
+    """
+    Fallback backend that tries multiple backends in order.
+    Used for 'auto' strategy with actual fallback execution.
+    """
+    
+    def __init__(self, backends: List[ComputeBackend]):
+        self.backends = backends
+    
+    @property
+    def name(self) -> str:
+        return f"fallback ({', '.join(b.name for b in self.backends)})"
+    
+    def is_available(self) -> bool:
+        return any(b.is_available() for b in self.backends)
+    
+    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
+        """Try each backend in order until one succeeds"""
+        errors = []
+        
+        for backend in self.backends:
+            if not backend.is_available():
+                errors.append(f"{backend.name}: not available")
+                continue
+            
+            result = backend.generate_preview(cad_file_path, timeout)
+            
+            if "error" not in result:
+                result["_used_backend"] = backend.name
+                return result
+            
+            errors.append(f"{backend.name}: {result.get('error', 'unknown error')}")
+        
+        return {
+            "error": "All backends failed",
+            "details": errors,
+            "status": "error"
+        }

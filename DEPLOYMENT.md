@@ -41,7 +41,7 @@ curl http://localhost:3000/api/health
 To update the frontend (app.khorium.ai), you must run the deployment script from your local machine:
 
 ```powershell
-.\scripts\infra\deploy.ps1
+.\deploy.ps1
 ```
 
 This builds the React app and syncs it to the S3 bucket.

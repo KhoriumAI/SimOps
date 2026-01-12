@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Dict
 import time
 import multiprocessing
-import gmsh
 
 # Add project root to path FIRST
 # From apps/cli/, go up 2 levels to MeshPackageLean/
@@ -38,8 +37,15 @@ def vprint(*args, **kwargs):
 # ==============================================================================
 # HEAVY IMPORTS - Moved to lazy loading in generate_mesh()
 # ==============================================================================
-vprint("[INIT] Loading CFD Analyzer...", flush=True)
-from core.cfd_quality import CFDQualityAnalyzer
+vprint("[INIT] Loading NumPy...", flush=True)
+import numpy as np
+
+vprint("[INIT] Loading Gmsh...", flush=True)
+import gmsh
+
+import tempfile
+# Strategies and GPU mesher are now imported lazily in generate_mesh()
+# ==============================================================================
 
 vprint("[INIT] Ready.", flush=True)
 # ==============================================================================
@@ -65,38 +71,7 @@ def get_node_to_element_map(types, tags, nodes):
                 node_to_elem[nid].append(int(tag))
     return node_to_elem
 
-
 # ==============================================================================
-# CANARY WORKER (Isolated Process)
-# ==============================================================================
-def _canary_worker(file_path, results_queue):
-    """Worker function for 3D/2D meshing canary. Isolated in separate process."""
-    try:
-        import gmsh
-        gmsh.initialize()
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.option.setNumber("General.Verbosity", 1)
-        
-        # Ultra-stable settings for canary
-        gmsh.option.setNumber("General.NumThreads", 1)  # Disable OpenMP
-        gmsh.option.setNumber("Geometry.OCCAutoFix", 0) # Disable auto-healing
-        gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
-        gmsh.option.setNumber("Mesh.Algorithm", 1)      # MeshAdapt (stable)
-        
-        gmsh.model.add("Canary")
-        gmsh.model.occ.importShapes(file_path)
-        gmsh.model.occ.synchronize()
-        
-        # Fast 2D mesh
-        gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt
-        gmsh.model.mesh.generate(2)
-        
-        gmsh.finalize()
-        results_queue.put(True)
-    except Exception as e:
-        # results_queue.put(False)
-        pass
-
 
 def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
@@ -104,17 +79,17 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
     
     Converts STEP to STL first, then runs cfMesh.
     """
-    print("[OpenFOAM-HEX] Step 0: Starting OpenFOAM hex mesh generation...", flush=True)
+    print("[OpenFOAM-HEX] Starting OpenFOAM hex mesh generation...")
     
     try:
         # Step 1: Get STL path (either cached HQ STL or convert STEP now)
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[OpenFOAM-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
+            print(f"[OpenFOAM-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
             temp_stl = hq_stl_path
         else:
-            print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...", flush=True)
+            print("[OpenFOAM-HEX] Step 1: Converting STEP to STL (on-demand)...")
             from strategies.hex_dominant_strategy import HighFidelityDiscretization
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
@@ -140,13 +115,13 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
         output_file = str(mesh_folder / f"{mesh_name}_openfoam_hex.msh")
         
         # Step 4: Run OpenFOAM cfMesh
-        print("[OpenFOAM-HEX] Step 2: Running cfMesh...", flush=True)
+        print("[OpenFOAM-HEX] Step 2: Running cfMesh...")
         result = generate_openfoam_hex_mesh(temp_stl, output_file, cell_size=cell_size, verbose=True)
         
         if not result['success']:
             return result
         
-        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}", flush=True)
+        print(f"[OpenFOAM-HEX] SUCCESS: Mesh saved to {output_file}")
         
         return result
         
@@ -167,7 +142,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
     4. Generate conformal hex mesh
     5. Validate and save
     """
-    print("[CONFORMAL-HEX] Step 0: Starting conformal hex mesh generation...", flush=True)
+    print("[CONFORMAL-HEX] Starting conformal hex mesh generation...")
     
     try:
         import trimesh
@@ -176,10 +151,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[CONFORMAL-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
+            print(f"[CONFORMAL-HEX] Step 1: Using cached high-quality STL: {hq_stl_path}")
             temp_stl = hq_stl_path
         else:
-            print("[CONFORMAL-HEX] Step 1: Converting STEP to STL (on-demand)...", flush=True)
+            print("[CONFORMAL-HEX] Step 1: Converting STEP to STL (on-demand)...")
             discretizer = HighFidelityDiscretization(verbose=True)
             temp_stl = tempfile.NamedTemporaryFile(suffix='.stl', delete=False).name
             success = discretizer.convert_step_to_stl(
@@ -194,7 +169,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
 
         
         # Step 2: CoACD decomposition
-        print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...", flush=True)
+        print("[CONFORMAL-HEX] Step 2: Running CoACD decomposition...")
         decomposer = ConvexDecomposition(verbose=True)
         threshold = quality_params.get('coacd_threshold', 0.05) if quality_params else 0.05
         parts, stats = decomposer.decompose_mesh(temp_stl, threshold=threshold)
@@ -202,10 +177,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         if len(parts) == 0:
             return {'success': False, 'message': 'CoACD produced no parts'}
         
-        print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)), flush=True)
+        print("[CONFORMAL-HEX] Decomposed into {} convex parts".format(len(parts)))
         
         # Step 3: Generate ADAPTIVE conformal hex mesh (STRICT QUALITY MODE)
-        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...", flush=True)
+        print("[CONFORMAL-HEX] Step 3: Generating adaptive conformal hex mesh...")
         
         # Strict adaptive parameters for high-quality curved surface meshing
         quality_target = quality_params.get('quality_target', 0.98) if quality_params else 0.98  # 98% valid!
@@ -232,10 +207,10 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
         hexes = result['hexes']
         
         print("[CONFORMAL-HEX] Generated {} hexes with {} vertices".format(
-            len(hexes), len(vertices)), flush=True)
+            len(hexes), len(vertices)))
         
         # Step 4: Save mesh (Gmsh 2.2 ASCII format for GUI compatibility)
-        print("[CONFORMAL-HEX] Step 4: Saving mesh...", flush=True)
+        print("[CONFORMAL-HEX] Step 4: Saving mesh...")
         mesh_folder = Path(__file__).parent / "generated_meshes"
         mesh_folder.mkdir(exist_ok=True)
         mesh_name = Path(cad_file).stem
@@ -276,7 +251,7 @@ def generate_conformal_hex_test(cad_file: str, output_dir: str = None, quality_p
                 boundary_faces.append(face_to_elem[face_nodes])
                 boundary_face_parents.append(face_to_hex_idx[face_nodes])
         
-        print("[CONFORMAL-HEX] Extracted {} boundary quads for visualization".format(len(boundary_faces)), flush=True)
+        print("[CONFORMAL-HEX] Extracted {} boundary quads for visualization".format(len(boundary_faces)))
 
         with open(output_file, 'w') as f:
             f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
@@ -629,17 +604,6 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         
         gmsh.finalize()
         
-        # Calculate CFD quality metrics
-        try:
-            from core.cfd_quality import CFDQualityAnalyzer
-            print("[GPU Mesher] Running CFD quality analysis...", flush=True)
-            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
-            quality_metrics['cfd'] = cfd_report.to_dict()
-            print(f"[GPU Mesher] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
-        except Exception as cfd_err:
-            print(f"[GPU Mesher] Warning: CFD quality analysis failed: {cfd_err}")
-
         print(f"[GPU Mesher] SUCCESS! Mesh saved to: {output_file}")
         
         return {
@@ -673,278 +637,7 @@ def generate_gpu_delaunay_mesh(cad_file: str, output_dir: str = None, quality_pa
         }
 
 
-def generate_highspeed_gpu_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
-    """
-    Generate tetrahedral mesh using HighSpeed GPU algorithm with SDF visibility filtering.
-    
-    This is an enhanced version of the GPU Delaunay pipeline that uses SDF-based
-    visibility checks to robustly prevent void-spanning tetrahedra in multi-body
-    assemblies and complex geometries.
-    
-    Key features:
-    - Triangle Inequality check for fast edge approval (~90% of edges)
-    - Sphere Tracing for edges near boundaries (mathematically robust)
-    - Pre-connection filtering (prevents bad tets before they're created)
-    
-    Pipeline:
-    1. Load CAD file and generate surface mesh (CPU/Gmsh)
-    2. Extract surface vertices and triangles
-    3. Run GPU Fill & Filter pipeline with SDF visibility
-    4. Save result as Gmsh-compatible mesh
-    """
-    try:
-        from core.gpu_mesher import (
-            gpu_delaunay_fill_and_filter, GPU_AVAILABLE,
-            filter_tets_by_sdf_visibility, compute_sdf_at_points
-        )
-        from scipy.spatial import cKDTree
-        
-        if not GPU_AVAILABLE:
-            print("[HighSpeed GPU] CRITICAL: GPU Mesher module not found or failed to load!", flush=True)
-            print("[HighSpeed GPU] Cannot proceed with HighSpeed GPU strategy.", flush=True)
-            return {
-                'success': False, 
-                'error': 'GPU Mesher not available. Please select a different strategy (e.g., Tetrahedral HXT).',
-                'message': 'GPU unavailable'
-            }
-        
-        print("[HighSpeed GPU] Starting HighSpeed GPU pipeline with SDF visibility...", flush=True)
-        start_total = time.time()
-        
-        # Determine output path
-        mesh_folder = Path(__file__).parent / "generated_meshes"
-        mesh_folder.mkdir(exist_ok=True)
-        mesh_name = Path(cad_file).stem
-        output_file = str(mesh_folder / f"{mesh_name}_highspeed_gpu_mesh.msh")
-        
-        # Step 1: Load CAD (either cached HQ STL or convert STEP now)
-        print("[HighSpeed GPU] Step 1: Loading geometry...", flush=True)
-        gmsh.initialize()
-        gmsh.option.setNumber("General.Terminal", 1)
-        gmsh.model.add("highspeed_gpu_surface")
-        
-        hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
-        if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[HighSpeed GPU] Using cached high-quality STL: {hq_stl_path}", flush=True)
-            gmsh.merge(hq_stl_path)
-        else:
-            print(f"[HighSpeed GPU] Loading CAD: {cad_file}", flush=True)
-            gmsh.merge(cad_file)
-        gmsh.model.occ.synchronize()
-        
-        # Get bounding box
-        bbox = gmsh.model.getBoundingBox(-1, -1)
-        bbox_min = np.array([bbox[0], bbox[1], bbox[2]])
-        bbox_max = np.array([bbox[3], bbox[4], bbox[5]])
-        
-        # Get sizing from quality params
-        target_elements = quality_params.get('target_elements', 10000) if quality_params else 10000
-        max_element_size = quality_params.get('max_size_mm', None) if quality_params else None
-        if max_element_size is None:
-            max_element_size = quality_params.get('max_element_size', None) if quality_params else None
-        min_element_size = quality_params.get('min_element_size', None) if quality_params else None
-        
-        print(f"[HighSpeed GPU] Bounding box: {bbox_min} to {bbox_max}", flush=True)
-        
-        # Determine mesh size
-        if max_element_size is not None:
-            mesh_size = float(max_element_size)
-            print(f"[HighSpeed GPU] Using user-specified max element size: {mesh_size:.3f} mm", flush=True)
-        else:
-            volume = np.prod(bbox_max - bbox_min)
-            mesh_size = (volume / (target_elements / 6)) ** (1/3)
-            mesh_size = max(mesh_size, (bbox_max - bbox_min).min() / 100)
-            print(f"[HighSpeed GPU] Auto-calculated mesh size from target {target_elements}: {mesh_size:.3f}", flush=True)
-        
-        # Determine min size
-        min_mesh_size = float(min_element_size) if min_element_size is not None else mesh_size * 0.5
-        
-        print(f"[HighSpeed GPU] Element size range: {min_mesh_size:.3f} to {mesh_size:.3f} mm", flush=True)
-        
-        # Set mesh size for surface mesh
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_mesh_size)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
-        
-        # Generate 2D surface mesh only
-        gmsh.model.mesh.generate(2)
-        
-        # Extract surface mesh data
-        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-        node_coords = np.array(node_coords).reshape(-1, 3)
-        
-        tag_to_idx = {tag: idx for idx, tag in enumerate(node_tags)}
-        
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2)
-        
-        surface_faces = []
-        for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
-            if etype == 2:
-                enodes = np.array(enodes).reshape(-1, 3)
-                for tri_nodes in enodes:
-                    face = [tag_to_idx[n] for n in tri_nodes]
-                    surface_faces.append(face)
-        
-        surface_faces = np.array(surface_faces)
-        surface_verts = node_coords
-        
-        print(f"[HighSpeed GPU] Surface mesh: {len(surface_verts)} vertices, {len(surface_faces)} triangles", flush=True)
-        
-        gmsh.finalize()
-        
-        # Step 2: Run GPU Fill & Filter pipeline (standard GPU Delaunay first)
-        print("[HighSpeed GPU] Step 2: Running GPU Fill & Filter pipeline...", flush=True)
-        
-        resolution = max(20, int((target_elements / 6) ** (1/3)))
-        resolution = min(resolution, 100)
-        
-        min_spacing = min_mesh_size
-        max_spacing = mesh_size * 1.5
-        grading = 1.5
-        target_sicn = 0.10
-        
-        def progress_callback(msg, pct):
-            print(f"[HighSpeed GPU] {msg} ({pct}%)", flush=True)
-        
-        # Run the base GPU pipeline (returns vertices, tets, surface_faces)
-        vertices, tetrahedra, surface_faces_out = gpu_delaunay_fill_and_filter(
-            surface_verts, surface_faces, 
-            bbox_min, bbox_max,
-            min_spacing=min_spacing,
-            max_spacing=max_spacing,
-            grading=grading,
-            resolution=resolution,
-            target_sicn=target_sicn,
-            progress_callback=progress_callback,
-            fast_mode=True  # Use fast mode internally, we add SDF filtering after
-        )
-        
-        print(f"[HighSpeed GPU] Base pipeline: {len(tetrahedra)} tetrahedra", flush=True)
-        
-        # Step 3: Apply SDF Visibility Filter (the key enhancement)
-        print("[HighSpeed GPU] Step 3: Applying SDF Visibility Filter...", flush=True)
-        surface_tree = cKDTree(surface_verts)
-        
-        def sdf_log(msg, pct=0):
-            print(f"[HighSpeed GPU] {msg}", flush=True)
-        
-        filtered_tets, sdf_stats = filter_tets_by_sdf_visibility(
-            vertices, tetrahedra, surface_tree, surface_verts, log=sdf_log
-        )
-        
-        tetrahedra = filtered_tets
-        
-        elapsed = time.time() - start_total
-        print(f"[HighSpeed GPU] Generated {len(tetrahedra)} tetrahedra in {elapsed:.2f}s", flush=True)
-        print(f"[HighSpeed GPU] SDF filter: {sdf_stats['filtered']} void-spanning tets removed", flush=True)
-        print(f"[HighSpeed GPU] Fast path approved {sdf_stats['fast_pass_pct']:.1f}% of edges", flush=True)
-        
-        # Step 4: Save mesh in Gmsh format
-        print("[HighSpeed GPU] Step 4: Saving mesh to Gmsh format...", flush=True)
-        
-        gmsh.initialize()
-        gmsh.model.add("highspeed_gpu_result")
-        
-        gmsh.model.addDiscreteEntity(3, 1)
-        gmsh.model.addDiscreteEntity(2, 2)
-        
-        node_tags = list(range(1, len(vertices) + 1))
-        node_coords_flat = vertices.flatten().tolist()
-        gmsh.model.mesh.addNodes(3, 1, node_tags, node_coords_flat)
-        
-        tet_tags = list(range(1, len(tetrahedra) + 1))
-        tet_nodes_flat = (tetrahedra + 1).flatten().tolist()
-        gmsh.model.mesh.addElementsByType(1, 4, tet_tags, tet_nodes_flat)
-        
-        start_tri_tag = len(tetrahedra) + 1
-        tri_tags = list(range(start_tri_tag, start_tri_tag + len(surface_faces_out)))
-        tri_nodes_flat = (surface_faces_out + 1).flatten().tolist()
-        gmsh.model.mesh.addElementsByType(2, 2, tri_tags, tri_nodes_flat)
-        
-        gmsh.model.addPhysicalGroup(3, [1], tag=1, name="Volume")
-        gmsh.model.addPhysicalGroup(2, [2], tag=2, name="Surface")
-        
-        gmsh.write(output_file)
-        
-        # Compute quality metrics
-        print("[HighSpeed GPU] Computing quality metrics...", flush=True)
-        try:
-            all_tags = tet_tags
-            sicn_vals = gmsh.model.mesh.getElementQualities(all_tags, "minSICN")
-            gamma_vals = gmsh.model.mesh.getElementQualities(all_tags, "gamma")
-            
-            per_element_quality = {t: float(sicn_vals[i]) for i, t in enumerate(all_tags)}
-            per_element_gamma = {t: float(gamma_vals[i]) for i, t in enumerate(all_tags)}
-            
-            per_element_skewness = {t: 1.0 - float(per_element_quality.get(t, 0.5)) for t in all_tags}
-            per_element_aspect_ratio = {t: 1.0/float(per_element_quality.get(t, 0.5)) if per_element_quality.get(t, 0.5) > 0 else 100.0 for t in all_tags}
-            
-            def get_stats(vals):
-                if not vals: return 0.0, 0.0, 0.0
-                v = list(vals.values())
-                return float(min(v)), float(max(v)), float(np.mean(v))
-            
-            skew_min, skew_max, skew_avg = get_stats(per_element_skewness)
-            ar_min, ar_max, ar_avg = get_stats(per_element_aspect_ratio)
-            
-            quality_metrics = {
-                'sicn_min': float(min(sicn_vals)),
-                'sicn_max': float(max(sicn_vals)),
-                'sicn_avg': float(np.mean(sicn_vals)),
-                'gamma_min': float(min(gamma_vals)),
-                'gamma_max': float(max(gamma_vals)),
-                'gamma_avg': float(np.mean(gamma_vals)),
-                'sdf_filtered_tets': sdf_stats['filtered'],
-                'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']
-            }
-            
-            print(f"[HighSpeed GPU] Quality - SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
-        except Exception as e:
-            print(f"[HighSpeed GPU] Warning: Could not compute quality: {e}", flush=True)
-            per_element_quality = {}
-            per_element_gamma = {}
-            per_element_skewness = {}
-            per_element_aspect_ratio = {}
-            quality_metrics = {'sdf_filtered_tets': sdf_stats['filtered'], 'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']}
-        
-        gmsh.finalize()
-        
-        print(f"[HighSpeed GPU] SUCCESS! Mesh saved to: {output_file}", flush=True)
-        
-        return {
-            'success': True,
-            'output_file': str(Path(output_file).absolute()),
-            'strategy': 'highspeed_gpu_sdf_visibility',
-            'message': f'HighSpeed GPU: {len(tetrahedra)} tetrahedra in {elapsed:.2f}s (SDF filtered {sdf_stats["filtered"]} void-spanning)',
-            'total_elements': len(tetrahedra),
-            'total_nodes': len(vertices),
-            'per_element_quality': per_element_quality,
-            'per_element_gamma': per_element_gamma,
-            'per_element_skewness': per_element_skewness,
-            'per_element_aspect_ratio': per_element_aspect_ratio,
-            'quality_metrics': quality_metrics,
-            'metrics': {
-                'total_elements': len(tetrahedra),
-                'total_nodes': len(vertices),
-                'gpu_time_ms': elapsed * 1000,
-                'surface_triangles': len(surface_faces_out),
-                'resolution': resolution,
-                'sdf_filtered': sdf_stats['filtered'],
-                'sdf_fast_pass_pct': sdf_stats['fast_pass_pct']
-            }
-        }
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {
-            'success': False,
-            'message': f'HighSpeed GPU meshing failed: {str(e)}',
-            'traceback': traceback.format_exc()
-        }
-
-
 def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
-
     """
     Generate hex-dominant mesh using CoACD + subdivision pipeline
     
@@ -957,11 +650,9 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
     """
     try:
         import trimesh
-        import tempfile
-        from strategies.hex_dominant_strategy import HighFidelityDiscretization, ConvexDecomposition
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        print("[HEX-DOM] Step 0: Starting hex-dominant meshing pipeline...", flush=True)
+        print("[HEX-DOM] Starting hex-dominant meshing pipeline...")
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -977,10 +668,10 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[HEX-DOM] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
+            print(f"[HEX-DOM] Step 1: Using cached high-quality STL: {hq_stl_path}")
             stl_file = Path(hq_stl_path)
         else:
-            print("[HEX-DOM] Step 1: Converting STEP to STL (on-demand)...", flush=True)
+            print("[HEX-DOM] Step 1: Converting STEP to STL (on-demand)...")
             step1 = HighFidelityDiscretization()
             stl_file = temp_dir / f"{mesh_name}_step1.stl"
             success = step1.convert_step_to_stl(cad_file, str(stl_file))
@@ -991,17 +682,17 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             saved_stl_step1 = mesh_folder / f"{mesh_name}_step1_stl.stl"
             import shutil
             shutil.copy(stl_file, saved_stl_step1)
-            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}", flush=True)
+            print(f"[HEX-DOM] Saved Step 1 STL: {saved_stl_step1}")
         
         # Step 2: CoACD Decomposition
-        print("[HEX-DOM] Step 2: CoACD convex decomposition...", flush=True)
+        print("[HEX-DOM] Step 2: CoACD convex decomposition...")
         step2 = ConvexDecomposition()
         parts, stats = step2.decompose_mesh(str(stl_file), threshold=0.05)
         
         if not parts:
             return {'success': False, 'message': 'Step 2 failed: CoACD decomposition'}
         
-        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)", flush=True)
+        print(f"[HEX-DOM] Decomposed into {len(parts)} convex parts (volume error: {stats['volume_error_pct']:.2f}%)")
         
         # INTERMEDIATE UPDATE: CoACD Parts
         try:
@@ -1042,7 +733,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                 gmsh.finalize()
         
         # Step 3-5: Hex Meshing
-        print("[HEX-DOM] Step 3: Generating hex mesh via subdivision...", flush=True)
+        print("[HEX-DOM] Step 3-5: Generating hex mesh via subdivision...")
         
         gmsh.initialize()
         gmsh.model.add("hex_dom_final")
@@ -1075,7 +766,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             gmsh.model.geo.addVolume([l])
             gmsh.model.geo.synchronize()
             
-            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces", flush=True)
+            print(f"[HEX-DOM] Created volume from {len(s)} classified surfaces")
         except Exception as e:
             gmsh.finalize()
             return {'success': False, 'message': f'Step 3 failed: Surface classification - {e}'}
@@ -1083,7 +774,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
         # Generate 3D tet mesh first
         try:
             gmsh.model.mesh.generate(3)
-            print("[HEX-DOM] Generated intermediate tet mesh", flush=True)
+            print("[HEX-DOM] Generated intermediate tet mesh")
             
             # INTERMEDIATE UPDATE: Unstructured Tet Mesh (Before subdivision)
             tet_temp = str(mesh_folder / f"{mesh_name}_tet_temp.msh")
@@ -1095,7 +786,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             return {'success': False, 'message': f'Step 4 failed: Tet meshing - {e}'}
         
         # Apply subdivision (tet → hex)
-        print("[HEX-DOM] Applying subdivision algorithm...", flush=True)
+        print("[HEX-DOM] Applying subdivision algorithm...")
         gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 2)  # All hexes
         gmsh.model.mesh.refine()
         
@@ -1134,25 +825,13 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
                     per_element_skewness.append(1.0 - quality)
                     per_element_aspect_ratio.append(1.0 / max(quality, 0.01))
                 
-                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements", flush=True)
+                print(f"[HEX-DOM] Computed quality for {len(per_element_quality)} hex elements")
         except Exception as e:
             print(f"[HEX-DOM] Warning: Could not compute quality: {e}")
         
         gmsh.finalize()
         
-        # Calculate CFD quality metrics
-        cfd_data = None
-        try:
-            from core.cfd_quality import CFDQualityAnalyzer
-            print("[HEX-DOM] Running CFD quality analysis...", flush=True)
-            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
-            cfd_data = cfd_report.to_dict()
-            print(f"[HEX-DOM] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
-        except Exception as cfd_err:
-            print(f"[HEX-DOM] Warning: CFD quality analysis failed: {cfd_err}")
-
-        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)", flush=True)
+        print(f"[HEX-DOM] Success! Generated {num_hexes} hexahedra ({total_3d} total 3D elements)")
         
         return {
             'success': True,
@@ -1175,8 +854,7 @@ def generate_hex_dominant_mesh(cad_file: str, output_dir: str = None, quality_pa
             'quality_metrics': {
                 'min_quality': min(per_element_quality) if per_element_quality else 0,
                 'max_quality': max(per_element_quality) if per_element_quality else 1,
-                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0,
-                'cfd': cfd_data
+                'avg_quality': sum(per_element_quality) / len(per_element_quality) if per_element_quality else 0
             }
         }
         
@@ -1194,7 +872,7 @@ def generate_polyhedral_mesh(cad_file: str, output_dir: str = None, quality_para
     Generate polyhedral mesh using Dual Graph strategy
     """
     try:
-        print("[POLYHEDRAL] Step 0: Starting Polyhedral (Dual) meshing pipeline...", flush=True)
+        print("[POLYHEDRAL] Starting Polyhedral (Dual) meshing pipeline...")
         
         # Determine output folders
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -1267,7 +945,7 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
     Optimization: Standard (no slow Netgen)
     """
     try:
-        print("[HXT] Step 0: Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
+        print("[HXT] Starting tet_delaunay_optimized (HXT) pipeline...", flush=True)
         start_time = time.time()
         
         # Determine output path - include quality preset and unique ID to avoid overwrites
@@ -1286,10 +964,10 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         # Load CAD (either cached HQ STL or convert STEP now)
         hq_stl_path = quality_params.get('hq_stl_path') if quality_params else None
         if hq_stl_path and os.path.exists(hq_stl_path):
-            print(f"[HXT] Step 1: Using cached high-quality STL: {hq_stl_path}", flush=True)
+            print(f"[HXT] Using cached high-quality STL: {hq_stl_path}", flush=True)
             gmsh.merge(hq_stl_path)
         else:
-            print(f"[HXT] Step 1: Loading CAD: {cad_file}", flush=True)
+            print(f"[HXT] Loading CAD: {cad_file}", flush=True)
             gmsh.model.occ.importShapes(cad_file)
         gmsh.model.occ.synchronize()
         
@@ -1324,22 +1002,11 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
         gmsh.option.setNumber("Mesh.MinimumCircleNodes", 12)
         
-        # Get algorithm options (can be overridden by dispatch for specific strategies)
-        mesh_algo_2d = 6   # Default: Frontal-Delaunay 2D
-        mesh_algo_3d = 10  # Default: HXT (Parallel)
-        
-        if quality_params:
-            mesh_algo_2d = quality_params.get('_mesh_algorithm', mesh_algo_2d)
-            mesh_algo_3d = quality_params.get('_mesh_algorithm_3d', mesh_algo_3d)
-        
-        algo_names = {1: 'MeshAdapt', 4: 'Frontal', 5: 'Delaunay', 6: 'Frontal-Delaunay', 10: 'HXT'}
-        print(f"[MESH] Using Algorithm2D={mesh_algo_2d} ({algo_names.get(mesh_algo_2d, '?')}), Algorithm3D={mesh_algo_3d} ({algo_names.get(mesh_algo_3d, '?')})", flush=True)
-        
-        # 1. First Attempt: Selected algorithm
-        print(f"[HXT] Step 2: Generating Mesh (Algo2D={mesh_algo_2d}, Algo3D={mesh_algo_3d})...", flush=True)
+        # 1. First Attempt: Rapid Parallel HXT
         try:
-            gmsh.option.setNumber("Mesh.Algorithm", mesh_algo_2d)
-            gmsh.option.setNumber("Mesh.Algorithm3D", mesh_algo_3d)
+            print("[HXT] Attempting fast parallel HXT (Algorithm 10)...", flush=True)
+            gmsh.option.setNumber("Mesh.Algorithm", 6)    # Frontal-Delaunay 2D
+            gmsh.option.setNumber("Mesh.Algorithm3D", 10) # HXT (Parallel)
             gmsh.option.setNumber("Mesh.ElementOrder", element_order)
             gmsh.model.mesh.generate(3)
         except Exception as e:
@@ -1354,41 +1021,28 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
             gmsh.option.setNumber("Mesh.ElementOrder", element_order) # Ensure element order is set for MeshAdapt too
             gmsh.model.mesh.generate(3)
         
-        # Check if full optimization is requested (Tetrahedral HXT vs Fast Tet)
-        full_optimization = quality_params.get('_full_optimization', False) if quality_params else False
-        
-        if full_optimization:
-            # FULL OPTIMIZATION: Netgen + heavy smoothing (production quality)
-            print("[HXT] Step 3: Running FULL optimization (Netgen + heavy smoothing)...", flush=True)
-            gmsh.option.setNumber("Mesh.Optimize", 1)
-            gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)  # Enable Netgen refinement
-            gmsh.option.setNumber("Mesh.Smoothing", 10)      # Heavy smoothing
-        else:
-            # FAST MODE: Light optimization only (speed priority)
-            print("[HXT] Step 3: Running FAST optimization (no Netgen)...", flush=True)
-            gmsh.option.setNumber("Mesh.Optimize", 1)
-            gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
-            gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
+        # Light optimization (fast)
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)  # Skip slow Netgen
+        gmsh.option.setNumber("Mesh.Smoothing", 5)       # Light smoothing
         
         # NOTE: Mesh was already generated in the try/except block above (line ~1011)
         # We only need to run optimization, not regenerate
+        print("[HXT] Running light optimization...", flush=True)
         mesh_start = time.time()
         gmsh.model.mesh.optimize("", force=True)  # Run optimization pass only
         mesh_time = time.time() - mesh_start
-        print(f"[HXT] Optimization: {mesh_time:.2f}s (full={full_optimization})", flush=True)
+        print(f"[HXT] Optimization: {mesh_time:.2f}s", flush=True)
         
         # Count elements
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
         num_nodes = len(node_tags)
         
-        # Count elements (Dimension 3 for stats)
-        elem_types_3d, elem_tags_3d, _ = gmsh.model.mesh.getElements(3)
-        num_elements = sum(len(tags) for tags in elem_tags_3d)
+        # Count 3D elements (type 4 = tet4, type 11 = tet10)
+        elem_types, elem_tags, _ = gmsh.model.mesh.getElements(3)
+        num_elements = sum(len(tags) for tags in elem_tags)
         
-        # Fetch all elements for quality metrics (Dimensions 2 and 3)
-        elem_types, elem_tags, _ = gmsh.model.mesh.getElements()
-        
-        print(f"[HXT] Elements (3D): {num_elements}, Nodes: {num_nodes}", flush=True)
+        print(f"[HXT] Elements: {num_elements}, Nodes: {num_nodes}", flush=True)
         
         # Extract quality metrics using Gmsh's built-in functions
         quality_metrics = {}
@@ -1496,48 +1150,19 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
                             per_element_aspect_ratio[tag_str] = float(tri_ar[i])
                             per_element_min_angle[tag_str] = 60.0 # Default for triangles
                             
-                        print(f"[HXT] Included quality for {len(tri_tags)} surface elements", flush=True)
+                        print(f"[HXT] Included quality for {len(tri_tags)} surface elements")
                     except Exception as e:
-                        print(f"[HXT] Warning: Could not compute surface quality: {e}", flush=True)
+                        print(f"[HXT] Warning: Could not compute surface quality: {e}")
 
                 print(f"[HXT] SICN: min={quality_metrics['sicn_min']:.3f}, avg={quality_metrics['sicn_avg']:.3f}", flush=True)
                 print(f"[HXT] Gamma: min={quality_metrics['gamma_min']:.3f}, avg={quality_metrics['gamma_avg']:.3f}", flush=True)
                 
-                # --- CFD QUALITY CHECK ---
-                try:
-                    from core.cfd_quality import CFDQualityAnalyzer
-                    print("[HXT] Running CFD quality analysis...", flush=True)
-                    # We have to do this BEFORE finalize if we want to use current mesh, 
-                    # but analyze_mesh_file is safer as it opens its own session.
-                    cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-                    # Use a temp write if not already written, but here we write after this block.
-                    # Actually, we can just run it on the output_file AFTER gmsh.write()
-                except Exception as cfd_e:
-                    print(f"[HXT] CFD Init Error: {cfd_e}")
-
         except Exception as qe:
             print(f"[HXT] Warning: Could not compute quality: {qe}", flush=True)
-        print("[HXT] Step 4: Writing mesh to disk...", flush=True)
+        
         # Write output mesh
         gmsh.write(output_file)
-        print(f"[HXT] Mesh saved: {output_file}", flush=True)
-        
-        # Run CFD analysis on the current mesh (in-memory) to avoid double-init/finalize issues
-        print("[HXT] Step 5: Running CFD quality analysis...", flush=True)
-        try:
-            from core.cfd_quality import CFDQualityAnalyzer
-            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-            # Use analyze_current_mesh instead of analyze_mesh_file to avoid re-initializing Gmsh
-            cfd_report = cfd_analyzer.analyze_current_mesh()
-            quality_metrics['cfd'] = cfd_report.to_dict()
-            print(f"[HXT] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
-        except Exception as cfd_err:
-             print(f"[HXT] Warning: CFD quality analysis failed: {cfd_err}")
-
-        try:
-            gmsh.finalize()
-        except:
-            pass
+        gmsh.finalize()
         
         total_time = time.time() - start_time
         print(f"[HXT] SUCCESS! Total time: {total_time:.2f}s", flush=True)
@@ -1592,27 +1217,6 @@ def generate_fast_tet_delaunay_mesh(cad_file: str, output_dir: str = None, quali
         }
 
 
-
-# ==============================================================================
-# Module-level isolated generation function (required for multiprocessing on Windows)
-# ==============================================================================
-def run_isolated_generation(cad_path, out_path, cfg, result_queue):
-    """
-    Runs ExhaustiveMeshGenerator in an isolated subprocess.
-    This function MUST be at module level for Windows multiprocessing to pickle it.
-    """
-    try:
-        from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
-        gen = ExhaustiveMeshGenerator(cfg)
-        res = gen.generate_mesh(cad_path, out_path)
-        result_queue.put(res)
-    except Exception as e:
-        import traceback
-        print(f"[WATCHDOG] Generation subprocess fatal error: {e}")
-        print(traceback.format_exc())
-        result_queue.put(None)
-
-
 def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = None) -> Dict:
     """
     Generate mesh in subprocess
@@ -1632,118 +1236,19 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         save_stl = quality_params.get('save_stl', False) if quality_params else False
         
-        # DEBUG: Log strategy selection for troubleshooting
-        print(f"[DEBUG] ===== STRATEGY SELECTION DEBUG =====")
-        print(f"[DEBUG] mesh_strategy received: '{mesh_strategy}' (type: {type(mesh_strategy).__name__})")
-        print(f"[DEBUG] quality_params keys: {list(quality_params.keys()) if quality_params else 'None'}")
-        print(f"[DEBUG] =========================================")
+        # =====================================================================
+        # ASSEMBLY DETECTION: Auto-detect multi-volume assemblies
+        # =====================================================================
+        # For tet-based strategies, check if this is an assembly (>3 volumes)
+        # If so, use the optimized assembly pipeline (fail-fast with boxing)
+        is_tet_strategy = any(k in mesh_strategy for k in ['Tet', 'tet', 'Delaunay', 'Exhaustive', '']) or mesh_strategy == ''
+        
+        # [REMOVED] Redundant early assembly check load
+        # Generators (Exhaustive/Assembly) now handle their own detection internally
+        # to avoid loading the CAD file multiple times.
         
         # =====================================================================
-        # STRATEGY NORMALIZATION: Handle GUI variants and case-insensitivity
-        # =====================================================================
-        if mesh_strategy:
-            import re
-            orig_strat = mesh_strategy
-            
-            # Normalize: lowercase, strip, collapse special chars to underscores
-            norm = mesh_strategy.lower().strip()
-            norm = re.sub(r'[^a-z0-9]', '_', norm)
-            norm = re.sub(r'_+', '_', norm)  # Collapse multiple underscores
-            
-            # Comprehensive mapping for all strategies
-            if 'hxt' in norm or ('tetrahedral' in norm and 'hxt' in norm):
-                mesh_strategy = 'Tetrahedral (HXT)'
-            elif 'fast' in norm and 'tet' in norm:
-                mesh_strategy = 'Fast Tet'
-            elif 'tet' in norm and 'delaunay' in norm:
-                mesh_strategy = 'Tet Delaunay'
-            elif 'tet' in norm and 'frontal' in norm:
-                mesh_strategy = 'Tet Frontal'
-            elif 'tet' in norm and ('meshadapt' in norm or 'mesh_adapt' in norm):
-                mesh_strategy = 'Tet MeshAdapt'
-            elif 'hex' in norm and 'dominant' in norm:
-                mesh_strategy = 'Hex Dominant'
-            elif 'hex' in norm and 'subdivision' in norm:
-                mesh_strategy = 'Hex Dominant'
-            elif 'highspeed' in norm or ('gpu' in norm and 'sdf' in norm):
-                mesh_strategy = 'HighSpeed GPU'
-            elif 'gpu' in norm and 'delaunay' in norm:
-                mesh_strategy = 'GPU Delaunay'
-            elif 'polyhedral' in norm:
-                mesh_strategy = 'Polyhedral'
-
-            
-            print(f"[DEBUG] Strategy normalization: '{orig_strat}' -> '{mesh_strategy}'")
-            
-        # =====================================================================
-        # UNIVERSAL CANARY (All Strategies)
-        # =====================================================================
-        # Skip canary for Exhaustive since it has its own built-in robust checks
-        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
-            import multiprocessing
-            print("\n[CANARY] ----------------------------------------", flush=True)
-            print("[CANARY] Running Universal Pre-Flight Checks...", flush=True)
-            
-            # 1. Complexity Analysis (1D) using simple Gmsh load
-            try:
-                gmsh.initialize()
-                gmsh.model.add("Canary_Analyzer")
-                gmsh.option.setNumber("General.Terminal", 0)
-                gmsh.option.setNumber("General.Verbosity", 0)
-                
-                # Check extension to decide import method
-                ext = Path(cad_file).suffix.lower()
-                if ext in ['.stl', '.obj']:
-                    gmsh.merge(cad_file)
-                else:
-                    gmsh.model.occ.importShapes(cad_file)
-                    gmsh.model.occ.synchronize()
-                
-                v_count = len(gmsh.model.getEntities(3))
-                s_count = len(gmsh.model.getEntities(2))
-                c_count = len(gmsh.model.getEntities(1))
-                p_count = len(gmsh.model.getEntities(0))
-                
-                print(f"[CANARY] Geometry Stats: {v_count} Volumes, {s_count} Surfaces, {c_count} Curves", flush=True)
-                
-                # 2. 2D Surface Canary (Universal)
-                # This is critical for assemblies (>= 3 volumes) to identify problematic parts early.
-                print(f"[CANARY] Running 2D surface canary (timeout: 10s)...", flush=True)
-                
-                q = multiprocessing.Queue()
-                p = multiprocessing.Process(target=_canary_worker, args=(cad_file, q))
-                p.start()
-                p.join(10)
-                
-                if p.is_alive():
-                    print("[CANARY] [WARNING] 2D Canary timed out! One or more parts in this assembly are complex.", flush=True)
-                    p.terminate()
-                    p.join()
-                else:
-                    if not q.empty() and q.get() is True:
-                        print("[CANARY] [OK] 2D Surface Meshable.", flush=True)
-                    else:
-                        print("[CANARY] [WARNING] 2D Canary failed (crashed/errored).", flush=True)
-                
-                gmsh.finalize()
-                
-            except Exception as e:
-                print(f"[CANARY] [WARNING] Canary analysis failed: {e}", flush=True)
-                if gmsh.isInitialized():
-                    try: 
-                        gmsh.finalize()
-                    except: 
-                        pass
-            
-            print("[CANARY] ----------------------------------------\n", flush=True)
-
-            # Strategy Announcement
-            print(f"[INFO] ==================================================", flush=True)
-            print(f"[INFO] Selected Strategy: {mesh_strategy}", flush=True)
-            print(f"[INFO] ==================================================", flush=True)
-            
-        # =====================================================================
-        # Validate strategy again in case it was normalized (above code handles normalization)
+        # Continue with standard mesh strategy dispatch
         # =====================================================================
         
         if 'Hex Dominant Testing' in mesh_strategy or 'Hex OpenFOAM' in mesh_strategy:
@@ -1762,18 +1267,6 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             print("[DEBUG] Hex Dominant strategy detected - using hex pipeline")
             return generate_hex_dominant_mesh(cad_file, output_dir, quality_params)
         
-        # HighSpeed GPU (SDF Visibility) - must be BEFORE regular GPU Delaunay check
-        if 'HighSpeed GPU' in mesh_strategy or 'highspeed_gpu' in mesh_strategy or 'HighSpeed' in mesh_strategy:
-            vprint("[INIT] Loading HighSpeed GPU mesher...", flush=True)
-            try:
-                from core.gpu_mesher import gpu_delaunay_fill_and_filter, GPU_AVAILABLE, filter_tets_by_sdf_visibility
-                vprint(f"[INIT] HighSpeed GPU mesher loaded. GPU available: {GPU_AVAILABLE}", flush=True)
-            except Exception as e:
-                return {'success': False, 'error': f'HighSpeed GPU Mesher load failed: {e}'}
-                
-            print("[DEBUG] HighSpeed GPU strategy detected - using SDF visibility pipeline")
-            return generate_highspeed_gpu_mesh(cad_file, output_dir, quality_params)
-        
         if 'GPU Delaunay' in mesh_strategy or 'gpu_delaunay' in mesh_strategy:
             vprint("[INIT] Loading GPU mesher...", flush=True)
             try:
@@ -1784,85 +1277,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 
             print("[DEBUG] GPU Delaunay strategy detected - using GPU Fill & Filter pipeline")
             return generate_gpu_delaunay_mesh(cad_file, output_dir, quality_params)
-
             
         # Polyhedral (Dual)
         if 'Polyhedral' in mesh_strategy or 'polyhedral' in mesh_strategy:
             print("[DEBUG] Polyhedral strategy detected - using Dual Graph pipeline")
             return generate_polyhedral_mesh(cad_file, output_dir, quality_params)
         
-        # =====================================================================
-        # Tetrahedral (HXT) - Full HXT pipeline with optimization
-        # This is the "production quality" HXT that includes:
-        # - HXT parallel algorithm (Algorithm3D=10)
-        # - Full optimization pass
-        # - Optional Netgen refinement
-        # =====================================================================
-        if 'Tetrahedral (HXT)' in mesh_strategy or 'tetrahedral_hxt' in mesh_strategy or mesh_strategy == 'Tetrahedral HXT':
-            print("[DEBUG] Tetrahedral (HXT) strategy detected - using FULL HXT pipeline with optimization")
-            if quality_params is None:
-                quality_params = {}
-            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
-            quality_params['_mesh_algorithm_3d'] = 10  # HXT (Parallel)
-            quality_params['_full_optimization'] = True  # Enable full optimization
-            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
-        
-        # Fast Tet Delaunay - single-pass HXT, skips optimization (speed priority)
+        # Fast Tet Delaunay - single-pass HXT, skips exhaustive search
         if 'Fast Tet' in mesh_strategy or 'Tet (Fast)' in mesh_strategy or 'fast_tet' in mesh_strategy:
-            print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT (NO optimization)")
-            if quality_params is None:
-                quality_params = {}
-            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
-            quality_params['_mesh_algorithm_3d'] = 10  # HXT (Parallel)
-            quality_params['_full_optimization'] = False  # Skip optimization for speed
+            print("[DEBUG] Fast Tet Delaunay strategy detected - using single-pass HXT pipeline")
             return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
         
-        # =====================================================================
-        # SINGLE-STRATEGY TET OPTIONS (No parallel search, no exhaustive)
-        # Each maps to the CORRECT Gmsh algorithm
-        # =====================================================================
-        
-        # Tet Delaunay: Standard Delaunay (Algorithm3D=1)
-        if 'Tet Delaunay' in mesh_strategy:
-            print("[DEBUG] Tet Delaunay (single-strategy) - Algorithm3D=1 (Delaunay)")
-            if quality_params is None:
-                quality_params = {}
-            quality_params['_mesh_algorithm'] = 5      # Delaunay 2D
-            quality_params['_mesh_algorithm_3d'] = 1   # Delaunay 3D
-            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
-        
-        # Tet Frontal: Frontal-Delaunay (Algorithm3D=4)
-        if 'Tet Frontal' in mesh_strategy:
-            print("[DEBUG] Tet Frontal (single-strategy) - Algorithm3D=4 (Frontal)")
-            if quality_params is None:
-                quality_params = {}
-            quality_params['_mesh_algorithm'] = 6      # Frontal-Delaunay 2D
-            quality_params['_mesh_algorithm_3d'] = 4   # Frontal 3D
-            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
-        
-        # Tet MeshAdapt: Classic MeshAdapt (Algorithm=1, Algorithm3D=1)
-        if 'Tet MeshAdapt' in mesh_strategy:
-            print("[DEBUG] Tet MeshAdapt (single-strategy) - Algorithm=1 (MeshAdapt)")
-            if quality_params is None:
-                quality_params = {}
-            quality_params['_mesh_algorithm'] = 1      # MeshAdapt 2D
-            quality_params['_mesh_algorithm_3d'] = 1   # Delaunay 3D
-            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
-
-        # =====================================================================
-        # DEFAULT: Use ExhaustiveMeshGenerator ONLY for 'Exhaustive' or empty strategy
-        # =====================================================================
-        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
-            # Unknown strategy - treat as Fast Tet (HXT) to avoid parallel overhead
-            print(f"[DEBUG] Unknown strategy '{mesh_strategy}' - defaulting to Fast Tet (HXT)")
-            return generate_fast_tet_delaunay_mesh(cad_file, output_dir, quality_params)
-        
-        # Only reach here for explicitly 'Exhaustive' strategy
-        if mesh_strategy not in ['Exhaustive', 'exhaustive', '']:
-            print(f"[WARNING] Unknown strategy '{mesh_strategy}' fell through to ExhaustiveMeshGenerator!")
-            print(f"[WARNING] This may indicate a strategy name mismatch between frontend and backend")
-        print("[DEBUG] Exhaustive strategy - using parallel ExhaustiveMeshGenerator")
-        
+        # Default: use exhaustive tet strategy
         # Initialize generator
         config = Config()
         
@@ -1960,7 +1386,18 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
         # --- DEFINITIVE SAFETY: Isolated Generation Wrapper ---
         # We run the entire ExhaustiveMeshGenerator in a SEPARATE process.
         # This catches main-process SIGSEGV/SIGABRT that would otherwise kill the CLI worker.
-        # NOTE: run_isolated_generation is defined at module level to allow pickling on Windows.
+        
+        def run_isolated_generation(cad_path, out_path, cfg, result_queue):
+            try:
+                from strategies.exhaustive_strategy import ExhaustiveMeshGenerator
+                gen = ExhaustiveMeshGenerator(cfg)
+                res = gen.generate_mesh(cad_path, out_path)
+                result_queue.put(res)
+            except Exception as e:
+                import traceback
+                print(f"[WATCHDOG] Generation subprocess fatal error: {e}")
+                print(traceback.format_exc())
+                result_queue.put(None)
 
         result_queue = multiprocessing.Queue()
         p = multiprocessing.Process(target=run_isolated_generation, args=(cad_file, output_file, config, result_queue))
@@ -1992,8 +1429,8 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
             
             # Since the main orchestrator might have crashed, we do a raw Bounding Box here
             try:
-                if not gmsh.isInitialized():
-                    gmsh.initialize()
+                import gmsh
+                gmsh.initialize()
                 gmsh.model.add("Emergency_BBox")
                 gmsh.model.occ.importShapes(cad_file)
                 gmsh.model.occ.synchronize()
@@ -2250,17 +1687,6 @@ def generate_mesh(cad_file: str, output_dir: str = None, quality_params: Dict = 
                 import traceback
                 print(f"[ERROR] Failed to extract per-element quality: {e}")
                 traceback.print_exc()
-
-            # --- CFD QUALITY ANALYSIS ---
-            try:
-                from core.cfd_quality import CFDQualityAnalyzer
-                print("[DEBUG] Running CFD quality analysis...", flush=True)
-                cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-                cfd_report = cfd_analyzer.analyze_mesh_file(absolute_output_file)
-                quality_metrics['cfd'] = cfd_report.to_dict()
-                print(f"[DEBUG] CFD Quality: {'Ready' if cfd_report.cfd_ready else 'Issues'} (Non-ortho max: {cfd_report.non_orthogonality_max:.1f} degrees)")
-            except Exception as cfd_err:
-                print(f"[DEBUG] Warning: CFD quality analysis failed: {cfd_err}")
 
             # Create final result dictionary
             final_result = {

@@ -24,6 +24,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
 
   // Helper to add log
   const addLog = (message) => {
+    console.log('[Batch]', message)
     onLog?.(message)
   }
 

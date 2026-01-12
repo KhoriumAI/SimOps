@@ -76,15 +76,24 @@ class ModalClient:
             self._preview_fn = modal.Function.from_name(app_name, fn_name)
         return self._preview_fn
 
-    def spawn_mesh_job(self, bucket: str, key: str, quality_params: Optional[Dict] = None):
+    def spawn_mesh_job(self, bucket: str, key: str, quality_params: Optional[Dict] = None, 
+                       webhook_url: Optional[str] = None, job_id: Optional[str] = None):
         """
         Spawn an asynchronous mesh generation job on Modal.
         Returns a Modal FunctionCall object which contains the object_id.
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            quality_params: Mesh quality parameters
+            webhook_url: Optional webhook URL to call on completion
+            job_id: Optional job ID for CloudWatch logging (will use call.object_id if not provided)
         """
         try:
             fn = self._get_mesh_fn()
             # .spawn() returns a modal.functions.FunctionCall (async)
-            call = fn.spawn(bucket, key, quality_params)
+            # Pass webhook_url and job_id to Modal function
+            call = fn.spawn(bucket, key, quality_params, webhook_url, job_id)
             print(f"[ModalClient] Spawned mesh job: {call.object_id}")
             return call
         except Exception as e:

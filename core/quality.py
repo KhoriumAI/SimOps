@@ -42,7 +42,7 @@ class MeshQualityAnalyzer:
         self.cache_enabled = True
         self._node_coords_cache = {}
 
-    def analyze_mesh(self, include_advanced_metrics: bool = False, include_cfd_metrics: bool = False) -> Optional[Dict]:
+    def analyze_mesh(self, include_advanced_metrics: bool = False) -> Optional[Dict]:
         """
         Comprehensive mesh quality analysis using GMSH's built-in quality functions
 
@@ -51,7 +51,6 @@ class MeshQualityAnalyzer:
 
         Args:
             include_advanced_metrics: Calculate additional metrics (Jacobian, etc.)
-            include_cfd_metrics: Calculate CFD-specific metrics (non-orthogonality, face pyramids, etc.)
 
         Returns:
             Dictionary containing all quality metrics, or None if analysis fails
@@ -59,7 +58,6 @@ class MeshQualityAnalyzer:
         try:
             # Get mesh statistics
             element_types, element_tags, node_tags = gmsh.model.mesh.getElements()
-
 
             if not element_tags:
                 return None
@@ -142,19 +140,7 @@ class MeshQualityAnalyzer:
                 quality_metrics['jacobian'] = self.calculate_jacobian_metrics()
                 quality_metrics['volume_ratio'] = self.calculate_volume_ratio_metrics()
 
-            # CFD-SPECIFIC: OpenFOAM checkMesh-equivalent metrics
-            if include_cfd_metrics:
-                try:
-                    from .cfd_quality import CFDQualityAnalyzer
-                    cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-                    cfd_report = cfd_analyzer.analyze_current_mesh()
-                    quality_metrics['cfd'] = cfd_report.to_dict()
-                except Exception as cfd_err:
-                    print(f"CFD metrics calculation failed: {cfd_err}")
-                    quality_metrics['cfd'] = None
-
             return quality_metrics
-
 
         except Exception as e:
             print(f"Quality analysis failed: {e}")

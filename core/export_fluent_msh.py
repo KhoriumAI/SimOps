@@ -229,7 +229,6 @@ def export_fluent_msh(
     boundary_zone_types: Optional[Dict[str, str]] = None,
     cell_zone_name: str = "fluid",
     user_zones: Optional[Dict[str, List[int]]] = None,
-    boundary_lookup: Optional[Dict[tuple, str]] = None,
     verbose: bool = True
 ) -> bool:
     """
@@ -240,10 +239,11 @@ def export_fluent_msh(
         points: (N, 3) array of node coordinates
         tets: (M, 4) array of tetrahedral connectivity (0-indexed)
         boundary_classifier: Function that takes face centroid (3,) and returns zone name string
+                            If None, uses default_boundary_classifier
         boundary_zone_types: Dict mapping zone name -> boundary type (e.g., "inlet" -> "velocity-inlet")
+                            If None, all boundaries default to "wall"
         cell_zone_name: Name for the cell zone (default: "fluid")
         user_zones: Dict mapping zone name -> list of face indices (0-indexed based on boundary extraction)
-        boundary_lookup: Dict mapping sorted face node tuple -> zone name (Exact matching)
         verbose: Print progress messages
     
     Returns:
@@ -271,11 +271,10 @@ def export_fluent_msh(
             # Boundary face
             owner_cell = cells[0]
             oriented_nodes = orient_face_outward(nodes, owner_cell, points, tets)
-            # Store key for lookup
             boundary_faces_raw.append((oriented_nodes, owner_cell, key))
     
     # --- 2. CLASSIFY BOUNDARY FACES ---
-    if boundary_classifier is None and boundary_lookup is None:
+    if boundary_classifier is None:
         boundary_classifier = default_boundary_classifier(points, tets)
     
     if boundary_zone_types is None:
@@ -297,18 +296,10 @@ def export_fluent_msh(
                 face_idx_to_zone[idx] = zn
 
     for i, (nodes, owner_cell, key) in enumerate(boundary_faces_raw):
-        zone_name = None
+        zone_name = face_idx_to_zone.get(i)
         
-        # 1. Exact lookup (Highest Priority)
-        if boundary_lookup:
-            zone_name = boundary_lookup.get(key)
-            
-        # 2. User zones (Index based)
         if zone_name is None:
-            zone_name = face_idx_to_zone.get(i)
-        
-        # 3. Classifier (Geometric)
-        if zone_name is None:
+            # Fallback to classifier if not in user zones
             if boundary_classifier:
                 face_pts = points[nodes]
                 centroid = np.mean(face_pts, axis=0)

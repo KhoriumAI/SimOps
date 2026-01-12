@@ -24,20 +24,8 @@ For CFD applications, consider adjusting:
 - Element sizing near walls
 """
 
-
 import sys
 import os
-
-# Set VTK environment variables in case VTK gets imported later (by PyVista, quality analyzers, etc.)
-# These must be set BEFORE any VTK modules are imported
-os.environ.setdefault('VTK_DEBUG', '0')
-os.environ.setdefault('VTK_SILENCE_GET_VOID_POINTER_WARNINGS', '1')
-os.environ.setdefault('PYVISTA_OFF_SCREEN', 'true')  # Prevent window popups
-
-# NOTE: We do NOT import VTK here. VTK is only needed for visualization (PyVista),
-# not for core meshing (Gmsh). Importing VTK triggers 15+ seconds of module scanning
-# as it lazily loads ~150 submodules. Quality analysis that needs VTK can import it on demand.
-
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import subprocess
@@ -85,12 +73,6 @@ def run_strategy_wrapper(args):
     # (multiprocessing pickles the function, losing the module imports)
     import sys
     import os
-    
-    # Set VTK environment variables in case VTK gets imported later
-    os.environ.setdefault('VTK_DEBUG', '0')
-    os.environ.setdefault('VTK_SILENCE_GET_VOID_POINTER_WARNINGS', '1')
-    os.environ.setdefault('PYVISTA_OFF_SCREEN', 'true')
-    
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
     
@@ -142,7 +124,7 @@ def run_strategy_wrapper(args):
                 return (strategy_name, False, {}, "Cancelled during execution")
             
             # If successful, save the mesh to a temp file to pass back
-            temp_output = os.path.join(generator.temp_dir, f"temp_mesh_{strategy_name}_{os.getpid()}.msh")
+            temp_output = f"temp_mesh_{strategy_name}_{os.getpid()}.msh"
             if success:
                 generator.save_mesh(temp_output)
                 return (strategy_name, True, metrics, temp_output)
@@ -281,14 +263,8 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         
         num_workers = max_workers
         
-        # OPTIMIZATION: If only one strategy is requested, skip the parallel pool overhead entirely
-        use_sequential = len(strategy_names) == 1
-        
-        if use_sequential:
-            self.log_message(f"Sequential Execution: Running single strategy '{strategy_names[0]}' directly")
-        else:
-            self.log_message(f"Starting optimization pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
-            self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
+        self.log_message(f"Starting optimization pool with {num_workers} workers (65% of {total_cores} cores, capped at 6)")
+        self.log_message(f"Estimated RAM usage: ~{num_workers * 500}MB during meshing")
         
         # --- EARLY CANARY CHECKS ---
         # Run canaries once BEFORE spawning workers to avoid redundant checks
@@ -350,16 +326,14 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         best_score = float('inf')
         best_strategy = None
         
-        # OPTIMIZATION: Sequential mode is used if only one strategy is requested
-        # to avoid the overhead/complexity of the parallel pool.
-        # We still use pool for multi-strategy searches to ensure process isolation.
-        use_sequential = len(strategy_names) == 1 
+        # OPTIMIZATION: Sequential mode is now DISCOURAGED even for single parts
+        # because C++ level crashes (SIGSEGV/SIGABRT) in Gmsh/OCC kill the main process.
+        # We enforce process isolation for ALL strategies to ensure fallback triggers.
+        use_sequential = False 
         
         if use_sequential:
-            # Sequential Run: Use the worker function directly but in a single process wrapper
-            # if isolation is needed, or just run it here if we trust Gmsh.
-            # For reliability, we'll use a 1-worker pool even for "sequential" to maintain isolation.
-            num_workers = 1
+            # (Dead code path kept for potential future local-only debugging toggle)
+            pass
         else:
             # PARALLEL MODE: Use multiprocessing Pool for multiple strategies
             # CRITICAL: Use Manager to create a Windows-safe picklable Event proxy
@@ -463,7 +437,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         # try the bounding box fallback ONE LAST TIME in the main process.
         if not best_mesh_path:
             self.log_message("\n[SAFETY] No successful strategy found. Attempting main-process last-ditch fallback...")
-            last_ditch_file = os.path.join(self.temp_dir, f"last_ditch_bbox_{os.getpid()}.msh")
+            last_ditch_file = f"last_ditch_bbox_{os.getpid()}.msh"
             if self.create_bounding_box_mesh(last_ditch_file):
                 best_mesh_path = last_ditch_file
                 best_score = 999.0
@@ -713,7 +687,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         Absolute last resort: Create a bounding box mesh.
         """
         self.log_message("\n[Strategy] Starting Bounding Box Fallback...")
-        temp_file = os.path.join(self.temp_dir, f"bbox_temp_{os.getpid()}.msh")
+        temp_file = f"bbox_temp_{os.getpid()}.msh"
         if self.create_bounding_box_mesh(temp_file):
             # CRITICAL: Merge the mesh back into the current process's Gmsh state
             # so that save_mesh() in the orchestrator/wrapper works.
@@ -876,7 +850,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             # Get all surface tags
             surf_tags = [tag for dim, tag in surfaces]
 
-            gmsh.model.mesh.field.setNumbers(field_tag, "SurfacesList", surf_tags)
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
             gmsh.model.mesh.field.setNumber(field_tag, "Size",
                                             self.geometry_info.get('diagonal', 1.0) / 200.0)
             gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.3)  # Growth rate
@@ -909,8 +883,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             field_tag = gmsh.model.mesh.field.add("Curvature")
             diagonal = self.geometry_info.get('diagonal', 1.0)
 
-            # Note: NNodesByEdge is deprecated in modern Gmsh, using global Mesh.MinimumCircleNodes instead
-            gmsh.option.setNumber("Mesh.MinimumCircleNodes", 40) 
+            gmsh.model.mesh.field.setNumber(field_tag, "NNodesByEdge", 100)  # High resolution
             gmsh.model.mesh.field.setNumber(field_tag, "SizeMin", diagonal / 500.0)
             gmsh.model.mesh.field.setNumber(field_tag, "SizeMax", diagonal / 20.0)
 
@@ -940,7 +913,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
             surf_tags = [tag for dim, tag in surfaces]
 
             field_tag = gmsh.model.mesh.field.add("BoundaryLayer")
-            gmsh.model.mesh.field.setNumbers(field_tag, "SurfacesList", surf_tags)
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList", surf_tags)
             gmsh.model.mesh.field.setNumber(field_tag, "Size",
                                             self.geometry_info.get('diagonal', 1.0) / 150.0)
             gmsh.model.mesh.field.setNumber(field_tag, "Ratio", 1.2)
@@ -1149,7 +1122,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
 
             # Create size field: fine near geometry, coarse inside
             field_tag = gmsh.model.mesh.field.add("Distance")
-            gmsh.model.mesh.field.setNumbers(field_tag, "SurfacesList",
+            gmsh.model.mesh.field.setNumbers(field_tag, "FacesList",
                                              [tag for dim, tag in gmsh.model.getEntities(dim=2)])
 
             threshold_field = gmsh.model.mesh.field.add("Threshold")
@@ -1548,7 +1521,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
         self.log_message("Analyzing final assembly quality...")
         # Reduce complexity for large assemblies to fix 15s+ slowness
         try:
-            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False, include_cfd_metrics=True)
+            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
             
             if metrics:
                 self.log_message(f"[SURGICAL] Final assembly metrics: {metrics['total_elements']} elements, {metrics['total_nodes']} nodes")
@@ -1573,7 +1546,7 @@ class ExhaustiveMeshGenerator(BaseMeshGenerator):
                             self.log_message(f"  > Applied orientation fix to {len(vol_tags)} volumes")
                             
                             # Re-analyze to check if it worked
-                            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False, include_cfd_metrics=True)
+                            metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=False)
                             if metrics.get('gmsh_sicn') and metrics['gmsh_sicn']['min'] >= 0:
                                 self.log_message("  > [SUCCESS] Auto-repair fixed inverted elements!")
                                 # Update stored metrics

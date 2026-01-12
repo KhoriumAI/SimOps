@@ -64,3 +64,11 @@ coacd>=1.0.0
 # Utilities
 # ===================
 requests>=2.31.0
+
+# ===================
+# Development & Testing
+# ===================
+alembic>=1.13.0          # Database migrations
+mypy>=1.7.0              # Type checking
+types-redis>=4.6.0       # Type stubs for redis
+types-requests>=2.31.0   # Type stubs for requests

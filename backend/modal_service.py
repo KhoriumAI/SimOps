@@ -165,17 +165,6 @@ def _run_tet_strategy(cad_file: str, output_dir: str, quality_params: dict,
         
         # Write output
         gmsh.write(output_file)
-        
-        # CFD Quality Analysis
-        try:
-            from core.cfd_quality import CFDQualityAnalyzer
-            print(f"[{name.upper()}] Running CFD quality analysis...")
-            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-            cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
-            quality_metrics['cfd'] = cfd_report.to_dict()
-        except Exception as cfd_err:
-            print(f"[{name.upper()}] Warning: CFD quality analysis failed: {cfd_err}")
-
         gmsh.finalize()
         
         total_time = time.time() - start_time
@@ -328,10 +317,17 @@ def mesh_single_volume_task(bucket: str, key: str, volume_tag: int, quality_para
     timeout=1200,
     secrets=[aws_secret],
 )
-def generate_mesh(bucket: str, key: str, quality_params: dict = None):
+def generate_mesh(bucket: str, key: str, quality_params: dict = None, webhook_url: str = None, job_id: str = None):
     """
     Generate mesh in Modal serverless GPU container.
     Handles both single-part and parallel assembly meshing.
+    
+    Args:
+        bucket: S3 bucket name
+        key: S3 object key
+        quality_params: Mesh quality parameters
+        webhook_url: Optional webhook URL to call on completion
+        job_id: Optional job ID for CloudWatch logging
     """
     import boto3
     import sys
@@ -339,7 +335,9 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
     import time
     import gmsh
     import json
+    import requests
     from pathlib import Path
+    from datetime import datetime
     
     # Add project root to path for imports
     sys.path.insert(0, "/root/MeshPackageLean")
@@ -350,7 +348,117 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         generate_hex_dominant_mesh
     )
     
-    print(f"[Modal] Starting job for s3://{bucket}/{key}")
+    # Get job_id from Modal context if not provided
+    if not job_id:
+        try:
+            # Modal provides function_call_id in the context
+            import modal
+            if hasattr(modal, 'function_call_id'):
+                job_id = modal.function_call_id()
+            elif hasattr(modal, 'current_function_call'):
+                call = modal.current_function_call()
+                if call:
+                    job_id = call.object_id
+        except Exception as e:
+            print(f"[Modal] Could not get job_id from context: {e}")
+    
+    # Setup CloudWatch Logs client
+    logs_client = None
+    log_group_name = None
+    log_stream_name = None
+    
+    if job_id:
+        try:
+            logs_client = boto3.client('logs', region_name=os.environ.get('AWS_REGION', 'us-west-1'))
+            log_group_name = f"/modal/jobs/{job_id}"
+            log_stream_name = f"job-{job_id}"
+            
+            # Create log group if it doesn't exist
+            try:
+                logs_client.create_log_group(logGroupName=log_group_name)
+            except logs_client.exceptions.ResourceAlreadyExistsException:
+                pass
+            
+            # Create log stream
+            try:
+                logs_client.create_log_stream(logGroupName=log_group_name, logStreamName=log_stream_name)
+            except logs_client.exceptions.ResourceAlreadyExistsException:
+                pass
+        except Exception as e:
+            print(f"[Modal] Warning: Could not setup CloudWatch logging: {e}")
+            logs_client = None
+    
+    def log_to_cloudwatch(message: str):
+        """Helper to log to CloudWatch"""
+        if logs_client and log_group_name and log_stream_name:
+            try:
+                timestamp = int(time.time() * 1000)
+                logs_client.put_log_events(
+                    logGroupName=log_group_name,
+                    logStreamName=log_stream_name,
+                    logEvents=[{
+                        'timestamp': timestamp,
+                        'message': message
+                    }]
+                )
+            except Exception as e:
+                # Don't fail the job if CloudWatch logging fails
+                print(f"[Modal] CloudWatch log error: {e}")
+    
+    def log(message: str):
+        """Unified logging that goes to both stdout and CloudWatch"""
+        print(message)
+        log_to_cloudwatch(message)
+    
+    def send_webhook(result_data: dict):
+        """Send webhook notification to backend when job completes"""
+        if not webhook_url:
+            log("[Modal] No webhook URL provided, skipping notification")
+            return
+        
+        try:
+            # Prepare payload matching webhook endpoint schema
+            status = 'completed' if result_data.get('success') else 'failed'
+            payload = {
+                'job_id': job_id or 'unknown',
+                'status': status,
+            }
+            
+            if result_data.get('success'):
+                payload['result'] = {
+                    'success': True,
+                    's3_output_path': result_data.get('s3_output_path'),
+                    'strategy': result_data.get('strategy'),
+                    'total_nodes': result_data.get('total_nodes', 0),
+                    'total_elements': result_data.get('total_elements', 0),
+                    'quality_metrics': result_data.get('quality_metrics', {}),
+                    'metrics': {
+                        'total_time_seconds': result_data.get('modal_duration_seconds', 0)
+                    }
+                }
+            else:
+                payload['error'] = result_data.get('message', 'Unknown error')
+            
+            # Send POST request to webhook endpoint
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                log(f"[Modal] Webhook notification sent successfully: {response.json()}")
+            else:
+                log(f"[Modal] Webhook notification failed: {response.status_code} - {response.text}")
+                
+        except requests.exceptions.RequestException as e:
+            # Don't fail the job if webhook fails - just log it
+            log(f"[Modal] Webhook error (non-fatal): {e}")
+        except Exception as e:
+            log(f"[Modal] Webhook error (non-fatal): {e}")
+    
+    log(f"[Modal] Starting job for s3://{bucket}/{key}")
     
     # Setup Paths
     local_input_dir = Path("/tmp/meshgen_input")
@@ -373,10 +481,12 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         volumes = gmsh.model.getEntities(3)
         vol_tags = [v[1] for v in volumes]
         num_volumes = len(vol_tags)
-        print(f"[Modal] Geometry analysis: {num_volumes} volumes detected.")
+        log(f"[Modal] Geometry analysis: {num_volumes} volumes detected.")
     except Exception as e:
         gmsh.finalize()
-        return {"success": False, "message": f"Geometry load failed: {e}"}
+        error_result = {"success": False, "message": f"Geometry load failed: {e}"}
+        send_webhook(error_result)
+        return error_result
     gmsh.finalize()
 
     start_time = time.time()
@@ -386,7 +496,7 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
     # 2. DECISION: Parallel Assembly vs Single Part
     # Use parallel if > 3 volumes
     if num_volumes > 3:
-        print(f"[Modal] *** ENGAGING PARALLEL ASSEMBLY MESHING ({num_volumes} parts) ***")
+        log(f"[Modal] *** ENGAGING PARALLEL ASSEMBLY MESHING ({num_volumes} parts) ***")
         
         # Fan-out tasks
         try:
@@ -397,7 +507,9 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
                 [quality_params] * num_volumes
             ))
         except Exception as e:
-             return {"success": False, "message": f"Parallel map failed: {e}"}
+             error_result = {"success": False, "message": f"Parallel map failed: {e}"}
+             send_webhook(error_result)
+             return error_result
         
         # Process Results
         successful_fragments = []
@@ -408,13 +520,15 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
             else:
                 failures.append(res)
         
-        print(f"[Modal] Parallel complete: {len(successful_fragments)}/{num_volumes} success, {len(failures)} failed.")
+        log(f"[Modal] Parallel complete: {len(successful_fragments)}/{num_volumes} success, {len(failures)} failed.")
         
         if len(successful_fragments) == 0:
-             return {"success": False, "message": "All volume meshing tasks failed."}
+             error_result = {"success": False, "message": "All volume meshing tasks failed."}
+             send_webhook(error_result)
+             return error_result
              
         # Merge Fragments
-        print("[Modal] Merging fragments...")
+        log("[Modal] Merging fragments...")
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.model.add("Assembly")
@@ -430,7 +544,7 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
                 gmsh.model.mesh.renumberNodes()
                 gmsh.model.mesh.renumberElements()
             except Exception as e:
-                print(f"[Modal] Failed to merge fragment {frag['tag']}: {e}")
+                log(f"[Modal] Failed to merge fragment {frag['tag']}: {e}")
         
         # Finalize Assembly Mesh (SaveAll=1 to keep everything)
         gmsh.option.setNumber("Mesh.SaveAll", 1)
@@ -444,16 +558,6 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         num_nodes = len(node_tags)
         num_elements = sum(len(tags) for tags in elem_tags)
         
-        # CFD Quality Analysis (Important for Assembly)
-        final_cfd_report = None
-        try:
-            from core.cfd_quality import CFDQualityAnalyzer
-            print("[Modal] Running CFD quality analysis on merged assembly...")
-            cfd_analyzer = CFDQualityAnalyzer(verbose=False)
-            final_cfd_report = cfd_analyzer.analyze_mesh_file(output_file)
-        except Exception as cfd_err:
-             print(f"[Modal] Warning: Assembly CFD analysis failed: {cfd_err}")
-
         gmsh.finalize()
         
         # Calculate timings
@@ -504,9 +608,6 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
             merged_quality['min_quality'] = global_min_q
             merged_quality['max_quality'] = global_max_q
             merged_quality['avg_quality'] = total_avg_q_weighted / total_elems
-        
-        if final_cfd_report:
-            merged_quality['cfd'] = final_cfd_report.to_dict()
 
         result_data = {
             'success': True,
@@ -523,35 +624,26 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         
     else:
         # 3. STANDARD SINGLE PART MESHING
-        print("[Modal] standard single-part meshing...")
+        log("[Modal] standard single-part meshing...")
         os.environ['OMP_NUM_THREADS'] = '4'
         mesh_strategy = quality_params.get('mesh_strategy', '') if quality_params else ''
         
         try:
-            # Normalize strategy string for robust matching
-            strat_norm = mesh_strategy.lower().strip()
-            
-            if 'hex dominant' in strat_norm or 'hex_dominant' in strat_norm:
+            if 'Hex Dominant' in mesh_strategy or 'hex_dominant' in mesh_strategy:
                 result_data = generate_hex_dominant_mesh(str(local_input_file), str(local_output_dir), quality_params)
-            elif 'tet delaunay' in strat_norm or 'tet_delaunay' in strat_norm:
+            elif 'Tet Delaunay' in mesh_strategy or 'tet_delaunay' in mesh_strategy:
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=1, name="tet_delaunay")
-            elif 'tet frontal' in strat_norm or 'tet_frontal' in strat_norm:
+            elif 'Tet Frontal' in mesh_strategy or 'tet_frontal' in mesh_strategy:
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=4, name="tet_frontal")
-            elif 'tet' in strat_norm and ('meshadapt' in strat_norm or 'mesh_adapt' in strat_norm):
-                result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=1, algorithm_3d=1, name="tet_meshadapt")
-            elif 'gpu' in strat_norm and 'delaunay' in strat_norm:
-                # GPU meshing not yet supported in Modal, fallback to HXT
-                print(f"[Modal] GPU Delaunay requested but not available in Modal, using HXT fallback")
-                result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)
-            elif 'hxt' in strat_norm or 'tetrahedral' in strat_norm:
-                # Handle 'Tetrahedral (HXT)' or just 'Tetrahedral'
+            elif 'Tet HXT' in mesh_strategy or 'tet_hxt' in mesh_strategy or 'HXT' in mesh_strategy:
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)
             else:
-                 print(f"[Modal] Strategy '{mesh_strategy}' not explicitly matched, using default fast_tet (HXT fallback)")
                  result_data = generate_fast_tet_delaunay_mesh(str(local_input_file), str(local_output_dir), quality_params)
         except Exception as e:
             import traceback
-            return {"success": False, "message": f"Meshing engine crashed: {e}", "traceback": traceback.format_exc()}
+            error_result = {"success": False, "message": f"Meshing engine crashed: {e}", "traceback": traceback.format_exc()}
+            send_webhook(error_result)
+            return error_result
 
     # 4. Upload Result
     duration = time.time() - start_time
@@ -561,7 +653,7 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
         output_file = result_data.get('output_file')
         if output_file and os.path.exists(output_file):
             output_key = key.replace("uploads/", "mesh/").replace(".step", ".msh").replace(".stp", ".msh")
-            print(f"[Modal] Uploading mesh to s3://{bucket}/{output_key}...")
+            log(f"[Modal] Uploading mesh to s3://{bucket}/{output_key}...")
             s3.upload_file(output_file, bucket, output_key)
             result_data['s3_output_path'] = f"s3://{bucket}/{output_key}"
             
@@ -582,7 +674,11 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
             if os.path.exists(qual_json):
                 q_key = output_key.replace(".msh", ".quality.json")
                 s3.upload_file(qual_json, bucket, q_key)
-
+    
+    # Send webhook notification before returning
+    send_webhook(result_data)
+    log(f"[Modal] Job completed: success={result_data.get('success')}")
+    
     return result_data
 
 

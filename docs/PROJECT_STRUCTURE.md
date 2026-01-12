@@ -25,54 +25,27 @@ MeshPackageLean/
 │   ├── desktop/
 │   │   └── gui_app/           # Main Desktop GUI
 │   │       └── main.py        # Entry point
-│   ├── web/                   # Web app entry point
+│   ├── web-frontend/          # React/Vite Web App
 │   └── cli/                   # Command-line tools
-│       └── mesh_worker_subprocess.py
 │
 ├── backend/                   # Flask API Server
-│   ├── api_server.py          # Main Flask app
-│   ├── models.py              # SQLAlchemy models
-│   ├── storage.py             # S3/Local storage abstraction
-│   ├── modal_service.py       # Modal.com compute backend
+│   ├── api_server.py
 │   └── ...
 │
-├── scripts/                   # Utility, Debug, and Infrastructure Scripts
-│   ├── debug/                 # One-off utility and debug scripts
-│   │   ├── check_db.py
-│   │   ├── inspect_last_project.py
-│   │   └── legacy/            # Archived redundant root files
-│   ├── infra/                 # Deployment and infrastructure tools
-│   │   ├── deploy.ps1
-│   │   ├── deploy_env_to_dev.sh
-│   │   └── ...
+├── scripts/                   # Utility and Maintenance Scripts
 │   ├── run_mesher.py
-│   ├── run_local_modal.py
+│   ├── voxel_repair_tool.py   # Consolidated tool
 │   └── ...
-│
-├── config/                    # Configuration Files
-│   └── aws/                   # AWS CloudFront, SSM, and WAF configs
-│       ├── dev_cf_config.json
-│       ├── staging_cf_config.json
-│       └── ...
-│
-├── metadata/                  # Deployment Metadata
-│   └── deployment/            # Historical deployment logs and outputs
-│       └── promotion_log_*.log
-│
-├── samples/                   # Sample Data for Testing
-│   └── Airfoil_surface.msh
 │
 ├── tools/                     # Testing and Analysis Tools
 │   ├── testing/
 │   └── visualization/
 │
 ├── docs/                      # Documentation
-│   ├── PROJECT_STRUCTURE.md   # This file
-│   ├── adr/                   # Architecture Decision Records
+│   ├── PROJECT_STRUCTURE.md
 │   └── ...
 │
-├── web-frontend/              # React/Vite Web Interface
-│
+├── generated_meshes/          # Output directory
 ├── cad_files/                 # Input CAD files
 │
 ├── README.md                  # Main README
@@ -146,4 +119,4 @@ python tools/testing/verify_mesh_quality.py
 
 ---
 
-**Last Updated**: January 8, 2026
+**Last Updated**: December 27, 2025

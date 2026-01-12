@@ -106,9 +106,7 @@ def migrate():
                 ('last_login', 'TIMESTAMP'),
                 ('name', 'VARCHAR(100)'),
                 ('role', 'VARCHAR(20) DEFAULT \'user\''),
-                ('is_active', 'BOOLEAN DEFAULT TRUE'),
-                ('reset_token', 'VARCHAR(100)'),
-                ('reset_token_expires', 'TIMESTAMP')
+                ('is_active', 'BOOLEAN DEFAULT TRUE')
             ]
              
              for col_name, col_type in user_migrations:

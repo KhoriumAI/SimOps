@@ -17,7 +17,6 @@ Features:
 
 import boto3
 import os
-from pathlib import Path
 
 import subprocess
 import sys
@@ -45,11 +44,7 @@ DOMAIN_NAME = "app.khorium.ai"
 HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"
 
 # Setup Logging
-project_root = Path(__file__).parent.parent
-logs_dir = project_root / "logs"
-logs_dir.mkdir(exist_ok=True)
-
-LOG_FILENAME = logs_dir / f"promotion_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+LOG_FILENAME = f"promotion_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',

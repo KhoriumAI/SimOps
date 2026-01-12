@@ -41,7 +41,6 @@ class MeshParameters:
     max_size_mm: Optional[float] = None
     min_size_mm: Optional[float] = None
     curvature_adaptive: bool = False
-    mesh_strategy: str = "Tetrahedral (Delaunay)"
 
 
 @dataclass

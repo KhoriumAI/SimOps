@@ -21,7 +21,6 @@ from abc import ABC, abstractmethod
 from .quality import MeshQualityAnalyzer
 from .config import Config, get_default_config
 from .ai_integration import AIRecommendationEngine, MeshRecommendation
-from khorium_skills.guardian.guardian import GeometryGuardian, GeometryStatus
 
 
 def _canary_worker(file_path, results_queue):
@@ -137,11 +136,6 @@ class BaseMeshGenerator(ABC):
         self.gmsh_initialized = False
         self.model_loaded = False
 
-        # Temp directory for intermediate files
-        project_root = Path(__file__).parent.parent
-        self.temp_dir = str(project_root / "temp_meshes")
-        os.makedirs(self.temp_dir, exist_ok=True)
-
     def log_message(self, message: str, level: str = "INFO"):
         """Print message with timestamp (millisecond precision)"""
         import datetime
@@ -168,56 +162,9 @@ class BaseMeshGenerator(ABC):
 
         result = MeshGenerationResult(success=False)
 
-        # =========================================================
-        # GUARDIAN INTERCEPTOR (Circuit Breaker)
-        # =========================================================
-        active_input_file = input_file
-        
-        # Check config (default to True if not specified)
-        enable_guardian = True
-        if hasattr(self.config, 'mesh_params') and hasattr(self.config.mesh_params, 'enable_guardian'):
-             enable_guardian = self.config.mesh_params.enable_guardian
-        
-        if enable_guardian:
-            try:
-                self.log_message("[Guardian] (SCAN) Analyzing geometry health...")
-                # Initialize with timeout logic
-                # User requested < 1min for most files, so we set a 45s soft limit for repairs
-                guardian_config = {'max_repair_time': 45}
-                guardian = GeometryGuardian(config=guardian_config)
-                
-                # Execute Diagnose -> Decide -> Repair
-                g_result = guardian.sanitize(input_file)
-                
-                if g_result.status == GeometryStatus.PRISTINE:
-                    self.log_message("[Guardian] (OK) Geometry is healthy.")
-                    
-                elif g_result.status == GeometryStatus.RESTORED:
-                    self.log_message(f"[Guardian] (FIX) Geometry repaired. Swapping input.")
-                    self.log_message(f"           Old: {input_file}")
-                    self.log_message(f"           New: {g_result.output_path}")
-                    # CRITICAL: Swap the file path used by the rest of the function
-                    active_input_file = g_result.output_path
-                    
-                elif g_result.status == GeometryStatus.TERMINAL:
-                    # CHANGED: Warn but continue instead of blocking.
-                    # User requested this because the resulting mesh often ends up watertight anyway.
-                    self.log_message("[Guardian] (WARNING) Geometry is flagged as TERMINAL (Unrepairable).")
-                    self.log_message(f"           See report: {g_result.report_path}")
-                    self.log_message("[Guardian] Continuing with original file (mesh may still succeed)...")
-                    # Allow meshing to proceed using the original file
-                    active_input_file = input_file
-
-            except Exception as e:
-                # FAIL OPEN: Never let the safety system crash the production line
-                self.log_message(f"[Guardian] (!) Internal Error: {e}", level="ERROR")
-                self.log_message("[Guardian] Failing Open - Proceeding with original file.")
-                active_input_file = input_file
-        # =========================================================
-
         try:
             # Validate input
-            if not self.validate_input_file(active_input_file):
+            if not self.validate_input_file(input_file):
                 result.message = "Invalid input file"
                 return result
 
@@ -229,12 +176,12 @@ class BaseMeshGenerator(ABC):
             self.initialize_gmsh()
 
             # Load CAD file
-            if not self.load_cad_file(active_input_file):
+            if not self.load_cad_file(input_file):
                 result.message = "Failed to load CAD file"
                 return result
 
             # Run strategy-specific meshing
-            if self.run_meshing_strategy(active_input_file, output_file):
+            if self.run_meshing_strategy(input_file, output_file):
                 result.success = True
                 result.output_file = output_file
                 result.iterations = self.current_iteration
@@ -1344,7 +1291,7 @@ class BaseMeshGenerator(ABC):
         """Analyze current mesh quality using Gmsh's built-in metrics"""
         self.log_message("Analyzing mesh quality...")
 
-        metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True, include_cfd_metrics=True)
+        metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True)
 
         if metrics:
             # Log basic statistics

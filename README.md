@@ -37,13 +37,6 @@ python main.py
 python scripts/run_mesher.py path/to/model.step
 ```
 
-### Local Cloud Development
-Run code on Modal.com directly from your local machine without pushing to git:
-```bash
-modal run scripts/run_local_modal.py --input-file path/to/model.step
-```
-See [docs/local_development.md](docs/local_development.md) for details.
-
 ## Requirements
 
 - Python 3.11+
@@ -59,24 +52,11 @@ See [docs/local_development.md](docs/local_development.md) for details.
 MeshPackageLean/
 ├── apps/
 │   ├── desktop/     # PyQt5 GUI application
-│   ├── web/         # Web app entry point
-│   └── cli/         # Command-line tools (mesh_worker_subprocess.py)
-├── backend/         # Flask API Server (api_server.py, models.py, storage.py)
-├── core/            # Core meshing engine (mesh_generator.py, quality.py)
+│   └── cli/         # Command-line tools
+├── core/            # Core meshing functionality
 ├── strategies/      # Meshing strategy implementations
-├── converters/      # Mesh format converters (Ansys Fluent, etc.)
-├── scripts/
-│   ├── debug/       # Utility and debug scripts (check_db.py, etc.)
-│   ├── infra/       # Deployment and infrastructure tools (deploy.ps1)
-│   └── ...          # Other run scripts (run_mesher.py, run_local_modal.py)
-├── config/
-│   └── aws/         # AWS CloudFront and service configurations
-├── metadata/
-│   └── deployment/  # Deployment logs and metadata
-├── samples/         # Sample CAD/mesh files for testing
-├── docs/            # Documentation and ADRs
-├── tools/           # Testing and visualization utilities
-└── web-frontend/    # React/Vite Web Interface
+├── converters/      # Mesh format converters
+└── tools/           # Utilities and testing
 ```
 
 ## Authors
@@ -161,7 +141,3 @@ To maintain a clean and searchable history, commit titles must follow this struc
 - `0e733b26 - fix/mesh_size_hardcoded`
 - `a1b2c3d4 - feat/add_hexa_mesher`
 - `e5f6g7h8 - debug/trace_vtk_errors`
-
-### 6. Update Changelog
-
-When adding a new feature, documenting a bug fix, or making an architectural change, you must update `CHANGELOG.md`. Ensure your entry is standardized with the current format (categorized by **Added**, **Changed**, **Fixed**, etc.) and properly dated.

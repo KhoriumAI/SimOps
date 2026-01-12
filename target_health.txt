@@ -1,0 +1,21 @@
+{
+    "TargetHealthDescriptions": [
+        {
+            "Target": {
+                "Id": "i-0bdb1e0eaa658cc7c",
+                "Port": 3000
+            },
+            "HealthCheckPort": "3000",
+            "TargetHealth": {
+                "State": "unhealthy",
+                "Reason": "Target.Timeout",
+                "Description": "Request timed out"
+            },
+            "AdministrativeOverride": {
+                "State": "no_override",
+                "Reason": "AdministrativeOverride.NoOverride",
+                "Description": "No override is currently active on target"
+            }
+        }
+    ]
+}
