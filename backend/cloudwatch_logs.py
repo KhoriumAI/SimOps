@@ -45,9 +45,9 @@ class CloudWatchLogTailer:
             self.client = boto3.client('logs', region_name=region)
         
         self.running = False
-        self.thread = None
+        self.thread: Optional[Thread] = None
         self.stop_event = Event()
-        self.last_token = None
+        self.last_token: Optional[str] = None
         self.callbacks: List[Callable[[str, datetime], None]] = []
     
     def add_callback(self, callback: Callable[[str, datetime], None]):

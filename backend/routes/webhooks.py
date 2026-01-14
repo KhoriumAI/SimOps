@@ -3,6 +3,7 @@ Webhook and WebSocket routes for Modal job completion and log streaming
 """
 from flask import Blueprint, request, jsonify, current_app
 from flask_socketio import emit, join_room, leave_room
+from typing import Optional, Dict, Any
 from datetime import datetime
 import json
 import os
@@ -20,9 +21,9 @@ from middleware.rate_limit import update_job_usage_status
 webhook_bp = Blueprint('webhooks', __name__)
 
 # Store active log tailers per job_id
-active_log_tailers = {}
+active_log_tailers: dict[str, CloudWatchLogTailer] = {}
 # Store SocketIO instance (will be set by api_server)
-socketio_instance = None
+socketio_instance: Optional[Any] = None
 
 
 def init_socketio(socketio):
@@ -151,16 +152,16 @@ def register_socketio_handlers(socketio):
     @socketio.on('connect')
     def handle_connect():
         """Handle WebSocket connection"""
-        print(f"[WS] Client connected: {request.sid}")
+        print(f"[WS] Client connected: {request.sid}")  # type: ignore[attr-defined]
     
     @socketio.on('disconnect')
     def handle_disconnect():
         """Handle WebSocket disconnection"""
-        print(f"[WS] Client disconnected: {request.sid}")
+        print(f"[WS] Client disconnected: {request.sid}")  # type: ignore[attr-defined]
         
         # Stop any log tailers for this client
         for job_id, tailer in list(active_log_tailers.items()):
-            if hasattr(tailer, '_client_sid') and tailer._client_sid == request.sid:
+            if hasattr(tailer, '_client_sid') and tailer._client_sid == request.sid:  # type: ignore[attr-defined]
                 tailer.stop()
                 del active_log_tailers[job_id]
     
@@ -183,7 +184,7 @@ def register_socketio_handlers(socketio):
                 emit('error', {'message': 'Missing job_id'})
                 return
             
-            print(f"[WS] Client {request.sid} subscribing to logs for job {job_id}")
+            print(f"[WS] Client {request.sid} subscribing to logs for job {job_id}")  # type: ignore[attr-defined]
             
             # Join project room for status updates
             if project_id:
@@ -195,9 +196,9 @@ def register_socketio_handlers(socketio):
             if is_local_job:
                 # Local jobs: logs are emitted directly from subprocess, just acknowledge subscription
                 print(f"[WS] Local job {job_id} - logs will stream directly from subprocess")
-                print(f"[WS] Client {request.sid} joined room 'project_{project_id}' for local job logs")
+                print(f"[WS] Client {request.sid} joined room 'project_{project_id}' for local job logs")  # type: ignore[attr-defined]
                 emit('subscribed', {'job_id': job_id, 'status': 'started', 'type': 'local'})
-                print(f"[WS] Sent 'subscribed' confirmation to client {request.sid}")
+                print(f"[WS] Sent 'subscribed' confirmation to client {request.sid}")  # type: ignore[attr-defined]
             else:
                 # Modal jobs: Create CloudWatch log tailer
                 if job_id not in active_log_tailers:
@@ -215,7 +216,7 @@ def register_socketio_handlers(socketio):
                     
                     try:
                         tailer = create_log_tailer_for_job(job_id, log_callback, region=region)
-                        tailer._client_sid = request.sid  # Track which client owns this tailer
+                        tailer._client_sid = request.sid  # type: ignore[attr-defined]
                         tailer.start()
                         active_log_tailers[job_id] = tailer
                         emit('subscribed', {'job_id': job_id, 'status': 'started', 'type': 'modal'})
@@ -251,7 +252,7 @@ def register_socketio_handlers(socketio):
                 del active_log_tailers[job_id]
                 
                 emit('unsubscribed', {'job_id': job_id})
-                print(f"[WS] Client {request.sid} unsubscribed from logs for job {job_id}")
+                print(f"[WS] Client {request.sid} unsubscribed from logs for job {job_id}")  # type: ignore[attr-defined]
             else:
                 emit('error', {'message': 'Not subscribed to this job'})
                 
@@ -275,7 +276,7 @@ def register_socketio_handlers(socketio):
             if project_id:
                 join_room(f'project_{project_id}')
                 emit('subscribed_project', {'project_id': project_id})
-                print(f"[WS] Client {request.sid} subscribed to project {project_id}")
+                print(f"[WS] Client {request.sid} subscribed to project {project_id}")  # type: ignore[attr-defined]
             else:
                 emit('error', {'message': 'Missing project_id'})
                 
@@ -299,7 +300,7 @@ def register_socketio_handlers(socketio):
             if batch_id:
                 join_room(f'batch_{batch_id}')
                 emit('joined_batch', {'batch_id': batch_id})
-                print(f"[WS] Client {request.sid} subscribed to batch {batch_id}")
+                print(f"[WS] Client {request.sid} subscribed to batch {batch_id}")  # type: ignore[attr-defined]
             else:
                 emit('error', {'message': 'Missing batch_id'})
                 
