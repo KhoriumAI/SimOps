@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Entry Points**: Standardized Desktop GUI entry point to `apps/desktop/gui_app/main.py`.
 
 ### Added
+- **Usage Tracking**: Implemented comprehensive job usage logging and daily quotas to prevent compute resource abuse.
+- **Integrity Guardrails**: Integrated `mypy` type-checking and Alembic schema synchronization checks into the PR pre-flight workflow.
+- **Admin Analytics**: Developed a dedicated admin dashboard for monitoring job statistics and user activity.
 - **Performance Optimization**: Implemented lazy-loading for VTK and PyVista across the core meshing engine and strategies, reducing worker startup time from 15+ seconds to under 1 second by avoiding unnecessary module scanning.
 - **Cloud Meshing (Modal)**: Initial deployment of cloud compute backend for off-device high-performance meshing.
 - **Quality Metrics**: Added support for Gamma, Skewness, Aspect Ratio, and Minimum Angle in the web visualizer, including visual heat maps and histograms.
