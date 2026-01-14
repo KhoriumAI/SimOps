@@ -560,6 +560,11 @@ class JobUsage(db.Model):
     batch_id = db.Column(db.String(36), db.ForeignKey('batches.id'), nullable=True)
     batch_job_id = db.Column(db.String(36), db.ForeignKey('batch_jobs.id'), nullable=True)
     
+    # Composite index for efficient daily quota queries
+    __table_args__ = (
+        db.Index('ix_job_usage_user_started', 'user_id', 'started_at'),
+    )
+    
     def to_dict(self):
         return {
             'id': self.id,
