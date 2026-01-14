@@ -138,6 +138,9 @@ class Config:
     MODAL_APP_NAME = os.environ.get('MODAL_APP_NAME', 'khorium-production')
     MODAL_MESH_FUNCTION = os.environ.get('MODAL_MESH_FUNCTION', 'generate_mesh')
     MODAL_PREVIEW_FUNCTION = os.environ.get('MODAL_PREVIEW_FUNCTION', 'generate_preview_mesh')
+    
+    # Job Usage & Rate Limiting
+    DEFAULT_JOB_QUOTA = int(os.environ.get('DEFAULT_JOB_QUOTA', 10))  # Default 50 jobs/day
 
 
 class DevelopmentConfig(Config):

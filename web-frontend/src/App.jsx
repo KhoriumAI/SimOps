@@ -6,6 +6,7 @@ import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
+import AdminPanel from './components/AdminPanel'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
 import { API_BASE } from './config'
 import { useProjectWebSocket } from './hooks/useProjectWebSocket'
@@ -91,6 +92,9 @@ function App() {
 
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
+
+  // Admin panel state
+  const [adminPanelOpen, setAdminPanelOpen] = useState(false)
 
   // Visualization toggles (shared with MeshViewer)
   const [showAxes, setShowAxes] = useState(true)
@@ -816,6 +820,17 @@ function App() {
 
         {/* Right side - user */}
         <div className="flex items-center gap-2 text-xs text-gray-600">
+          {/* Admin Panel Button - Only show for admin users */}
+          {user?.role === 'admin' && (
+            <button
+              onClick={() => setAdminPanelOpen(true)}
+              className="flex items-center gap-1.5 px-2 py-1 hover:bg-gray-100 rounded transition-colors text-gray-600 hover:text-blue-600"
+              title="Admin Panel"
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Admin</span>
+            </button>
+          )}
           <User className="w-3.5 h-3.5" />
           <span>{user?.name || user?.email?.split('@')[0]}</span>
           <button
@@ -829,6 +844,9 @@ function App() {
       </header>
 
       {/* Main Content */}
+      {adminPanelOpen ? (
+        <AdminPanel onClose={() => setAdminPanelOpen(false)} />
+      ) : (
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Responsive Sidebar */}
         <div className={`${mode === 'batch' ? 'w-80 xl:w-96 min-w-[280px]' : 'w-56 min-w-[200px]'} max-w-[40vw] border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300 flex-shrink-0`}>
@@ -1172,6 +1190,7 @@ function App() {
         {/* Feedback Button - Fixed position */}
         <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
       </div>
+      )}
     </div>
   )
 }

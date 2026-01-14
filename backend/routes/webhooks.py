@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import db, MeshResult, Project
 from webhook_utils import verify_webhook_signature, extract_signature_from_header
 from cloudwatch_logs import CloudWatchLogTailer, create_log_tailer_for_job
+from middleware.rate_limit import update_job_usage_status
 
 webhook_bp = Blueprint('webhooks', __name__)
 
@@ -82,6 +83,10 @@ def modal_webhook():
         mesh_result.modal_status = status
         mesh_result.modal_completed_at = datetime.utcnow()
         mesh_result.completed_at = datetime.utcnow()
+        
+        # Update JobUsage record
+        job_usage_status = 'completed' if status == 'completed' else 'failed'
+        update_job_usage_status(job_id, job_usage_status, 'modal', datetime.utcnow())
         
         if status == 'completed' and data.get('result'):
             result = data['result']
@@ -276,6 +281,30 @@ def register_socketio_handlers(socketio):
                 
         except Exception as e:
             print(f"[WS] Error subscribing to project: {e}")
+            emit('error', {'message': str(e)})
+
+    @socketio.on('join_batch')
+    def handle_join_batch(data):
+        """
+        Subscribe to status updates for a batch.
+        
+        Expected data:
+        {
+            "batch_id": "batch-uuid"
+        }
+        """
+        try:
+            batch_id = data.get('batch_id')
+            
+            if batch_id:
+                join_room(f'batch_{batch_id}')
+                emit('joined_batch', {'batch_id': batch_id})
+                print(f"[WS] Client {request.sid} subscribed to batch {batch_id}")
+            else:
+                emit('error', {'message': 'Missing batch_id'})
+                
+        except Exception as e:
+            print(f"[WS] Error subscribing to batch: {e}")
             emit('error', {'message': str(e)})
 
 

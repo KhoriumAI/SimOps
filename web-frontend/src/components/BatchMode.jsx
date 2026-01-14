@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import BatchUpload from './BatchUpload'
 import BatchDashboard from './BatchDashboard'
-import { useBatchPolling } from '../hooks/useWebSocket'
+import { useBatchWebSocket } from '../hooks/useWebSocket'
 import {
   Plus, List, Settings, ToggleLeft, ToggleRight,
   Loader2, RefreshCw, ChevronDown
@@ -70,11 +70,10 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
     fetchStrategies()
   }, [authFetch])
 
-  // Polling for current batch
-  const { batch, refresh, startPolling, stopPolling } = useBatchPolling(
+  // WebSocket for current batch
+  const { batch, refresh, startPolling, stopPolling } = useBatchWebSocket(
     currentBatchId,
-    authFetch,
-    2000
+    authFetch
   )
 
   // Load user's batches

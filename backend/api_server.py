@@ -24,14 +24,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import get_config
-from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord, Feedback
+from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord, Feedback, JobUsage
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
-from routes.batch import batch_bp
+from routes.batch import batch_bp, init_socketio as init_batch_socketio
 from routes.webhooks import webhook_bp, init_socketio, register_socketio_handlers
+from routes.admin import admin_bp
 from storage import get_storage, S3Storage, LocalStorage
 from modal_client import modal_client
 from slicing import generate_slice_mesh, parse_msh_for_slicing
+from middleware.rate_limit import check_job_quota, create_job_usage_record, update_job_usage_status
 import numpy as np
 try:
     import meshio
@@ -166,8 +168,9 @@ def create_app(config_class=None):
         async_mode=async_mode
     )
     
-    # Initialize SocketIO in webhook routes
+    # Initialize SocketIO in routes
     init_socketio(socketio)
+    init_batch_socketio(socketio)
     
     # Register WebSocket handlers
     register_socketio_handlers(socketio)
@@ -176,6 +179,7 @@ def create_app(config_class=None):
     app.register_blueprint(auth_bp)
     app.register_blueprint(batch_bp)
     app.register_blueprint(webhook_bp)
+    app.register_blueprint(admin_bp)
     
     # Ensure instance folder exists for SQLite database
     instance_dir = Path(__file__).parent / 'instance'
@@ -459,6 +463,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, resul
                                     project.last_accessed = datetime.utcnow()
                                     logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {mesh_result.processing_time:.1f}s!")
                                     
+                                    # Update JobUsage status for local jobs
+                                    if local_job_id:
+                                        update_job_usage_status(local_job_id, 'completed', 'local', datetime.utcnow())
+                                    
                                     # CRITICAL: Commit database BEFORE emitting WebSocket event
                                     # This ensures frontend can fetch mesh data immediately
                                     mesh_result.logs = logs
@@ -494,6 +502,10 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, resul
                                     project.error_message = error
                                     logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {error}")
                                     
+                                    # Update JobUsage status for failed local jobs
+                                    if local_job_id:
+                                        update_job_usage_status(local_job_id, 'failed', 'local', datetime.utcnow())
+                                    
                                     # Emit job_failed event for local jobs
                                     if local_job_id:
                                         try:
@@ -528,6 +540,9 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, resul
                 if process.returncode != 0:
                     project.status = 'error'
                     project.error_message = f"Process exited with code {process.returncode}"
+                    # Update JobUsage status for failed local jobs
+                    if local_job_id:
+                        update_job_usage_status(local_job_id, 'failed', 'local', datetime.utcnow())
                     # Emit job_failed event for local jobs
                     if local_job_id:
                         try:
@@ -551,6 +566,9 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, resul
             print(f"[MESH GEN ERROR] {e}")
             project.status = 'error'
             project.error_message = str(e)
+            # Update JobUsage status for failed local jobs
+            if local_job_id:
+                update_job_usage_status(local_job_id, 'failed', 'local', datetime.utcnow())
             db.session.commit()
             print(traceback.format_exc())
 
@@ -564,6 +582,21 @@ def register_routes(app):
         # Request logging (without sensitive auth data)
         if request.path.startswith('/api/') and os.environ.get('FLASK_DEBUG'):
             print(f"[API] {request.method} {request.path}")
+        
+        # Track user time online - update last_api_request_at for authenticated users
+        if request.path.startswith('/api/') and not request.path.startswith('/api/health'):
+            try:
+                from flask_jwt_extended import verify_jwt_in_request
+                verify_jwt_in_request(optional=True)
+                user_id = get_jwt_identity()
+                if user_id:
+                    user = User.query.get(int(user_id))
+                    if user:
+                        user.last_api_request_at = datetime.utcnow()
+                        db.session.commit()
+            except Exception:
+                # Not authenticated or JWT error - ignore
+                pass
 
     @app.route('/', methods=['GET'])
     def index():
@@ -815,6 +848,7 @@ def register_routes(app):
 
     @app.route('/api/projects/<project_id>/generate', methods=['POST'])
     @jwt_required()
+    @check_job_quota(job_type='single_mesh')
     def generate_mesh(project_id: str):
         current_user_id = int(get_jwt_identity())
         project = Project.query.get(project_id)
@@ -845,6 +879,7 @@ def register_routes(app):
         project.mesh_count = (project.mesh_count or 0) + 1
         
         modal_job_id = None
+        compute_backend = None
         
         # If using Modal, spawn job synchronously to get job_id immediately
         if app.config.get('USE_MODAL_COMPUTE', False):
@@ -873,6 +908,7 @@ def register_routes(app):
                 
                 # Get job_id immediately
                 modal_job_id = call.object_id
+                compute_backend = 'modal'
                 
                 # Update MeshResult with Modal info
                 mesh_result.modal_job_id = modal_job_id
@@ -900,7 +936,23 @@ def register_routes(app):
         # This allows projectStatus polling to work as fallback
         if local_job_id:
             mesh_result.modal_job_id = local_job_id
+            compute_backend = 'local'
             db.session.commit()  # Commit again to save the local job_id
+        
+        # Create JobUsage record BEFORE dispatching (track all attempts)
+        job_id_for_tracking = modal_job_id or local_job_id or str(result_id)
+        job_usage = create_job_usage_record(
+            user_id=current_user_id,
+            job_type='single_mesh',
+            job_id=job_id_for_tracking,
+            project_id=project_id,
+            compute_backend=compute_backend,
+            status='pending'
+        )
+        
+        # Update to processing if job was spawned
+        if modal_job_id or local_job_id:
+            update_job_usage_status(job_id_for_tracking, 'processing', compute_backend)
         
         # Start background thread for actual processing (Modal already started if applicable)
         thread = Thread(target=run_mesh_generation, args=(app, project_id, quality_params, result_id, local_job_id))
@@ -1471,6 +1523,7 @@ def register_routes(app):
 
     @app.route('/api/projects/<project_id>/preview', methods=['GET'])
     @jwt_required()
+    @check_job_quota(job_type='preview')
     def get_cad_preview(project_id: str):
         """Get triangulated preview of CAD file before meshing"""
         import tempfile
@@ -1486,6 +1539,16 @@ def register_routes(app):
         
         if not project.filepath:
             return jsonify({"error": "CAD file not found"}), 404
+            
+        # Create JobUsage record (track preview attempt)
+        job_usage = create_job_usage_record(
+            user_id=current_user_id,
+            job_type='preview',
+            job_id=f"preview-{project_id}-{int(time.time())}",
+            project_id=project_id,
+            compute_backend='local', # Default to local, will be updated if fast_mode/SSH used
+            status='processing'
+        )
         
         # Check for fast_mode query parameter
         fast_mode = request.args.get('fast_mode', 'false').lower() == 'true'
@@ -1546,6 +1609,8 @@ def register_routes(app):
                         print(f"[PREVIEW] ⚡ Backend call failed: {backend_error}, falling back to standard method")
                         result = parse_step_file_for_preview(filepath)
                     
+                    # Update tracking status on success
+                    update_job_usage_status(job_usage.job_id, 'completed')
                     return jsonify(result)
                 finally:
                     # Cleanup temp file
@@ -1566,6 +1631,8 @@ def register_routes(app):
                     # Ensure it has the geometry/volumes info 
                     # If it's an old version or corrupt, fallback
                     if "vertices" in preview_data:
+                        # Update tracking status on success (cached)
+                        update_job_usage_status(job_usage.job_id, 'completed')
                         return jsonify(preview_data)
                     print(f"[PREVIEW] Cached preview data incomplete, regenerating...")
                 except Exception as e:
@@ -1587,8 +1654,13 @@ def register_routes(app):
                     return jsonify({"error": "CAD file not found"}), 404
                 preview_data = parse_step_file_for_preview(filepath)
             
+            # Update tracking status on success
+            update_job_usage_status(job_usage.job_id, 'completed')
             return jsonify(preview_data)
         except Exception as e:
+            # Update tracking status on failure
+            if 'job_usage' in locals():
+                update_job_usage_status(job_usage.job_id, 'failed')
             return jsonify({"error": f"Failed to generate preview: {str(e)}"}), 500
     
     @app.route('/api/projects', methods=['GET'])
