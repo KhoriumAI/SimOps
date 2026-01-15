@@ -7,6 +7,7 @@ With JWT Authentication and SQLAlchemy Database
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
+from flask_socketio import SocketIO
 from pathlib import Path
 import json
 import sys
@@ -27,6 +28,7 @@ from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, D
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
+from routes.webhooks import webhook_bp, init_socketio, register_socketio_handlers
 from storage import get_storage, S3Storage, LocalStorage
 from modal_client import modal_client
 from slicing import generate_slice_mesh, parse_msh_for_slicing
@@ -162,6 +164,18 @@ def create_app(config_class=None):
     # Register blueprints
     app.register_blueprint(auth_bp)
     app.register_blueprint(batch_bp)
+    app.register_blueprint(webhook_bp)
+
+    # Initialize SocketIO
+    # We use threading mode for compatibility with standard Flask run
+    socketio_url = app.config.get('SOCKETIO_MESSAGE_QUEUE')
+    print(f"[SocketIO] initializing with message queue: {socketio_url}")
+    socketio = SocketIO(app, cors_allowed_origins="*", message_queue=socketio_url, async_mode='threading')
+    app.socketio = socketio
+    
+    # Initialize routes with socketio instance
+    init_socketio(socketio)
+    register_socketio_handlers(socketio)
     
     # Ensure instance folder exists for SQLite database
     instance_dir = Path(__file__).parent / 'instance'
@@ -2557,7 +2571,18 @@ if __name__ == '__main__':
     print(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
     print(f"Output folder: {app.config['OUTPUT_FOLDER']}")
     print(f"JWT_SECRET_KEY: {'[SET]' if app.config.get('JWT_SECRET_KEY') else '[NOT SET - USING DEFAULT]'}")
+    print(f"Docker mode: {os.environ.get('IS_DOCKER_CONTAINER', 'false')}")
+    print(f"WebSocket Message Queue: {app.config.get('SOCKETIO_MESSAGE_QUEUE', 'redis://localhost:6379/1')}")
     print("\nStarting server on http://localhost:5000")
+    print("WebSocket endpoint: ws://localhost:5000")
     print("=" * 70)
 
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    # Use SocketIO's run method if available, otherwise fall back to Flask's run
+    if hasattr(app, 'socketio') and app.socketio:
+        try:
+            app.socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+        except Exception as e:
+            print(f"[WARNING] SocketIO run failed: {e}, falling back to Flask run")
+            app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    else:
+        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
