@@ -157,6 +157,13 @@ function Test-PreCommit {
         & $pythonCmd scripts/check_env_vars.py
         if ($LASTEXITCODE -ne 0) { throw "env check failed" }
     }
+
+    # Check 5: Email Configuration Audit
+    Invoke-Check -Name "Email Configuration Audit" -Check {
+        & $pythonCmd scripts/verify_email.py
+        if ($LASTEXITCODE -ne 0) { throw "Email configuration verification failed" }
+    }
+    
     
     # Check 4: Git Commit Message Format (if last commit exists)
     Invoke-Check -Name "Git Commit Message Format" -Check {
@@ -225,6 +232,26 @@ function Test-PostDeployment {
         $response = Invoke-RestMethod -Uri "$Url/api/health" -Method Get -ErrorAction Stop
         if ($response.status -ne "healthy") {
             throw "Backend reported unhealthy status: $($response.status)"
+        }
+    }
+    
+    # Check 1b: Frontend SPA Routing
+    Invoke-Check -Name "Frontend SPA Routing" -Check {
+        $loginUrl = "$Url/login"
+        try {
+            $response = Invoke-WebRequest -Uri $loginUrl -Method Head -ErrorAction Stop
+            Write-Host "  [OK] $loginUrl returned $($response.StatusCode)" -ForegroundColor DarkGray
+        }
+        catch {
+             if ($_.Exception.Response.StatusCode.value__ -eq 404) {
+                 throw "SPA Routing Broken: $loginUrl returned 404 (should be 200 via index.html fallback)"
+             }
+             if ($_.Exception.Response.StatusCode.value__ -eq 401) {
+                 throw "SPA Routing/Auth: $loginUrl returned 401 (unexpected)"
+             }
+             # If it's another error, we might log it but not fail if backend is healthy? 
+             # Actually, simpler: if URL is provided, frontend should be routable.
+             throw "Probing $loginUrl failed: $_"
         }
     }
     

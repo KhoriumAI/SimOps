@@ -121,6 +121,9 @@ jobs:
 
             echo "[DEPLOY] Initializing database..."
             python backend/ensure_db.py || { echo "[ERROR] Database initialization failed"; exit 1; }
+            
+            echo "[DEPLOY] Verifying email configuration..."
+            python scripts/verify_email.py || { echo "[WARNING] Email configuration verification failed. Password resets may not work."; }
 
             # Make monitoring scripts executable
             chmod +x "$PROJECT_ROOT/scripts/monitor_disk_usage.py"
