@@ -168,8 +168,9 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0,
     shutil.copy(stl_path, stl_dest)
     
     # Get bounds for blockMesh
-    min_b, max_b = get_stl_bounds(stl_path)
-    min_b, max_b = np.array(min_b), np.array(max_b)
+    min_list, max_list = get_stl_bounds(stl_path)
+    min_b = np.array(min_list)
+    max_b = np.array(max_list)
     
     center = (min_b + max_b) / 2
     size = max_b - min_b
@@ -883,25 +884,17 @@ def run_snappy_local(
     
     mesh_storage_key = None
     if msh_file:
-        base_name = Path(input_key).stem
-        mesh_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.msh"
-        print(f"[Modal] Uploading result to s3://{bucket}/{mesh_storage_key}...")
-        s3.upload_file(str(msh_file), bucket, mesh_storage_key)
-    else:
-        print(f"[Modal] ERROR: No .msh file found!")
-        print(f"[Modal] All files in case_dir:")
-        for f in case_dir.rglob("*"):
-            if f.is_file():
-                print(f"  {f.relative_to(case_dir)}")
+        # For local run, we don't upload to S3, but we set the key to the local filename for reference
+        mesh_storage_key = f"local_output/{msh_file.name}"
+        print(f"[Modal] Local run: Mesh generated at {msh_file}")
+
     # Upload VTK if exists (useful for vis)
     vtk_files = list(case_dir.rglob("*.vtu")) + list(case_dir.rglob("*.vtk"))
     vtk_storage_key = None
     if vtk_files:
         vtk_file = vtk_files[0]
-        base_name = Path(input_key).stem
-        vtk_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.vtu"
-        print(f"[Modal] Uploading VTK to s3://{bucket}/{vtk_storage_key}...")
-        s3.upload_file(str(vtk_file), bucket, vtk_storage_key)
+        vtk_storage_key = f"local_output/{vtk_file.name}"
+        print(f"[Modal] Local run: VTK generated at {vtk_file}")
     
     return {
         "success": True,
