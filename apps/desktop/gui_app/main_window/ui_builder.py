@@ -282,7 +282,6 @@ class UIBuilder:
         self.window.mesh_strategy.addItems([
             "Tetrahedral (Delaunay)", 
             "Tetrahedral (GPU Delaunay)", 
-            "Tetrahedral (HighSpeed GPU)",
             "Hex Dominant (Subdivision)", 
             "Hex Dominant Testing", 
             "Polyhedral (Dual)"

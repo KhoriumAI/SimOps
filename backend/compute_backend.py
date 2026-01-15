@@ -35,6 +35,7 @@ _LOCAL_JOBS_LOCK = Lock()
 
 class JobState:
     def __init__(self, process=None, log_queue=None):
+        from threading import Event
         self.process = process
         self.log_queue = log_queue or queue.Queue()
         self.logs = []
@@ -42,171 +43,9 @@ class JobState:
         self.result = None
         self.error = None
         self.start_time = time.time()
-        self.files_to_cleanup = []
+        self.log_done = Event()
 
-class ComputeProvider(ABC):
-    """Abstract compute provider (Adapter Interface)"""
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Human-readable provider name"""
-        pass
-    
-    @property
-    @abstractmethod
-    def mode(self) -> str:
-        """'LOCAL' or 'CLOUD'"""
-        pass
-    
-    @abstractmethod
-    def is_available(self) -> bool:
-        """Check if this provider is operational"""
-        pass
-    
-    @abstractmethod
-    def submit_job(self, task_type: str, *args, **kwargs) -> str:
-        """
-        Submit a job for execution.
-        Args:
-            task_type: 'mesh' or 'preview'
-            **kwargs: Arguments specific to the task
-        Returns:
-            job_id (str): Unique identifier for the job
-        """
-        pass
-    
-    @abstractmethod
-    def get_status(self, job_id: str) -> Dict:
-        """
-        Get current status and new logs for a job.
-        Returns:
-            Dict: {
-                'status': 'pending'|'running'|'completed'|'failed',
-                'logs': [list of new log strings],
-                'error': str (optional)
-            }
-        """
-        pass
-    
-    @abstractmethod
-    def fetch_results(self, job_id: str) -> Dict:
-        """
-        Get final results for a completed job.
-        Returns:
-            Dict containing result data (paths, metrics, etc)
-        """
-        pass
-
-    @abstractmethod
-    def cancel_job(self, job_id: str):
-        """Cancel a running job"""
-        pass
-        
-    # Legacy/Convenience method for synchronous preview (compat)
-    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
-        """
-        Generate preview synchronously (helper wrapper).
-        """
-        pass
-
-
-class LocalProvider(ComputeProvider):
-    """
-    Local Compute Provider.
-    Executes mesh generation via subprocess and previews via direct GMSH calls.
-    """
-    
-    @property
-    def name(self) -> str:
-        return "Local Compute (Docker/Subprocess)"
-        
-    @property
-    def mode(self) -> str:
-        return "LOCAL"
-    
-    def is_available(self) -> bool:
-        # Local requires GMSH and generic python environment
-        try:
-            import gmsh
-            return True
-        except ImportError:
-            return False
-
-    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
-        """
-        Generate preview using local GMSH (In-process for speed).
-        This replaces the old LocalGMSHBackend.generate_preview.
-        """
-        try:
-            import gmsh
-        except ImportError:
-            return {"error": "GMSH not installed", "status": "error"}
-        
-        try:
-            gmsh.initialize()
-            gmsh.option.setNumber("General.Terminal", 0)  # Suppress output
-            gmsh.option.setNumber("General.Verbosity", 0)
-            
-            # Disable optimization for speed
-            gmsh.option.setNumber("Mesh.Optimize", 0)
-            gmsh.option.setNumber("Mesh.OptimizeNetgen", 0)
-            gmsh.option.setNumber("Mesh.Algorithm", 1)  # MeshAdapt
-            gmsh.option.setNumber("Mesh.MaxRetries", 1)
-            
-            # Robust loading settings
-            gmsh.option.setNumber("Geometry.OCCAutoFix", 0)
-            gmsh.option.setNumber("Geometry.Tolerance", 1e-2)
-            gmsh.option.setNumber("General.NumThreads", 1)  # Single thread for stability
-            
-            # Load CAD file
-            gmsh.open(cad_file_path)
-            gmsh.model.occ.synchronize()
-            
-            # Calculate mesh sizing based on bounding box
-            xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
-            diag = ((xmax-xmin)**2 + (ymax-ymin)**2 + (zmax-zmin)**2)**0.5
-            gmsh.option.setNumber("Mesh.MeshSizeMin", diag / 100.0)
-            gmsh.option.setNumber("Mesh.MeshSizeMax", diag / 20.0)
-            
-            # Generate surface mesh
-            gmsh.model.mesh.generate(2)
-            
-            # Extract mesh data
-            node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-            nodes = {int(tag): [node_coords[3*i], node_coords[3*i+1], node_coords[3*i+2]] 
-                     for i, tag in enumerate(node_tags)}
-            
-            vertices = []
-            elem_types, _, node_tags_list = gmsh.model.mesh.getElements(2)
-            
-            for etype, enodes in zip(elem_types, node_tags_list):
-                if etype == 2:  # 3-node triangle
-                    try:
-                        enodes_list = enodes.astype(int).tolist()
-                    except AttributeError:
-                        enodes_list = [int(n) for n in enodes]
-                    
-                    for i in range(0, len(enodes_list), 3):
-                        n1, n2, n3 = enodes_list[i], enodes_list[i+1], enodes_list[i+2]
-                        if n1 in nodes and n2 in nodes and n3 in nodes:
-                            vertices.extend(nodes[n1] + nodes[n2] + nodes[n3])
-            
-            return {
-                "vertices": vertices,
-                "numVertices": len(vertices) // 3,
-                "numTriangles": len(vertices) // 9,
-                "isPreview": True,
-                "status": "success"
-            }
-            
-        except Exception as e:
-            return {"error": str(e), "status": "error"}
-        finally:
-            try:
-                gmsh.finalize()
-            except:
-                pass
+# ... (ComputeProvider abstract class skipped) ...
 
     def submit_job(self, task_type: str, **kwargs) -> str:
         import uuid
@@ -218,7 +57,6 @@ class LocalProvider(ComputeProvider):
             quality_params = kwargs.get('quality_params', {})
             
             # Locate worker script
-            # Assuming we are in backend/compute_backend.py, worker is at ../apps/cli/mesh_worker_subprocess.py
             base_dir = Path(__file__).parent.parent
             worker_script = base_dir / "apps" / "cli" / "mesh_worker_subprocess.py"
             
@@ -247,7 +85,7 @@ class LocalProvider(ComputeProvider):
                 _LOCAL_JOBS[job_id] = job_state
                 
             # Start log reader thread
-            def log_reader(jid, proc, q):
+            def log_reader(jid, proc, q, done_event):
                 try:
                     for line in proc.stdout:
                         line = line.strip()
@@ -258,20 +96,14 @@ class LocalProvider(ComputeProvider):
                 finally:
                     # When stdout closes, process is done
                     proc.wait()
+                    done_event.set()
             
-            t = Thread(target=log_reader, args=(job_id, process, job_state.log_queue), daemon=True)
+            t = Thread(target=log_reader, args=(job_id, process, job_state.log_queue, job_state.log_done), daemon=True)
             t.start()
             
             return job_id
             
         elif task_type == 'preview':
-            # Local preview is synchronous in existing code, but strictly for the pattern 
-            # we could make it async. However, existing callers expect sync preview.
-            # We'll support async preview via thread wrapper if needed, but for now 
-            # we'll assume submit_job is for long running stuff mainly.
-            # But let's implement async preview effectively:
-            
-            # ... For now, keeping mesh focus for submit_job.
             raise NotImplementedError("Async preview submission not yet implemented for LocalProvider")
 
     def get_status(self, job_id: str) -> Dict:
@@ -281,16 +113,7 @@ class LocalProvider(ComputeProvider):
         if not job_state:
             return {'status': 'failed', 'error': 'Job not found'}
             
-        # Check process status
-        if job_state.process.poll() is not None:
-             if job_state.process.returncode == 0:
-                 job_state.status = 'completed'
-             else:
-                 job_state.status = 'failed'
-                 if not job_state.error:
-                     job_state.error = f"Process exited with code {job_state.process.returncode}"
-
-        # Collect new logs
+        # Collect new logs FIRST
         new_logs = []
         while not job_state.log_queue.empty():
             try:
@@ -307,7 +130,24 @@ class LocalProvider(ComputeProvider):
                         pass
             except queue.Empty:
                 break
-                
+
+        # Check process status
+        # Only mark completed if process is dead AND we have finished reading all logs
+        if job_state.process.poll() is not None:
+             # Process is dead
+             if job_state.log_done.is_set():
+                 # And logs are fully read
+                 if job_state.process.returncode == 0:
+                     job_state.status = 'completed'
+                 else:
+                     job_state.status = 'failed'
+                     if not job_state.error:
+                         job_state.error = f"Process exited with code {job_state.process.returncode}"
+             else:
+                 # Process dead but logs catching up - still "running" effectively (or flushing)
+                 # We keep it as 'running' so monitor loop doesn't exit early
+                 pass
+                 
         return {
             'status': job_state.status,
             'logs': new_logs,

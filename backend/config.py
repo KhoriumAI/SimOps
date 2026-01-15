@@ -101,7 +101,9 @@ class Config:
     CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
     
     # WebSocket (Flask-SocketIO)
-    SOCKETIO_MESSAGE_QUEUE = os.environ.get('SOCKETIO_MESSAGE_QUEUE', 'redis://localhost:6379/1')
+    # For single-server development, set to None to avoid Redis dependency
+    # Redis is only needed for multi-server deployments
+    SOCKETIO_MESSAGE_QUEUE = os.environ.get('SOCKETIO_MESSAGE_QUEUE', None)
     
     # AWS S3 Configuration (only used when USE_S3=true)
     USE_S3 = False  # Default: use local storage
@@ -113,10 +115,6 @@ class Config:
     S3_UPLOADS_FOLDER = 'uploads'
     S3_MESH_FOLDER = 'mesh'
     
-    # Compute Mode (Refactored)
-    # Options: 'LOCAL', 'CLOUD'
-    COMPUTE_MODE = os.environ.get('COMPUTE_MODE', 'LOCAL')
-
     # Compute Backend Configuration
     # Options: 'auto', 'local', 'ssh_tunnel', 'remote_http'
     # - 'auto': Try SSH tunnel first, fallback to local GMSH
@@ -140,6 +138,9 @@ class Config:
     MODAL_APP_NAME = os.environ.get('MODAL_APP_NAME', 'khorium-production')
     MODAL_MESH_FUNCTION = os.environ.get('MODAL_MESH_FUNCTION', 'generate_mesh')
     MODAL_PREVIEW_FUNCTION = os.environ.get('MODAL_PREVIEW_FUNCTION', 'generate_preview_mesh')
+    
+    # Job Usage & Rate Limiting
+    DEFAULT_JOB_QUOTA = int(os.environ.get('DEFAULT_JOB_QUOTA', 10))  # Default 50 jobs/day
 
 
 class DevelopmentConfig(Config):

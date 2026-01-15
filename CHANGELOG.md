@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Guardian Behavior**: Modified Geometry Guardian to issue a warning instead of stopping the process when encountering unrepairable (TERMINAL) geometry. This allows Gmsh to attempt meshing on problematic CAD files which often results in successful watertight meshes despite initial health checks.
 - **Topology Inspection**: Refactored `TopologyInspector` to use `trimesh` as the primary engine for manifoldness checks, significantly reducing overhead compared to the previous VTK-heavy approach.
 - **Ansys Export Compatibility**: Fixed boundary layer naming conventions during export to ensure seamless import into Ansys Fluent and Mechanical.
+- **GPU Meshing**: Temporarily disabled GPU-based meshing strategies (HighSpeed GPU) from the GUI selection to prevent failed runs while the environment is being stabilized.
 - **Tech Debt Cleanup**: Removed ~4GB of temporary mesh files and large binary artifacts (`.stl`, `.msh` > 100MB).
 - **Consolidation**: Unified `voxel_repair_tool` (v2-v7) into a single `voxel_repair_tool.py`.
 - **Restructuring**: Moved root-level debugging and verification scripts to `scripts/` and `tools/`.
@@ -17,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Entry Points**: Standardized Desktop GUI entry point to `apps/desktop/gui_app/main.py`.
 
 ### Added
+- **Usage Tracking**: Implemented comprehensive job usage logging and daily quotas to prevent compute resource abuse.
+- **Integrity Guardrails**: Integrated `mypy` type-checking and Alembic schema synchronization checks into the PR pre-flight workflow.
+- **Admin Analytics**: Developed a dedicated admin dashboard for monitoring job statistics and user activity.
 - **Performance Optimization**: Implemented lazy-loading for VTK and PyVista across the core meshing engine and strategies, reducing worker startup time from 15+ seconds to under 1 second by avoiding unnecessary module scanning.
 - **Cloud Meshing (Modal)**: Initial deployment of cloud compute backend for off-device high-performance meshing.
 - **Quality Metrics**: Added support for Gamma, Skewness, Aspect Ratio, and Minimum Angle in the web visualizer, including visual heat maps and histograms.

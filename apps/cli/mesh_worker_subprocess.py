@@ -2353,4 +2353,4 @@ if __name__ == "__main__":
             del sanitized_result[key]
             
     # Print the clean, summary JSON
-    print(json.dumps(sanitized_result))
+    print(json.dumps(sanitized_result), flush=True)

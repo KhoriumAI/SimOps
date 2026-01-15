@@ -28,15 +28,60 @@ from models import (
     MESH_PRESETS, create_batch_jobs_for_file
 )
 from storage import get_storage
+from middleware.rate_limit import check_batch_quota
 
 batch_bp = Blueprint('batch', __name__, url_prefix='/api/batch')
 
 # UUID validation regex
 UUID_REGEX = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
+# Store SocketIO instance
+socketio_instance = None
+
+def init_socketio(socketio):
+    """Initialize SocketIO instance for use in routes"""
+    global socketio_instance
+    socketio_instance = socketio
+
 def validate_uuid(uuid_string):
     """Validate UUID format to prevent injection attacks"""
     return bool(UUID_REGEX.match(uuid_string))
+
+def emit_batch_progress(batch_id, job_id, progress, status, message=None):
+    """
+    Emit progress update via WebSocket for batch jobs
+    """
+    if socketio_instance:
+        try:
+            socketio_instance.emit('job_progress', {
+                'batch_id': batch_id,
+                'job_id': job_id,
+                'progress': progress,
+                'status': status,
+                'message': message,
+                'timestamp': datetime.utcnow().isoformat()
+            }, room=f'batch_{batch_id}')
+        except Exception as e:
+            print(f"[BATCH WS] Error emitting progress: {e}")
+    else:
+        print(f"[BATCH] {status}: {message or ''} ({progress}%)")
+
+def emit_batch_status(batch_id, status, totals=None):
+    """
+    Emit batch-level status update
+    """
+    if socketio_instance:
+        try:
+            payload = {
+                'batch_id': batch_id,
+                'status': status,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            if totals:
+                payload.update(totals)
+            socketio_instance.emit('batch_status', payload, room=f'batch_{batch_id}')
+        except Exception as e:
+            print(f"[BATCH WS] Error emitting batch status: {e}")
 
 
 @batch_bp.route('/create', methods=['POST'])
@@ -358,6 +403,18 @@ def start_batch(batch_id):
     if batch.total_jobs == 0:
         return jsonify({"error": "No jobs in batch"}), 400
     
+    # Check quota before starting batch
+    allowed, current_count, quota, remaining = check_batch_quota(current_user_id, batch.total_jobs)
+    if not allowed:
+        return jsonify({
+            "error": "Daily job quota exceeded",
+            "quota": quota,
+            "used": current_count,
+            "batch_jobs": batch.total_jobs,
+            "remaining": remaining,
+            "message": f"Batch would exceed daily limit. You have {remaining} jobs remaining today, but batch contains {batch.total_jobs} jobs."
+        }), 429
+    
     # Update batch status
     batch.status = 'processing'
     batch.started_at = datetime.utcnow()
@@ -387,6 +444,7 @@ def start_batch(batch_id):
                 with app.app_context():
                     from models import Batch, BatchJob
                     from storage import get_storage
+                    from middleware.rate_limit import create_job_usage_record, update_job_usage_status
                     import subprocess
                     
                     batch = Batch.query.get(bid)
@@ -417,6 +475,19 @@ def start_batch(batch_id):
                             job.status = 'processing'
                             job.started_at = datetime.utcnow()
                             db.session.commit()
+                            
+                            # Create JobUsage record
+                            job_usage = create_job_usage_record(
+                                user_id=batch.user_id,
+                                job_type='batch_job',
+                                job_id=job.id, # Using model ID as tracking ID for local
+                                batch_id=bid,
+                                batch_job_id=job.id,
+                                compute_backend='local',
+                                status='processing'
+                            )
+                            
+                            emit_batch_progress(bid, job.id, 0, 'processing', f'Starting job {job_idx + 1}/{total_jobs}')
                             
                             # Get the source file
                             batch_file = job.source_file
@@ -563,6 +634,7 @@ def start_batch(batch_id):
                                     if time.time() - last_log_time > 10:
                                         print(f"[BATCH] ... waiting for output ({int(elapsed)}s elapsed)", flush=True)
                                         last_log_time = time.time()
+                                        emit_batch_progress(bid, job.id, min(95, 10 + int(elapsed/10)), 'processing', 'Generating mesh...')
                             
                             # Get return code
                             return_code = process.poll()
@@ -643,6 +715,11 @@ def start_batch(batch_id):
                                     job.processing_time = (job.completed_at - job.started_at).total_seconds()
                                 print(f"[BATCH] ✓ Job completed: {job.output_path}", flush=True)
                                 
+                                # Update tracking status
+                                update_job_usage_status(job.id, 'completed', 'local')
+                                
+                                emit_batch_progress(bid, job.id, 100, 'completed', f'Job {job_idx + 1} completed successfully')
+                                
                                 # Update batch counts
                                 batch.completed_jobs = BatchJob.query.filter_by(
                                     batch_id=bid, status='completed'
@@ -672,6 +749,9 @@ def start_batch(batch_id):
                             import traceback as tb
                             job.status = 'failed'
                             job.error_message = str(e)[:500]
+                            # Update tracking status on exception
+                            update_job_usage_status(job.id, 'failed', 'local')
+                            
                             print(f"[BATCH] Job exception: {e}", flush=True)
                             tb.print_exc()
                             batch.failed_jobs = BatchJob.query.filter_by(
@@ -704,6 +784,12 @@ def start_batch(batch_id):
                     
                     db.session.commit()
                     print(f"[BATCH] Batch {bid[:8]} completed. Status: {batch.status}", flush=True)
+                    
+                    emit_batch_status(bid, batch.status, {
+                        'completed_jobs': batch.completed_jobs,
+                        'failed_jobs': batch.failed_jobs,
+                        'total_jobs': batch.total_jobs
+                    })
             except Exception as e:
                 print(f"[BATCH] CRITICAL ERROR in thread: {e}", flush=True)
                 traceback.print_exc()

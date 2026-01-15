@@ -7,6 +7,7 @@ With JWT Authentication and SQLAlchemy Database
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
+from flask_socketio import SocketIO
 from pathlib import Path
 import json
 import sys
@@ -27,6 +28,7 @@ from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, D
 from werkzeug.utils import secure_filename
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
+from routes.webhooks import webhook_bp, init_socketio, register_socketio_handlers
 from storage import get_storage, S3Storage, LocalStorage
 from modal_client import modal_client
 from slicing import generate_slice_mesh, parse_msh_for_slicing
@@ -162,6 +164,18 @@ def create_app(config_class=None):
     # Register blueprints
     app.register_blueprint(auth_bp)
     app.register_blueprint(batch_bp)
+    app.register_blueprint(webhook_bp)
+
+    # Initialize SocketIO
+    # We use threading mode for compatibility with standard Flask run
+    socketio_url = app.config.get('SOCKETIO_MESSAGE_QUEUE')
+    print(f"[SocketIO] initializing with message queue: {socketio_url}")
+    socketio = SocketIO(app, cors_allowed_origins="*", message_queue=socketio_url, async_mode='threading')
+    app.socketio = socketio
+    
+    # Initialize routes with socketio instance
+    init_socketio(socketio)
+    register_socketio_handlers(socketio)
     
     # Ensure instance folder exists for SQLite database
     instance_dir = Path(__file__).parent / 'instance'
@@ -185,13 +199,12 @@ generation_lock = Lock()
 running_processes = {}
 
 
-def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_modal_override: bool = None):
-    """Run mesh generation in background thread using ComputeProvider"""
-    import time
+def submit_mesh_job_sync(app, project_id: str, quality_params: dict = None, use_modal_override: bool = None):
+    """
+    Synchronously submit mesh job and return job_id.
+    Does NOT block for completion. Returns (job_id, mode, result_id).
+    """
     import tempfile
-    start_time = time.time()
-    
-    # Import factory
     from compute_backend import get_compute_provider
     
     with app.app_context():
@@ -199,93 +212,131 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
         user = User.query.get(project.user_id) if project else None
 
         if not project:
-            print(f"[MESH GEN] Project {project_id} not found")
+            raise ValueError(f"Project {project_id} not found")
+
+        # Update Project Status
+        project.status = 'processing'
+        project.mesh_count = (project.mesh_count or 0) + 1
+        db.session.commit()
+        
+        print(f"[MESH GEN] Started for project {project_id}")
+        
+        # Determine Mode
+        mode = None
+        if use_modal_override is True:
+            mode = 'CLOUD'
+        elif use_modal_override is False:
+            mode = 'LOCAL'
+        else:
+            # First check for explicit COMPUTE_MODE
+            mode = app.config.get('COMPUTE_MODE')
+            if not mode:
+                # Fallback to USE_MODAL_COMPUTE flag
+                if app.config.get('USE_MODAL_COMPUTE', False):
+                    mode = 'CLOUD'
+                else:
+                    mode = 'LOCAL'
+            
+        # Get Provider
+        provider = get_compute_provider(mode)
+        print(f"[MESH GEN] Using Provider: {provider.name} (Mode: {mode})")
+        
+        # Handle File Access / Input Path
+        storage = get_storage()
+        input_path = project.filepath
+        output_folder = Path(app.config['OUTPUT_FOLDER'])
+        output_folder.mkdir(parents=True, exist_ok=True)
+        
+        if mode == 'CLOUD':
+            if not project.filepath.startswith('s3://'):
+                raise ValueError("Cloud compute requires S3 storage. Please upload to S3 first.")
+            
+            # Diagnostic Check for Modal
+            from modal_client import modal_client
+            diag = modal_client.diagnose()
+            if not diag['ready']:
+                 issues = "; ".join(diag['issues'])
+                 print(f"[MESH GEN ERROR] Modal Misconfiguration: {issues}")
+                 raise RuntimeError(f"Cloud Compute Unavailable: {issues}")
+
+        else:
+            # Local Mode: Need file on disk
+            if input_path.startswith('s3://'):
+                local_input_dir = Path(tempfile.mkdtemp(prefix='meshgen_input_'))
+                local_input_file = local_input_dir / Path(project.filename).name
+                if not storage.file_exists(project.filepath):
+                    raise Exception(f"CAD file not found on S3: {project.filepath}")
+                
+                print(f"[MESH GEN] Downloading from S3: {project.filepath}")
+                storage.download_to_local(project.filepath, str(local_input_file))
+                input_path = str(local_input_file)
+            else:
+                if not Path(input_path).exists():
+                     print(f"[MESH GEN ERROR] Local file missing: {input_path}")
+
+        # Submit Job (Synchronous start)
+        # For Modal, this spawns the function and returns ID quickly
+        # For Local, this starts subprocess and returns ID quickly
+        job_id = provider.submit_job(
+            task_type='mesh',
+            input_path=input_path,
+            output_dir=str(output_folder),
+            quality_params=quality_params,
+            project_id=project_id
+        )
+        
+        # Create DB Record
+        internal_job_id = generate_job_id('MSH')
+        logs = []
+        logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Job Started: {internal_job_id} on {provider.name}")
+        
+        mesh_result = MeshResult(
+            project_id=project_id,
+            job_id=internal_job_id,
+            strategy='processing',
+            logs=logs,
+            params=quality_params,
+            modal_job_id=job_id, 
+            modal_status='pending'
+        )
+        db.session.add(mesh_result)
+        db.session.commit()
+        result_id = mesh_result.id
+        
+            
+        # Track cancellation handle
+        with generation_lock:
+            running_processes[project_id] = {'provider': provider, 'job_id': job_id}
+            
+        return job_id, mode, result_id, internal_job_id
+
+
+def monitor_mesh_job(app, project_id, job_id, mode, result_id):
+    """
+    Monitor running job in background thread.
+    """
+    import time
+    from compute_backend import get_compute_provider
+    
+    # Re-instantiate provider in thread (stateless)
+    provider = get_compute_provider(mode)
+    start_time = time.time()
+    
+    with app.app_context():
+        # Re-fetch objects
+        mesh_result = db.session.get(MeshResult, result_id)
+        if not mesh_result:
+            print(f"[MONITOR] Result {result_id} not found, aborting")
             return
+            
+        logs = list(mesh_result.logs) if mesh_result.logs else []
+        project = Project.query.get(project_id)
+        # Note: 'user' access needs re-query if needed, but we used email stored in project/storage call
+        user = User.query.get(project.user_id) if project else None
 
         try:
-            project.status = 'processing'
-            project.mesh_count = (project.mesh_count or 0) + 1
-            db.session.commit()
-            print(f"[MESH GEN] Started for project {project_id}")
-            print(f"[MESH GEN] Project User: {user.email if user else 'N/A'}")
-            
-            output_folder = Path(app.config['OUTPUT_FOLDER'])
-            output_folder.mkdir(parents=True, exist_ok=True)
-            
-            # Determine configured mode
-            # If override is present, we temporarily force that mode
-            mode = None
-            if use_modal_override is True:
-                mode = 'CLOUD'
-            elif use_modal_override is False:
-                mode = 'LOCAL'
-            else:
-                # Default to config/env
-                mode = app.config.get('COMPUTE_MODE', 'LOCAL')
-            
-            # Get Provider
-            provider = get_compute_provider(mode)
-            print(f"[MESH GEN] Using Provider: {provider.name} (Mode: {mode})")
-            
-            # Handle File Access (S3 vs Local)
-            storage = get_storage()
-            use_s3 = app.config.get('USE_S3', False)
-            input_path = project.filepath
-            
-            # 1. Prepare Input for Provider
-            if mode == 'CLOUD':
-                if not input_path.startswith('s3://'):
-                    # Cloud provider needs S3
-                    raise ValueError("Cloud compute requires S3 storage. Please upload to S3 first.")
-            else:
-                # Local Mode
-                if input_path.startswith('s3://'):
-                    # Download to temp file for local processing
-                    local_input_dir = Path(tempfile.mkdtemp(prefix='meshgen_input_'))
-                    local_input_file = local_input_dir / Path(project.filename).name
-                    if not storage.file_exists(project.filepath):
-                        raise Exception(f"CAD file not found on S3: {project.filepath}")
-                    
-                    print(f"[MESH GEN] Downloading from S3: {project.filepath}")
-                    storage.download_to_local(project.filepath, str(local_input_file))
-                    input_path = str(local_input_file)
-                else:
-                    if not Path(input_path).exists():
-                         print(f"[MESH GEN ERROR] Local file missing: {input_path}")
-            
-            # 2. Submit Job
-            job_id = provider.submit_job(
-                task_type='mesh',
-                input_path=input_path,
-                output_dir=str(output_folder),
-                quality_params=quality_params,
-                project_id=project_id
-            )
-            
-            # Track cancellation handle
-            with generation_lock:
-                running_processes[project_id] = {'provider': provider, 'job_id': job_id}
-
-            internal_job_id = generate_job_id('MSH')
-            
-            logs = []
-            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Job Started: {internal_job_id} on {provider.name}")
-            
-            mesh_result = MeshResult(
-                project_id=project_id,
-                job_id=internal_job_id,
-                strategy='processing',
-                logs=logs,
-                params=quality_params,
-                modal_job_id=job_id, 
-                modal_status='pending'
-            )
-            db.session.add(mesh_result)
-            db.session.commit()
-            result_id = mesh_result.id
-            
-            # 3. Monitor Loop
-            last_log_idx = 0
+            # Monitor Loop
+            last_log_idx = len(logs)
             while True:
                 status_data = provider.get_status(job_id)
                 status = status_data.get('status')
@@ -298,10 +349,8 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
                 
                  # Update DB if logs changed
                 if len(logs) > last_log_idx:
-                    mesh_result = db.session.get(MeshResult, result_id)
-                    if mesh_result:
-                        mesh_result.logs = logs.copy()
-                        db.session.commit()
+                    mesh_result.logs = logs.copy()
+                    db.session.commit()
                     last_log_idx = len(logs)
                 
                 # Check cancellation by user
@@ -316,16 +365,17 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
                 
                 time.sleep(1) # Poll interval
             
-            # 4. Handle Completion
-            # Force final log update
-            mesh_result = db.session.get(MeshResult, result_id)
-            if mesh_result:
-                 mesh_result.logs = logs
-            
+            # Handle Completion
             if status == 'completed':
+                # Fetch results
                 if mode == 'CLOUD':
                     res = status_data.get('result', {})
-                    if not res: res = provider.fetch_results(job_id)
+                    # If result not in status, try explicit fetch
+                    if not res: 
+                        try:
+                            res = provider.fetch_results(job_id)
+                        except:
+                            res = {}
                     
                     mesh_result.output_path = res.get('s3_output_path')
                     mesh_result.strategy = res.get('strategy')
@@ -346,8 +396,11 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
                         mesh_result.strategy = res.get('strategy')
                         local_output_path = res.get('output_file')
                         mesh_result.quality_metrics = res.get('quality_metrics', {})
-                         
+                            
                         # Handle S3 upload
+                        storage = get_storage()
+                        use_s3 = app.config.get('USE_S3', False)
+                        
                         if use_s3 and user and local_output_path:
                             mesh_filename = Path(local_output_path).name
                             s3_path = storage.save_local_file(
@@ -363,7 +416,7 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
                         project.status = 'completed'
                     else:
                         project.status = 'error'
-                        project.error_message = res.get('error', 'Unknown local error')
+                        project.error_message = res.get('error') or res.get('message') or 'Unknown local error'
                 
                 final_msg = f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {time.time()-start_time:.1f}s"
                 logs.append(final_msg)
@@ -380,7 +433,7 @@ def run_mesh_generation(app, project_id: str, quality_params: dict = None, use_m
             
             # Legacy Logger Hook
             log_mesh_job(
-                job_id=internal_job_id,
+                job_id=mesh_result.job_id, # Internal ID
                 user_email=user.email if user else 'unknown',
                 project_id=project_id,
                 filename=project.filename,
@@ -723,11 +776,26 @@ def register_routes(app):
         # We allow 'use_modal' to override if configured
         use_modal_override = data.get('use_modal') 
 
-        thread = Thread(target=run_mesh_generation, args=(app, project_id, quality_params, use_modal_override))
-        thread.daemon = True
-        thread.start()
+        try:
+            # Synchronously submit job to get ID
+            job_id, mode, result_id, internal_job_id = submit_mesh_job_sync(app, project_id, quality_params, use_modal_override)
+            
+            # Start background monitoring
+            thread = Thread(target=monitor_mesh_job, args=(app, project_id, job_id, mode, result_id))
+            thread.daemon = True
+            thread.start()
 
-        return jsonify({"message": "Mesh generation started", "project_id": project_id})
+            return jsonify({
+                "message": "Mesh generation started", 
+                "project_id": project_id,
+                "job_id": job_id,
+                "internal_job_id": internal_job_id
+            })
+            
+        except Exception as e:
+            print(f"[API ERROR] Failed to start mesh job: {e}")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
     @app.route('/api/projects/<project_id>/stop', methods=['POST'])
     @jwt_required()
@@ -2557,7 +2625,18 @@ if __name__ == '__main__':
     print(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
     print(f"Output folder: {app.config['OUTPUT_FOLDER']}")
     print(f"JWT_SECRET_KEY: {'[SET]' if app.config.get('JWT_SECRET_KEY') else '[NOT SET - USING DEFAULT]'}")
+    print(f"Docker mode: {os.environ.get('IS_DOCKER_CONTAINER', 'false')}")
+    print(f"WebSocket Message Queue: {app.config.get('SOCKETIO_MESSAGE_QUEUE', 'redis://localhost:6379/1')}")
     print("\nStarting server on http://localhost:5000")
+    print("WebSocket endpoint: ws://localhost:5000")
     print("=" * 70)
 
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    # Use SocketIO's run method if available, otherwise fall back to Flask's run
+    if hasattr(app, 'socketio') and app.socketio:
+        try:
+            app.socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+        except Exception as e:
+            print(f"[WARNING] SocketIO run failed: {e}, falling back to Flask run")
+            app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    else:
+        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

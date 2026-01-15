@@ -70,8 +70,9 @@ def process_mesh_job(self, job_id: str, batch_id: str):
     start_time = time.time()
     
     with app.app_context():
-        from models import db, BatchJob, BatchFile, Batch, User
+        from models import db, BatchJob, BatchFile, Batch, User, JobUsage
         from storage import get_storage
+        from middleware.rate_limit import create_job_usage_record, update_job_usage_status
         
         job = BatchJob.query.get(job_id)
         if not job:
@@ -88,11 +89,26 @@ def process_mesh_job(self, job_id: str, batch_id: str):
             return {'success': False, 'error': 'Source file not found'}
         
         try:
+            # Create JobUsage record BEFORE processing
+            celery_task_id = self.request.id
+            job_usage = create_job_usage_record(
+                user_id=batch.user_id if batch else None,
+                job_type='batch_job',
+                job_id=celery_task_id,
+                batch_id=batch_id,
+                batch_job_id=job_id,
+                compute_backend='celery',
+                status='pending'
+            )
+            
             # Update job status
             job.status = 'processing'
             job.started_at = datetime.utcnow()
-            job.celery_task_id = self.request.id
+            job.celery_task_id = celery_task_id
             db.session.commit()
+            
+            # Update JobUsage to processing
+            update_job_usage_status(celery_task_id, 'processing', 'celery')
             
             emit_progress(batch_id, job_id, 0, 'processing', f'Starting mesh generation for {source_file.original_filename}')
             
@@ -201,6 +217,10 @@ def process_mesh_job(self, job_id: str, batch_id: str):
                 
                 db.session.commit()
                 
+                # Update JobUsage status to completed
+                if celery_task_id:
+                    update_job_usage_status(celery_task_id, 'completed', 'celery', datetime.utcnow())
+                
                 # Update batch counters
                 batch.completed_jobs = BatchJob.query.filter_by(
                     batch_id=batch_id, status='completed'
@@ -236,6 +256,11 @@ def process_mesh_job(self, job_id: str, batch_id: str):
             job.processing_time = time.time() - start_time
             db.session.commit()
             
+            # Update JobUsage status to failed
+            celery_task_id = self.request.id if hasattr(self, 'request') else None
+            if celery_task_id:
+                update_job_usage_status(celery_task_id, 'failed', 'celery', datetime.utcnow())
+            
             batch.failed_jobs = BatchJob.query.filter_by(batch_id=batch_id, status='failed').count()
             db.session.commit()
             
@@ -249,6 +274,11 @@ def process_mesh_job(self, job_id: str, batch_id: str):
             job.processing_time = time.time() - start_time
             job.logs = logs if 'logs' in dir() else []
             db.session.commit()
+            
+            # Update JobUsage status to failed
+            celery_task_id = self.request.id if hasattr(self, 'request') else None
+            if celery_task_id:
+                update_job_usage_status(celery_task_id, 'failed', 'celery', datetime.utcnow())
             
             batch.failed_jobs = BatchJob.query.filter_by(batch_id=batch_id, status='failed').count()
             

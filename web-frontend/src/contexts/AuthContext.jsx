@@ -46,7 +46,8 @@ export function AuthProvider({ children }) {
       try {
         const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${refreshToken}` }
+          headers: { 'Authorization': `Bearer ${refreshToken}` },
+          cache: 'no-store'
         })
 
         if (refreshResponse.ok) {
@@ -95,7 +96,7 @@ export function AuthProvider({ children }) {
 
     let response;
     try {
-      response = await fetch(url, { ...options, headers })
+      response = await fetch(url, { ...options, headers, cache: 'no-store' })
     } catch (err) {
       console.error('Fetch error:', err)
       throw err
@@ -107,7 +108,7 @@ export function AuthProvider({ children }) {
       if (refreshResult.success) {
         // Retry with new token
         headers['Authorization'] = `Bearer ${refreshResult.token}`
-        response = await fetch(url, { ...options, headers })
+        response = await fetch(url, { ...options, headers, cache: 'no-store' })
       }
       // If refresh failed, user is already logged out by refreshAccessToken()
     }
@@ -150,7 +151,8 @@ export function AuthProvider({ children }) {
       const response = await fetch(`${API_BASE}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name })
+        body: JSON.stringify({ email, password, name }),
+        cache: 'no-store'
       })
 
       const data = await response.json()
@@ -180,7 +182,8 @@ export function AuthProvider({ children }) {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password }),
+        cache: 'no-store'
       })
 
       const contentType = response.headers.get("content-type");

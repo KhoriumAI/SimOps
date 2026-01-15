@@ -755,7 +755,6 @@ class ModernMeshGenGUI(QMainWindow):
         
         quality_layout.addLayout(worker_sublayout)
 
-
         quality_group.setLayout(quality_layout)
         layout.addWidget(quality_group)
 
@@ -2230,7 +2229,6 @@ class ModernMeshGenGUI(QMainWindow):
             "aggressive_healing": self.aggressive_healing.isChecked(),  # Geometry healing toggle
             "verbose_preview": self.verbose_preview.isChecked() if hasattr(self, 'verbose_preview') else False,  # Logging toggle
         }
-
 
         # Check for pre-generated high-quality STL from Stage 3 background task
         hq_stl = self.viewer.get_hq_stl_for_meshing()

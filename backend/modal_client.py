@@ -76,19 +76,33 @@ class ModalClient:
             self._preview_fn = modal.Function.from_name(app_name, fn_name)
         return self._preview_fn
 
-    def spawn_mesh_job(self, bucket: str, key: str, quality_params: Optional[Dict] = None):
+    def spawn_mesh_job(self, bucket: str, key: str, quality_params: Optional[Dict] = None, 
+                       webhook_url: Optional[str] = None, job_id: Optional[str] = None):
         """
         Spawn an asynchronous mesh generation job on Modal.
         Returns a Modal FunctionCall object which contains the object_id.
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            quality_params: Mesh quality parameters
+            webhook_url: Optional webhook URL to call on completion
+            job_id: Optional job ID for CloudWatch logging (will use call.object_id if not provided)
         """
         try:
             fn = self._get_mesh_fn()
             # .spawn() returns a modal.functions.FunctionCall (async)
-            call = fn.spawn(bucket, key, quality_params)
+            # Pass webhook_url and job_id to Modal function
+            call = fn.spawn(bucket, key, quality_params, webhook_url, job_id)
             print(f"[ModalClient] Spawned mesh job: {call.object_id}")
             return call
         except Exception as e:
             print(f"[ModalClient ERROR] Failed to spawn mesh job: {e}")
+            # Run diagnostics to give better error message
+            diag = self.diagnose()
+            if not diag['ready']:
+                issues = "; ".join(diag['issues'])
+                raise RuntimeError(f"Modal Configuration Error: {issues}") from e
             raise
 
     def spawn_preview_job(self, bucket: str, key: str):
@@ -139,6 +153,44 @@ class ModalClient:
     def is_available(self):
         """Check if Modal is available for use"""
         return MODAL_AVAILABLE
+
+    def diagnose(self) -> Dict[str, Any]:
+        """
+        Run diagnostic checks for Modal configuration.
+        Returns a dictionary with status and issues.
+        """
+        issues = []
+        
+        # Check 1: Package installation
+        if not MODAL_AVAILABLE:
+            issues.append("Modal python package is not installed.")
+            return {"ready": False, "issues": issues}
+
+        # Check 2: Configuration / Token
+        try:
+            # modal.config.config is available even without auth, 
+            # but let's check if we can actually get a token id
+            # Note: accessing private/internal config might be unstable if Modal changes API
+            # Better check: Look for environment variables which are standard for staging
+            token_id = os.environ.get('MODAL_TOKEN_ID')
+            token_secret = os.environ.get('MODAL_TOKEN_SECRET')
+            
+            if not token_id or not token_secret:
+                # Fallback: check if local config file exists (dev environment)
+                # But for staging server, we strictly expect env vars usually
+                import modal.config
+                if not modal.config.config.get("token_id"):
+                     issues.append("Missing Modal credentials (MODAL_TOKEN_ID/SECRET not found in env).")
+            
+        except Exception as e:
+            issues.append(f"Failed to check configuration: {str(e)}")
+
+        return {
+            "ready": len(issues) == 0,
+            "issues": issues,
+            "modal_version": modal.__version__ if MODAL_AVAILABLE else "N/A"
+        }
+
 
 
 # Global instance

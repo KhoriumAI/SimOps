@@ -21,10 +21,7 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = db.Column(db.DateTime, nullable=True)
-    
-    # Password Reset
-    reset_token = db.Column(db.String(100), nullable=True, unique=True, index=True)
-    reset_token_expires = db.Column(db.DateTime, nullable=True)
+    last_api_request_at = db.Column(db.DateTime, nullable=True)  # Track last API request for time online calculation
     
     # Storage quota (in bytes) - default 1GB
     storage_quota = db.Column(db.BigInteger, default=1073741824)
@@ -32,6 +29,7 @@ class User(db.Model):
     
     projects = db.relationship('Project', backref='owner', lazy='dynamic', cascade='all, delete-orphan')
     activities = db.relationship('ActivityLog', backref='user', lazy='dynamic', cascade='all, delete-orphan')
+    job_usage = db.relationship('JobUsage', backref='user', lazy='dynamic', cascade='all, delete-orphan')
     
     def to_dict(self):
         return {
@@ -520,3 +518,64 @@ def create_batch_jobs_for_file(batch_file, batch, mesh_independence=False):
         jobs.append(job)
     
     return jobs
+
+
+# ============================================================================
+# JOB USAGE TRACKING MODEL
+# ============================================================================
+
+class JobUsage(db.Model):
+    """
+    Track all job attempts for rate limiting and usage analytics.
+    
+    Every job attempt is logged here, even if it fails or is blocked by quota.
+    This enables:
+    - Daily quota enforcement (COUNT jobs per user per day)
+    - Power user identification for sales outreach
+    - Cost tracking and analysis
+    """
+    __tablename__ = 'job_usage'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    
+    # Job identifier - modal_job_id, celery_task_id, or model ID
+    job_id = db.Column(db.String(100), nullable=True, index=True)
+    
+    # Job type classification
+    job_type = db.Column(db.String(50), nullable=False)  # 'single_mesh', 'batch_job', 'preview'
+    
+    # Timestamps
+    started_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    
+    # Status tracking
+    status = db.Column(db.String(20), nullable=False, index=True)  # 'pending', 'processing', 'completed', 'failed', 'cancelled'
+    
+    # Compute backend used
+    compute_backend = db.Column(db.String(20), nullable=True)  # 'modal', 'local', 'celery'
+    
+    # Foreign key references (nullable for flexibility)
+    project_id = db.Column(db.String(36), db.ForeignKey('projects.id'), nullable=True)
+    batch_id = db.Column(db.String(36), db.ForeignKey('batches.id'), nullable=True)
+    batch_job_id = db.Column(db.String(36), db.ForeignKey('batch_jobs.id'), nullable=True)
+    
+    # Composite index for efficient daily quota queries
+    __table_args__ = (
+        db.Index('ix_job_usage_user_started', 'user_id', 'started_at'),
+    )
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'job_id': self.job_id,
+            'job_type': self.job_type,
+            'status': self.status,
+            'compute_backend': self.compute_backend,
+            'project_id': self.project_id,
+            'batch_id': self.batch_id,
+            'batch_job_id': self.batch_job_id,
+            'started_at': self.started_at.isoformat() if self.started_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }

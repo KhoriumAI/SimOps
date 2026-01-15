@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from './contexts/AuthContext'
 import MeshViewer from './components/MeshViewer'
 import FileUpload from './components/FileUpload'
@@ -8,6 +8,7 @@ import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
 import { API_BASE } from './config'
+import { useProjectWebSocket } from './hooks/useProjectWebSocket'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
@@ -67,7 +68,9 @@ function App() {
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
-  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
+  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability (Display/Internal ID)
+  const [currentProviderId, setCurrentProviderId] = useState(null) // Provider ID for log subscription
+  const currentJobIdRef = useRef(null)
 
 
 
@@ -97,9 +100,10 @@ function App() {
         if (response.ok) {
           const data = await response.json()
           // Filter out unsupported/experimental strategies
+          // NOTE: GPU meshing is currently disabled for stability. To re-enable, remove 'gpu' from the filter below.
           const allowedStrategies = (data.names || []).filter(name => {
             const lower = name.toLowerCase()
-            return !lower.includes('gpu delaunay') && !lower.includes('polyhedral')
+            return !lower.includes('gpu') && !lower.includes('polyhedral')
           })
 
           setMeshStrategies(allowedStrategies)
@@ -365,6 +369,118 @@ function App() {
     }
   }
 
+
+  // --- WebSocket Handlers ---
+  const handleLogLine = (message, timestamp) => {
+    // Helper to add logs and parse progress
+    setLogs(prev => [...prev, message])
+    parseProgressFromLogs([message])
+  }
+
+  const handleJobCompleted = async (data) => {
+    console.log('[WS] Job completed:', data)
+    setLogs(prev => [...prev, '[SUCCESS] Mesh generation completed!'])
+    setMeshProgress({ strategy: 100, '1d': 100, '2d': 100, '3d': 100, optimize: 100, netgen: 100, order2: 100, quality: 100 })
+
+    // Fetch final mesh
+    if (data.project_id) {
+      console.log('[WS] Fetching mesh data for completed job, project_id:', data.project_id)
+      try {
+        await fetchMeshData(data.project_id)
+        setColorMode('quality')
+      } catch (error) {
+        console.error('[WS] Error fetching mesh data:', error)
+        setLogs(prev => [...prev, '[ERROR] Failed to load mesh data. Please refresh the page.'])
+      }
+    }
+
+    // Save duration
+    if (meshStartTime) {
+      setLastMeshDuration(Date.now() - meshStartTime)
+    }
+    setMeshStartTime(null)
+    setIsPolling(false)
+
+    // Refresh project status
+    if (currentProject) {
+      try {
+        const response = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
+        if (response.ok) {
+          const statusData = await response.json()
+          setProjectStatus(statusData)
+        }
+      } catch (e) { console.error(e) }
+    }
+  }
+
+  const handleJobFailed = (data) => {
+    console.log('[WS] Job failed:', data)
+    setLogs(prev => [...prev, `[ERROR] ${data.error || 'Mesh generation failed'}`])
+
+    if (meshStartTime) {
+      setLastMeshDuration(Date.now() - meshStartTime)
+    }
+    setMeshStartTime(null)
+    setIsPolling(false)
+  }
+
+  // Hook for WebSocket connection
+  const { subscribeToLogs, unsubscribeFromLogs } = useProjectWebSocket(
+    currentProject,
+    null, // onStatusUpdate - handled via job_completed/job_failed
+    handleLogLine,
+    handleJobCompleted,
+    handleJobFailed
+  )
+
+  // Subscribe to logs when job starts
+  useEffect(() => {
+    // Check for job_id from projectStatus (for Modal jobs or when status is updated)
+    // For logs, we need the provider ID if possible, but the backend logger uses internal ID?
+    // Actually, backend logger uses internal ID (MSH-XXX). The compute provider uses provider ID.
+    // Let's check: subscribeToLogs uses socket.emit('join_job', {job_id}). 
+    // The backend socket handler joins the room using the ID passed.
+    // The logger emits to room `job_id`. 
+    // Check job_logger.py and api_server.py: 
+    // log_mesh_job uses internal_job_id. 
+    // monitor_mesh_job updates logs on DB object which has internal_job_id and logs are fetched from there?
+    // Wait, the real-time logs come via SocketIO. 
+    // In api_server.py: log_mesh_job(job_id=mesh_result.job_id...) -> This is internal ID.
+    // So we should be subscribing to INTERNAL ID if we want real-time logs from the logger?
+    // BUT monitor_mesh_job might be emitting logs? 
+    // Actually, `log_job_update` emits logs.
+
+    // Let's assume we should use the ID returned by generate_mesh. 
+    // If I change currentJobId to be internal ID, we should check if subscription works.
+    // If generate_mesh returns provider ID as 'job_id', and we change that to internal, we need to know which one to subscribe to.
+
+    // Existing code: setCurrentJobId(data.job_id) where data.job_id was provider ID.
+    // Backend `submit_mesh_job_sync` returns `job_id` (provider).
+    // The monitor thread logs to DB using `mesh_result.logs`.
+    // The Websocket usually emits events.
+
+    // Let's stick to using the provider ID for subscription if that's what was working, 
+    // OR switch to internal if the backend supports it.
+    // Safest bet: Keep tracking provider ID for subscription if needed, but display internal ID.
+
+    const jobIdToUse = currentProviderId || projectStatus?.latest_result?.modal_job_id || projectStatus?.latest_result?.job_id
+
+    if (currentProject && jobIdToUse) {
+      if (jobIdToUse !== currentJobIdRef.current) {
+        currentJobIdRef.current = jobIdToUse
+        subscribeToLogs(jobIdToUse)
+      }
+    }
+
+    return () => {
+      if (currentJobIdRef.current) {
+        unsubscribeFromLogs(currentJobIdRef.current)
+        currentJobIdRef.current = null
+      }
+    }
+  }, [currentProject, projectStatus?.latest_result?.modal_job_id, projectStatus?.latest_result?.job_id, currentJobId, subscribeToLogs, unsubscribeFromLogs])
+
+
   const handleFileUpload = async (file) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -421,7 +537,8 @@ function App() {
       const data = await response.json()
       setCurrentProject(data.project_id)
       setProjectStatus(data)
-      setCurrentJobId(data.job_id)  // Capture Job ID from upload
+      setCurrentJobId(null)  // Reset job ID on new upload
+      setCurrentProviderId(null)
       setLogs([`[INFO] Uploaded ${file.name}`, data.job_id ? `[JOB] ${data.job_id}` : '', `[INFO] Loading CAD preview...`].filter(Boolean))
       setIsPolling(false)
 
@@ -471,11 +588,12 @@ function App() {
 
       if (response.ok) {
         const data = await response.json()
-        setCurrentJobId(data.job_id)  // Capture mesh Job ID
+        setCurrentJobId(data.internal_job_id)  // Capture MSH-XXXX ID for display/feedback
+        setCurrentProviderId(data.job_id)      // Capture Provider ID for logs if needed
         setIsPolling(true)
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
-        setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
+        setLogs([`[INFO] Starting mesh generation...`, data.internal_job_id ? `[JOB] ${data.internal_job_id}` : ''].filter(Boolean))
         // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
