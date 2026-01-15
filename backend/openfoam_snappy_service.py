@@ -169,22 +169,22 @@ def create_snappy_case(case_dir: Path, stl_path: str, cell_size: float = 2.0,
     
     # Get bounds for blockMesh
     min_b, max_b = get_stl_bounds(stl_path)
-    min_arr, max_arr = np.array(min_b), np.array(max_b)
+    min_b, max_b = np.array(min_b), np.array(max_b)
     
-    center = (min_arr + max_arr) / 2
-    size = max_arr - min_arr
+    center = (min_b + max_b) / 2
+    size = max_b - min_b
     
     # Add 50% margin for blockMesh domain
     margin = size * 0.5
-    min_pt = min_arr - margin
-    max_pt = max_arr + margin
+    min_pt = min_b - margin
+    max_pt = max_b + margin
     
     # Determine locationInMesh based on mesh_scope
     # CRITICAL: This determines whether we mesh INSIDE the solid or OUTSIDE (air)
     if mesh_scope == 'External':
         # External flow: mesh the AIR around the solid
         # Pick a point definitely outside the solid but inside the blockMesh domain
-        location_in_mesh = min_arr - (margin * 0.25)
+        location_in_mesh = min_b - (margin * 0.25)
         print(f"[Snappy] EXTERNAL mode: meshing air around solid")
         print(f"[Snappy] Location in mesh (air): {location_in_mesh}")
         all_locations = [location_in_mesh.tolist()]
@@ -883,16 +883,10 @@ def run_snappy_local(
     
     mesh_storage_key = None
     if msh_file:
-        bucket = params.get('bucket') or os.environ.get('S3_BUCKET_NAME')
-        if bucket:
-            import boto3
-            s3 = boto3.client("s3")
-            base_name = Path(filename).stem
-            mesh_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.msh"
-            print(f"[Modal] Uploading result to s3://{bucket}/{mesh_storage_key}...")
-            s3.upload_file(str(msh_file), bucket, mesh_storage_key)
-        else:
-            print("[Modal] Skipping S3 upload (no bucket configured)")
+        base_name = Path(input_key).stem
+        mesh_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.msh"
+        print(f"[Modal] Uploading result to s3://{bucket}/{mesh_storage_key}...")
+        s3.upload_file(str(msh_file), bucket, mesh_storage_key)
     else:
         print(f"[Modal] ERROR: No .msh file found!")
         print(f"[Modal] All files in case_dir:")
@@ -903,15 +897,11 @@ def run_snappy_local(
     vtk_files = list(case_dir.rglob("*.vtu")) + list(case_dir.rglob("*.vtk"))
     vtk_storage_key = None
     if vtk_files:
-        bucket = params.get('bucket') or os.environ.get('S3_BUCKET_NAME')
-        if bucket:
-            import boto3
-            s3 = boto3.client("s3")
-            vtk_file = vtk_files[0]
-            base_name = Path(filename).stem
-            vtk_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.vtu"
-            print(f"[Modal] Uploading VTK to s3://{bucket}/{vtk_storage_key}...")
-            s3.upload_file(str(vtk_file), bucket, vtk_storage_key)
+        vtk_file = vtk_files[0]
+        base_name = Path(input_key).stem
+        vtk_storage_key = f"mesh/modal_{int(time.time())}/{base_name}.vtu"
+        print(f"[Modal] Uploading VTK to s3://{bucket}/{vtk_storage_key}...")
+        s3.upload_file(str(vtk_file), bucket, vtk_storage_key)
     
     return {
         "success": True,

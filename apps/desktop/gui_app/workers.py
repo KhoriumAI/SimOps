@@ -211,103 +211,127 @@ class MeshWorker:
             self.signals.log.emit(f"Loading: {Path(cad_file).name}")
             self._emit_progress("strategy", 5)
 
-            # Show parallel execution info
-            cores = cpu_count()
-            workers = max(1, cores - 2)
-            self.signals.log.emit("=" * 70)
-            self.signals.log.emit("PARALLEL EXECUTION MODE ENABLED")
-            self.signals.log.emit(f"System: {cores} CPU cores detected")
-            self.signals.log.emit(f"Using: {workers} parallel workers (strategies run concurrently)")
-            self.signals.log.emit(f"Expected speedup: 3-5x faster than sequential mode")
-            self.signals.log.emit("=" * 70)
-
-            # CRITICAL: Path fix for gui_app package
-            # We are now in gui_app/workers.py, need to go up 4 levels to project root (MeshPackageLean)
             project_root = Path(__file__).parent.parent.parent.parent
             worker_script = project_root / "apps" / "cli" / "mesh_worker_subprocess.py"
             
             if not worker_script.exists():
-                # Fallback: check if mesh_worker.py exists instead
                 worker_script = project_root / "apps" / "cli" / "mesh_worker.py"
-                
-            self.signals.log.emit("Starting parallel mesh generation...")
-
-            # Prepare command with quality parameters
-            cmd = [sys.executable, "-u", str(worker_script), cad_file]
             
-            # Use temporary file for configuration to avoid command line limits
-            if quality_params:
+            # Checks for Modal Execution Logic
+            use_modal = quality_params.get("use_modal", False) if quality_params else False
+            
+            cmd = []
+            
+            if use_modal:
+                self.signals.log.emit("=" * 70)
+                self.signals.log.emit("MODAL CLOUD EXECUTION ENABLED")
+                self.signals.log.emit("Offloading job to Modal.com...")
+                self.signals.log.emit("=" * 70)
+                
+                script_path = project_root / "scripts" / "run_local_modal.py"
+                
+                # Check if modal CLI is available (fallback to system path if python module fails)
                 try:
-                    # Create a named temp file that persists after close
-                    fd, config_path = tempfile.mkstemp(suffix='.json', prefix='mesh_config_')
-                    os.close(fd)
-                    
-                    with open(config_path, 'w') as f:
-                        json.dump(quality_params, f)
-                    
-                    cmd.extend(["--config-file", config_path])
-                    self.temp_config_file = config_path
-                    self.signals.log.emit(f"[DEBUG] Wrote config to: {config_path}")
-                except Exception as e:
-                    self.signals.log.emit(f"[ERROR] Failed to create config file: {e}")
-                    cmd.extend(["--quality-params", json.dumps(quality_params)])
+                    # We use python -m modal to ensure we use the installed package
+                    subprocess.run([sys.executable, "-m", "modal", "--version"], capture_output=True, check=True)
+                except subprocess.CalledProcessError:
+                     self.signals.log.emit("[ERROR] 'modal' module not found or failed. Please install modal.")
+                     self.signals.finished.emit(False, {"error": "Modal module error"})
+                     return
+
+                # Construct modal run command
+                cmd = [sys.executable, "-u", "-m", "modal", "run", str(script_path)]
+                cmd.extend(["--input-file", cad_file])
+                
+                # Pass config file
+                if quality_params:
+                    try:
+                        fd, config_path = tempfile.mkstemp(suffix='.json', prefix='modal_config_')
+                        os.close(fd)
+                        with open(config_path, 'w') as f:
+                            json.dump(quality_params, f)
+                        
+                        cmd.extend(["--config-file", config_path])
+                        self.temp_config_file = config_path
+                        self.signals.log.emit(f"[DEBUG] Using config: {config_path}")
+                    except Exception as e:
+                        self.signals.log.emit(f"[ERROR] Failed to write config for Modal: {e}")
+                        self.signals.finished.emit(False, {"error": f"Failed to write config: {e}"})
+                        return
+
+            else:
+                # Parallel execution info
+                cores = cpu_count()
+                workers = max(1, cores - 2)
+                self.signals.log.emit("=" * 70)
+                self.signals.log.emit("PARALLEL EXECUTION MODE ENABLED")
+                self.signals.log.emit(f"System: {cores} CPU cores detected")
+                self.signals.log.emit(f"Using: {workers} parallel workers (strategies run concurrently)")
+                self.signals.log.emit(f"Expected speedup: 3-5x faster than sequential mode")
+                self.signals.log.emit("=" * 70)
+                self.signals.log.emit("Starting parallel mesh generation...")
+    
+                cmd = [sys.executable, "-u", str(worker_script), cad_file]
+                
+                if quality_params:
+                    try:
+                        fd, config_path = tempfile.mkstemp(suffix='.json', prefix='mesh_config_')
+                        os.close(fd)
+                        with open(config_path, 'w') as f:
+                            json.dump(quality_params, f)
+                        cmd.extend(["--config-file", config_path])
+                        self.temp_config_file = config_path
+                    except Exception as e:
+                        self.signals.log.emit(f"[ERROR] Failed to create config file: {e}")
+                        cmd.extend(["--quality-params", json.dumps(quality_params)])
 
             self.signals.log.emit(f"[DEBUG] Executing command: {' '.join(cmd)}")
             print(f"[DEBUG] Executing command: {' '.join(cmd)}")
 
-            # Start subprocess with PIPE
-            self.signals.log.emit("[DEBUG] Starting subprocess with PIPE...")
-            
-            # CRITICAL FIX: Pass PYTHONPATH to subprocess
-            # macOS/Linux spawn method needs explicit path to find modules
+            # Pass PYTHONPATH
             env = os.environ.copy()
             python_path = env.get("PYTHONPATH", "")
             if python_path:
                 env["PYTHONPATH"] = f"{project_root}{os.pathsep}{python_path}"
             else:
                 env["PYTHONPATH"] = str(project_root)
-                
-            # Set worker count from GUI slider
-            if quality_params and "worker_count" in quality_params:
-                env["MESH_MAX_WORKERS"] = str(quality_params["worker_count"])
-                self.signals.log.emit(f"[DEBUG] Set MESH_MAX_WORKERS={quality_params['worker_count']}")
             
-            # Pass verbosity flag to subprocess
-            if quality_params and "verbose_preview" in quality_params:
-                env["MESH_VERBOSE"] = "1" if quality_params["verbose_preview"] else "0"
-                if quality_params["verbose_preview"]:
-                    self.signals.log.emit("[DEBUG] Verbose logging enabled for background process")
-                
-            self.signals.log.emit(f"[DEBUG] PYTHONPATH set to: {env['PYTHONPATH']}")
+            # Ensure unbuffered output for Modal to stream logs
+            env["PYTHONUNBUFFERED"] = "1"
 
+            # Start subprocess
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,  # Line buffered
-                env=env     # Pass environment with PYTHONPATH
+                universal_newlines=True,
+                bufsize=1,
+                env=env
             )
-            self.signals.log.emit(f"[DEBUG] Subprocess started with PID: {self.process.pid}")
-
-            # Read line by line from stdout
-            for line in self.process.stdout:
-                line = line.strip()
+            
+            # Read output
+            for line in iter(self.process.stdout.readline, ''):
                 if not line:
-                    continue
-                
-                self._parse_and_emit_line(line)
-
-            self.process.wait()
-            self.signals.log.emit(f"[DEBUG] Subprocess finished with return code: {self.process.returncode}")
+                    break
+                self._parse_and_emit_line(line.strip())
+            
+            self.process.stdout.close()
+            return_code = self.process.wait()
+            
+            if return_code != 0:
+                self.signals.log.emit(f"Process exited with code {return_code}")
 
         except Exception as e:
-            self.signals.log.emit(f"Exception: {str(e)}")
+            self.signals.log.emit(f"Error: {str(e)}")
             self.signals.finished.emit(False, {"error": str(e)})
         finally:
-            self.is_running = False
-            # Cleanup is now handled by the stop method, which is called on completion or explicit stop.
-            # We only need to ensure self.is_running is false here.
+             if self.temp_config_file and os.path.exists(self.temp_config_file):
+                try:
+                    os.unlink(self.temp_config_file)
+                except:
+                    pass
+             self.is_running = False
+
 
     def stop(self, force=False):
         """Stop the mesh generation process and all child processes"""
