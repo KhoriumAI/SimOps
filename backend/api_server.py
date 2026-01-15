@@ -181,10 +181,6 @@ def create_app(config_class=None):
     instance_dir = Path(__file__).parent / 'instance'
     instance_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create database tables
-    with app.app_context():
-        db.create_all()
-    
     # Register routes
     register_routes(app)
     

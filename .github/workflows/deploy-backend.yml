@@ -29,11 +29,17 @@ jobs:
           DB_URL: ${{ secrets.DATABASE_URL }}
           SECRET: ${{ secrets.SECRET_KEY }}
           JWT_SECRET: ${{ secrets.JWT_SECRET_KEY }}
+          MAIL_HOST: ${{ secrets.MAIL_SERVER }}
+          MAIL_PORT: ${{ secrets.MAIL_PORT }}
+          MAIL_USER: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASS: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_SENDER: ${{ secrets.MAIL_DEFAULT_SENDER }}
+          FRONT_URL: ${{ secrets.FRONTEND_URL }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: DB_URL,SECRET,JWT_SECRET
+          envs: DB_URL,SECRET,JWT_SECRET,MAIL_HOST,MAIL_PORT,MAIL_USER,MAIL_PASS,MAIL_SENDER,FRONT_URL
           script: |
             set -e
             
@@ -99,6 +105,14 @@ jobs:
             S3_BUCKET_NAME=muaz-webdev-assets
             AWS_REGION=us-west-1
             CORS_ORIGINS=https://app.khorium.ai,http://muaz-mesh-web-dev.s3-website-us-west-1.amazonaws.com
+            
+            # Email Configuration
+            MAIL_SERVER=${MAIL_HOST}
+            MAIL_PORT=${MAIL_PORT}
+            MAIL_USERNAME=${MAIL_USER}
+            MAIL_PASSWORD=${MAIL_PASS}
+            MAIL_DEFAULT_SENDER=${MAIL_SENDER}
+            FRONTEND_URL=${FRONT_URL}
             ENVEOF
             
             echo "[DEPLOY] .env file created at $BACKEND_DIR/.env"
@@ -139,6 +153,11 @@ jobs:
             echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
             sudo fuser -k 5000/tcp 2>/dev/null || true
+            
+            echo "[DEPLOY] Maintenance: Cleaning up old logs/journals..."
+            sudo journalctl --vacuum-time=7d || true
+            find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+            find /tmp -name "meshgen_*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
             
             echo "[DEPLOY] Restarting gunicorn service..."
             # Try to restart the service (could be named gunicorn or meshgen or khorium)
