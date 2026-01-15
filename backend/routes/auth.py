@@ -151,13 +151,9 @@ def forgot_password():
     email = data.get('email').strip().lower()
     user = User.query.filter_by(email=email).first()
     
-    # Security: Don't reveal if user exists or not
-    # Always return 200 to prevent user enumeration
-    message = 'If an account exists with this email, a reset link has been sent.'
-    
     if not user:
         print(f"[AUTH] Password reset requested for non-existent email: {email}")
-        return jsonify({'message': message}), 200
+        return jsonify({'error': 'No account found with that email address. Please check and try again.'}), 404
         
     # Generate reset token (valid for 1 hour)
     token = secrets.token_urlsafe(32)
@@ -176,7 +172,7 @@ def forgot_password():
         print(f"[AUTH] Error during password reset request: {e}")
         return jsonify({'error': 'Internal server error'}), 500
         
-    return jsonify({'message': message}), 200
+    return jsonify({'message': 'A password reset link has been sent to your email address.'}), 200
 
 
 @auth_bp.route('/reset-password', methods=['POST'])
@@ -233,12 +229,19 @@ def send_reset_email(email, token):
     
     # Retrieve SMTP settings from environment
     smtp_server = os.environ.get('MAIL_SERVER')
-    smtp_port = int(os.environ.get('MAIL_PORT', 587))
+    
+    # Robust port parsing to avoid 500 error if empty
+    port_str = os.environ.get('MAIL_PORT', '587')
+    try:
+        smtp_port = int(port_str) if port_str and port_str.strip() else 587
+    except ValueError:
+        smtp_port = 587
+        
     smtp_user = os.environ.get('MAIL_USERNAME')
     smtp_pass = os.environ.get('MAIL_PASSWORD')
     
     if not smtp_server or not smtp_user or not smtp_pass:
-        print("[EMAIL] WARNING: SMTP settings not configured. Email not sent.")
+        print(f"[EMAIL] WARNING: SMTP settings incomplete (Server: {smtp_server}, User: {smtp_user}). Email NOT sent.")
         return False
         
     try:
