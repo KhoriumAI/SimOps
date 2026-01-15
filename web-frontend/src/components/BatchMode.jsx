@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import BatchUpload from './BatchUpload'
 import BatchDashboard from './BatchDashboard'
-import { useBatchWebSocket } from '../hooks/useWebSocket'
+import { useBatchPolling } from '../hooks/useWebSocket'
 import {
   Plus, List, Settings, ToggleLeft, ToggleRight,
   Loader2, RefreshCw, ChevronDown
@@ -24,7 +24,6 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
 
   // Helper to add log
   const addLog = (message) => {
-    console.log('[Batch]', message)
     onLog?.(message)
   }
 
@@ -70,10 +69,11 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
     fetchStrategies()
   }, [authFetch])
 
-  // WebSocket for current batch
-  const { batch, refresh, startPolling, stopPolling } = useBatchWebSocket(
+  // Polling for current batch
+  const { batch, refresh, startPolling, stopPolling } = useBatchPolling(
     currentBatchId,
-    authFetch
+    authFetch,
+    2000
   )
 
   // Load user's batches

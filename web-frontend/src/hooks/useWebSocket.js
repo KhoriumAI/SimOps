@@ -98,17 +98,19 @@ export function useWebSocket(batchId, onProgress) {
 }
 
 /**
- * useBatchWebSocket Hook
- * 
- * Replaces useBatchPolling with a WebSocket-based system.
- * Fetches initial state and then listens for real-time updates.
+ * useBatchPolling Hook
  */
-export function useBatchWebSocket(batchId, authFetch) {
+export function useBatchPolling(batchId, authFetch, interval = 2000) {
   const [batch, setBatch] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [connected, setConnected] = useState(false)
-  const socketRef = useRef(null)
+  const timerRef = useRef(null)
+  const isPollingRef = useRef(false)
+
+  // Check if batch is in a final state
+  const isFinalState = (status) => {
+    return ['completed', 'failed', 'cancelled'].includes(status)
+  }
 
   const fetchBatch = useCallback(async () => {
     if (!batchId || !authFetch) return
@@ -119,86 +121,91 @@ export function useBatchWebSocket(batchId, authFetch) {
         const data = await response.json()
         setBatch(data)
         setError(null)
+
+        // Auto-stop polling when batch reaches final state
+        if (isFinalState(data.status) && timerRef.current) {
+          console.log('[Polling] Batch complete, stopping polling')
+          clearInterval(timerRef.current)
+          timerRef.current = null
+          isPollingRef.current = false
+        }
       } else {
         const err = await response.json()
         setError(err.error || 'Failed to fetch batch')
       }
     } catch (err) {
-      console.error('[WS-Batch] Initial fetch error:', err.message)
+      // Only log actual errors, not routine fetches
+      console.error('[Polling] Error:', err.message)
       setError(err.message)
     }
   }, [batchId, authFetch])
 
-  // Initial fetch when batchId changes
+  const startPolling = useCallback(() => {
+    if (timerRef.current || isPollingRef.current) return
+
+    // Don't start polling if already in final state
+    if (batch && isFinalState(batch.status)) return
+
+    console.log('[Polling] Started')
+    isPollingRef.current = true
+    fetchBatch()
+    timerRef.current = setInterval(fetchBatch, interval)
+  }, [fetchBatch, interval, batch])
+
+  const stopPolling = useCallback(() => {
+    if (timerRef.current) {
+      console.log('[Polling] Stopped')
+      clearInterval(timerRef.current)
+      timerRef.current = null
+      isPollingRef.current = false
+    }
+  }, [])
+
+  // Fetch immediately when batchId changes
   useEffect(() => {
     if (batchId && authFetch) {
       setLoading(true)
-      fetchBatch().finally(() => setLoading(false))
-    } else {
       setBatch(null)
-    }
-  }, [batchId, authFetch, fetchBatch])
 
-  // WebSocket connection
-  useEffect(() => {
-    if (!batchId) return
-
-    const socket = io(WS_URL, {
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-    })
-
-    socketRef.current = socket
-
-    socket.on('connect', () => {
-      console.log('[WS-Batch] Connected')
-      setConnected(true)
-      socket.emit('join_batch', { batch_id: batchId })
-    })
-
-    socket.on('disconnect', () => {
-      console.log('[WS-Batch] Disconnected')
-      setConnected(false)
-    })
-
-    // Listen for job progress updates
-    socket.on('job_progress', (data) => {
-      if (data.batch_id === batchId) {
-        console.log('[WS-Batch] Job progress:', data)
-        // Optionally update local batch state if it contains jobs
-        setBatch(prev => {
-          if (!prev || !prev.jobs) return prev
-          return {
-            ...prev,
-            jobs: prev.jobs.map(j => j.id === data.job_id ? { ...j, status: data.status, progress: data.progress } : j)
+      const doFetch = async () => {
+        try {
+          const response = await authFetch(`${API_BASE}/batch/${batchId}?include_files=true&include_jobs=true`)
+          if (response.ok) {
+            const data = await response.json()
+            setBatch(data)
+            setError(null)
+          } else {
+            const err = await response.json()
+            setError(err.error || 'Failed to fetch batch')
           }
-        })
+        } catch (err) {
+          setError(err.message)
+        } finally {
+          setLoading(false)
+        }
       }
-    })
 
-    // Listen for batch status updates
-    socket.on('batch_status', (data) => {
-      if (data.batch_id === batchId) {
-        console.log('[WS-Batch] Batch status:', data)
-        setBatch(prev => prev ? { ...prev, status: data.status, ...data } : null)
-      }
-    })
-
-    return () => {
-      socket.disconnect()
-      socketRef.current = null
+      doFetch()
+    } else if (!batchId) {
+      setBatch(null)
+      setLoading(false)
+      stopPolling()
     }
-  }, [batchId])
+  }, [batchId, authFetch, stopPolling])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopPolling()
+  }, [stopPolling])
 
   return {
     batch,
     loading,
     error,
-    connected,
     refresh: fetchBatch,
-    startPolling: () => console.log('[WS-Batch] WebSocket active (legacy startPolling called)'),
-    stopPolling: () => console.log('[WS-Batch] WebSocket active (legacy stopPolling called)'),
-    isPolling: false
+    startPolling,
+    stopPolling,
+    isPolling: isPollingRef.current
   }
 }
 

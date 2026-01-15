@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from './contexts/AuthContext'
 import MeshViewer from './components/MeshViewer'
 import FileUpload from './components/FileUpload'
@@ -6,10 +6,8 @@ import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
-import AdminPanel from './components/AdminPanel'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
 import { API_BASE } from './config'
-import { useProjectWebSocket } from './hooks/useProjectWebSocket'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
@@ -46,22 +44,11 @@ function App() {
   const [logs, setLogs] = useState([])
   const [meshData, setMeshData] = useState(null)
 
-  // DEBUG: Trace meshData changes
-  useEffect(() => {
-    if (meshData) {
-      console.log('[App] meshData updated:', {
-        vertices: meshData.vertices?.length,
-        isPreview: meshData.isPreview,
-        colors: meshData.colors?.length
-      })
-    } else {
-      console.log('[App] meshData set to NULL')
-    }
-  }, [meshData])
 
-  const [isPolling, setIsPolling] = useState(false) // Kept for compatibility, but no longer used for polling
-  const currentJobIdRef = useRef(null)
+
+  const [isPolling, setIsPolling] = useState(false)
   const [isExportingAnsys, setIsExportingAnsys] = useState(false)
+  const [isAnsysDropdownOpen, setIsAnsysDropdownOpen] = useState(false)
   const [qualityPreset, setQualityPreset] = useState('Medium')
   const [maxElementSize, setMaxElementSize] = useState(10.0)
   const [minElementSize, setMinElementSize] = useState(2.0)
@@ -82,9 +69,7 @@ function App() {
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
 
-  // Fast Mode - experimental optimized preview (uses SSH compute, skips retries)
-  // TODO: Remove this after testing
-  const [fastMode, setFastMode] = useState(true)  // Default ON for testing
+
 
   // UX states for input boxes to allow typing (including blank)
   const [maxSizeStr, setMaxSizeStr] = useState('10.0')
@@ -92,9 +77,6 @@ function App() {
 
   // Mode: 'single' or 'batch'
   const [mode, setMode] = useState('single')
-
-  // Admin panel state
-  const [adminPanelOpen, setAdminPanelOpen] = useState(false)
 
   // Visualization toggles (shared with MeshViewer)
   const [showAxes, setShowAxes] = useState(true)
@@ -134,95 +116,84 @@ function App() {
     fetchStrategies()
   }, [])
 
-  // WebSocket handlers for real-time updates (replaces polling)
-  const handleLogLine = (message, timestamp) => {
-    console.log('[App] Received log line:', message.substring(0, 50))
-    setLogs(prev => [...prev, message])
-    parseProgressFromLogs([message])
-  }
 
-  const handleJobCompleted = async (data) => {
-    console.log('[WS] Job completed:', data)
-    setLogs(prev => [...prev, '[SUCCESS] Mesh generation completed!'])
-    setMeshProgress({ strategy: 100, '1d': 100, '2d': 100, '3d': 100, optimize: 100, netgen: 100, order2: 100, quality: 100 })
-    
-    // Fetch final mesh
-    if (data.project_id) {
-      console.log('[WS] Fetching mesh data for completed job, project_id:', data.project_id)
+
+  // Poll project status
+  useEffect(() => {
+    if (!currentProject) return
+
+    let isSubscribed = true
+
+    const pollStatus = async () => {
+      if (!isPolling || !isSubscribed) return
+
       try {
-        await fetchMeshData(data.project_id, 5, 1000) // More retries with longer delay
-        setColorMode('quality')
-      } catch (error) {
-        console.error('[WS] Error fetching mesh data:', error)
-        setLogs(prev => [...prev, '[ERROR] Failed to load mesh data. Please refresh the page.'])
-      }
-    } else {
-      console.error('[WS] Job completed but no project_id:', data)
-    }
-    
-    // Save duration
-    if (meshStartTime) {
-      setLastMeshDuration(Date.now() - meshStartTime)
-    }
-    setMeshStartTime(null)
-    setIsPolling(false)
-    
-    // Refresh project status
-    if (data.project_id) {
-      try {
-        const response = await authFetch(`${API_BASE}/projects/${data.project_id}/status`)
-        if (response.ok) {
-          const statusData = await response.json()
-          setProjectStatus(statusData)
+        const response = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
+        if (!response.ok || !isSubscribed) return
+
+        const data = await response.json()
+
+        // Safety check: ensure result matches current project
+        if (data.id !== currentProject) {
+          console.warn('[Poll] Received status for wrong project:', data.id, 'vs', currentProject)
+          return
+        }
+
+        setProjectStatus(data)
+
+        // Only update logs from server if there are actual generation logs
+        // This preserves client-side logs (CAD preview info) when not processing
+        const serverLogs = data.latest_result?.logs || []
+        if (serverLogs.length > 0 && data.status === 'processing') {
+          setLogs(prev => {
+            // Keep CAD info logs, append server logs
+            const cadLogs = prev.filter(l => l.includes('📐') || l.includes('📏') || l.includes('📦') || l.includes('Loaded CAD') || l.includes('Preview mesh') || l.startsWith('   •'))
+            return [...cadLogs, '', '[INFO] Mesh Generation Progress:', ...serverLogs]
+          })
+          // Parse progress from logs
+          parseProgressFromLogs(serverLogs)
+        } else if (data.status === 'completed' && serverLogs.length > 0) {
+          setLogs(prev => {
+            const cadLogs = prev.filter(l => l.includes('📐') || l.includes('📏') || l.includes('📦') || l.includes('Loaded CAD') || l.includes('Preview mesh') || l.startsWith('   •'))
+            return [...cadLogs, '', '[SUCCESS] Mesh generation completed!', ...serverLogs]
+          })
+          // Set all progress to 100% on completion
+          setMeshProgress({ strategy: 100, '1d': 100, '2d': 100, '3d': 100, optimize: 100, netgen: 100, order2: 100, quality: 100 })
+        }
+
+        if (data.status === 'completed') {
+          // Always fetch final mesh when completed (replaces preview)
+          // Always fetch final mesh when completed (replaces preview or old mesh)
+          fetchMeshData(currentProject)
+          setColorMode('quality') // Auto-switch to quality view on completion
+          // Save mesh duration
+          if (meshStartTime) {
+            setLastMeshDuration(Date.now() - meshStartTime)
+          }
+          setMeshStartTime(null)
+          setIsPolling(false)
+        } else if (data.status === 'error') {
+          setLogs(prev => [...prev, `[ERROR] ${data.error_message || 'Mesh generation failed'}`])
+          // Save duration even on error
+          if (meshStartTime) {
+            setLastMeshDuration(Date.now() - meshStartTime)
+          }
+          setMeshStartTime(null)
+          setIsPolling(false)
         }
       } catch (error) {
         console.error('Failed to fetch project status:', error)
       }
     }
-  }
 
-  const handleJobFailed = (data) => {
-    console.log('[WS] Job failed:', data)
-    setLogs(prev => [...prev, `[ERROR] ${data.error || 'Mesh generation failed'}`])
-    
-    if (meshStartTime) {
-      setLastMeshDuration(Date.now() - meshStartTime)
-    }
-    setMeshStartTime(null)
-    setIsPolling(false)
-  }
-
-  // WebSocket connection for real-time updates (replaces polling)
-  const { subscribeToLogs, unsubscribeFromLogs } = useProjectWebSocket(
-    currentProject,
-    null, // onStatusUpdate - handled via job_completed/job_failed
-    handleLogLine,
-    handleJobCompleted,
-    handleJobFailed
-  )
-
-  // Subscribe to logs when job starts (handles both modal_job_id from projectStatus and direct job_id)
-  useEffect(() => {
-    // Check for job_id from projectStatus (for Modal jobs or when status is updated)
-    const jobIdFromStatus = projectStatus?.latest_result?.modal_job_id
-    
-    // Also check if we have a currentJobId set directly (for local jobs or immediate subscription)
-    const jobIdToUse = jobIdFromStatus || currentJobId
-    
-    if (currentProject && jobIdToUse) {
-      if (jobIdToUse !== currentJobIdRef.current) {
-        currentJobIdRef.current = jobIdToUse
-        subscribeToLogs(jobIdToUse)
-      }
-    }
+    const interval = setInterval(pollStatus, 2000)
+    pollStatus()
 
     return () => {
-      if (currentJobIdRef.current) {
-        unsubscribeFromLogs(currentJobIdRef.current)
-        currentJobIdRef.current = null
-      }
+      isSubscribed = false
+      clearInterval(interval)
     }
-  }, [currentProject, projectStatus?.latest_result?.modal_job_id, currentJobId, subscribeToLogs, unsubscribeFromLogs])
+  }, [currentProject, isPolling])
 
   // Parse progress from log messages
   const parseProgressFromLogs = (logs) => {
@@ -318,72 +289,22 @@ function App() {
     }
   }
 
-  const fetchMeshData = async (projectId, retries = 3, delay = 500) => {
-    console.log(`[App] fetchMeshData called for project ${projectId}, retries=${retries}`)
-    
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
-        if (response.ok) {
-          const data = await response.json()
-          console.log('[App] fetchMeshData success:', {
-            projectId,
-            vertices: data.vertices?.length,
-            triangles: data.numTriangles || 'N/A',
-            resultId: data.result_id || 'N/A',
-            attempt: attempt + 1,
-            hasColors: !!data.colors?.length,
-            isPreview: data.isPreview
-          })
-          
-          // Validate mesh data before setting
-          if (data.vertices && data.vertices.length > 0) {
-            setMeshData(data)
-            console.log('[App] meshData set successfully')
-          } else {
-            console.warn('[App] fetchMeshData: Received empty mesh data:', data)
-            setLogs(prev => [...prev, '[WARNING] Mesh data is empty'])
-          }
-          return // Success, exit retry loop
-        } else {
-          const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
-          console.log(`[App] fetchMeshData attempt ${attempt + 1}/${retries}: Status ${response.status}, ${errorData.error || 'Unknown error'}`)
-          
-          // If mesh not ready, retry after delay
-          if (response.status === 400 && attempt < retries - 1) {
-            console.log(`[App] Mesh not ready yet (status: ${response.status}), retrying in ${delay}ms...`)
-            await new Promise(resolve => setTimeout(resolve, delay))
-            delay *= 1.5 // Exponential backoff
-            continue
-          } else {
-            console.error('[App] fetchMeshData failed:', {
-              status: response.status,
-              error: errorData.error,
-              attempt: attempt + 1
-            })
-            setLogs(prev => [...prev, `[ERROR] Failed to fetch mesh: ${errorData.error || 'Unknown error'}`])
-            return
-          }
-        }
-      } catch (error) {
-        console.error(`[App] fetchMeshData attempt ${attempt + 1}/${retries} error:`, error)
-        if (attempt < retries - 1) {
-          await new Promise(resolve => setTimeout(resolve, delay))
-          delay *= 1.5
-        } else {
-          setLogs(prev => [...prev, `[ERROR] Failed to fetch mesh after ${retries} attempts: ${error.message}`])
-        }
+  const fetchMeshData = async (projectId) => {
+    try {
+      const response = await authFetch(`${API_BASE}/projects/${projectId}/mesh-data`)
+      if (response.ok) {
+        const data = await response.json()
+        setMeshData(data)
       }
+    } catch (error) {
+      console.error('Failed to fetch mesh data:', error)
     }
-    console.warn('[App] fetchMeshData failed after all retries')
   }
 
   const fetchCadPreview = async (projectId, filename, useFastMode = false) => {
     try {
       // Pass fast_mode as query parameter
-      const url = useFastMode
-        ? `${API_BASE}/projects/${projectId}/preview?fast_mode=true`
-        : `${API_BASE}/projects/${projectId}/preview`
+      const url = `${API_BASE}/projects/${projectId}/preview?fast_mode=true`
 
       const response = await authFetch(url)
       if (response.ok) {
@@ -416,7 +337,7 @@ function App() {
 
           setLogs(prev => [
             ...prev,
-            `[INFO] Loaded CAD: ${filename}${useFastMode ? ' ⚡ Fast Mode' : ''}`,
+            `[INFO] Loaded CAD: ${filename} ⚡`,
             ``,
             `📐 CAD Geometry Info:`,
             `   • Volumes: ${geo.volumes}`,
@@ -505,7 +426,7 @@ function App() {
       setIsPolling(false)
 
       // Fetch CAD preview to show geometry before meshing
-      await fetchCadPreview(data.project_id, file.name, fastMode)
+      await fetchCadPreview(data.project_id, file.name, true)
       setIsUploading(false)
       setUploadProgress(0)
     } catch (error) {
@@ -532,14 +453,16 @@ function App() {
       const response = await authFetch(`${API_BASE}/projects/${currentProject}/generate`, {
         method: 'POST',
         body: {
-          quality_preset: qualityPreset,
-          target_elements: null,
-          max_size_mm: maxElementSize,
-          min_size_mm: minElementSize,
-          element_order: parseInt(elementOrder),
-          ansys_mode: ansysMode,
-          mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive
+          quality_params: {
+            quality_preset: qualityPreset,
+            target_elements: null,
+            max_size_mm: maxElementSize,
+            min_size_mm: minElementSize,
+            element_order: parseInt(elementOrder),
+            ansys_mode: ansysMode,
+            mesh_strategy: meshStrategy,
+            curvature_adaptive: curvatureAdaptive,
+          }
         },
         signal: controller.signal
       })
@@ -548,61 +471,17 @@ function App() {
 
       if (response.ok) {
         const data = await response.json()
+        setCurrentJobId(data.job_id)  // Capture mesh Job ID
+        setIsPolling(true)
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
         setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
+        // setMeshData(null) // Keep existing mesh/preview visible during generation
+        // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })
-        
-        // If job_id is returned immediately, subscribe directly via WebSocket
-        if (data.job_id) {
-          console.log('[WS] Got job_id from response:', data.job_id)
-          setCurrentJobId(data.job_id)
-          // Subscribe immediately - don't wait for projectStatus update
-          if (data.job_id !== currentJobIdRef.current) {
-            currentJobIdRef.current = data.job_id
-            subscribeToLogs(data.job_id)
-          }
-          // Also fetch project status for UI updates
-          try {
-            const statusResponse = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
-            if (statusResponse.ok) {
-              const statusData = await statusResponse.json()
-              setProjectStatus(statusData)
-            }
-          } catch (error) {
-            console.error('Failed to fetch project status:', error)
-          }
-        } else {
-          // Fallback: Poll for job_id until available (with timeout) - ONLY for getting job_id, not for status
-          console.log('[WS] No job_id in response, polling for job_id...')
-          let attempts = 0
-          const maxAttempts = 20 // 10 seconds max (20 * 500ms)
-          const pollForJobId = setInterval(async () => {
-            attempts++
-            try {
-              const statusResponse = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
-              if (statusResponse.ok) {
-                const statusData = await statusResponse.json()
-                if (statusData.latest_result?.modal_job_id) {
-                  clearInterval(pollForJobId)
-                  console.log('[WS] Got job_id from polling:', statusData.latest_result.modal_job_id)
-                  setCurrentJobId(statusData.latest_result.modal_job_id)
-                  setProjectStatus(statusData)
-                  // useEffect will automatically subscribe now
-                } else if (attempts >= maxAttempts) {
-                  clearInterval(pollForJobId)
-                  console.warn('[WS] Job ID not available after polling')
-                  setLogs(prev => [...prev, '[WARNING] Could not get job ID for log streaming'])
-                }
-              }
-            } catch (error) {
-              console.error('Failed to fetch project status:', error)
-              if (attempts >= maxAttempts) {
-                clearInterval(pollForJobId)
-              }
-            }
-          }, 500) // Poll every 500ms
-        }
+        // CRITICAL: Immediately update local status to 'processing' to prevent duplicate clicks
+        // This ensures the UI reflects the correct state before the next poll cycle
+        setProjectStatus(prev => prev ? { ...prev, status: 'processing' } : { status: 'processing' })
       } else {
         const error = await response.json()
         alert(error.error || 'Failed to start mesh generation')
@@ -613,15 +492,17 @@ function App() {
     }
   }
 
-  const handleAnsysExport = async () => {
+  const handleAnsysExport = async (format = 'fluent') => {
     if (!currentProject) return
 
     setIsExportingAnsys(true)
     try {
-      // Use the new format=fluent query parameter on the download endpoint
-      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=fluent`)
+      // Use the new format query parameter on the download endpoint
+      const response = await authFetch(`${API_BASE}/projects/${currentProject}/download?format=${format}`)
       if (response.ok) {
         const contentType = response.headers.get('content-type')
+        const extension = format === 'mechanical' ? 'inp' : 'msh'
+        const suffix = format === 'mechanical' ? 'mechanical' : 'fluent'
 
         if (contentType && contentType.includes('application/json')) {
           // Check for error or presigned URL
@@ -634,7 +515,7 @@ function App() {
           if (data.download_url) {
             const a = document.createElement('a')
             a.href = data.download_url
-            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+            a.download = data.filename || `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
             a.target = '_blank'
             document.body.appendChild(a)
             a.click()
@@ -646,7 +527,7 @@ function App() {
           const url = window.URL.createObjectURL(blob)
           const a = document.createElement('a')
           a.href = url
-          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_fluent.msh`
+          a.download = `${projectStatus?.filename?.split('.')[0] || 'mesh'}_${suffix}.${extension}`
           document.body.appendChild(a)
           a.click()
           a.remove()
@@ -654,11 +535,11 @@ function App() {
         }
       } else {
         const error = await response.json()
-        alert(error.error || 'Failed to export Fluent mesh')
+        alert(error.error || `Failed to export ${format} mesh`)
       }
     } catch (error) {
-      console.error('Failed to export Fluent mesh:', error)
-      alert('Failed to export Fluent mesh')
+      console.error(`Failed to export ${format} mesh:`, error)
+      alert(`Failed to export ${format} mesh`)
     } finally {
       setIsExportingAnsys(false)
     }
@@ -803,34 +684,50 @@ function App() {
                 <Download className="w-3 h-3" />
                 MSH
               </button>
-              <button
-                onClick={handleAnsysExport}
-                disabled={isExportingAnsys}
-                className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                  : 'text-blue-600 hover:text-blue-700'
-                  }`}
-              >
-                {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
-                ANSYS
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setIsAnsysDropdownOpen(!isAnsysDropdownOpen)}
+                  disabled={isExportingAnsys}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-[10px] font-bold rounded transition-colors ${isExportingAnsys
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'text-blue-600 hover:text-blue-700 hover:bg-blue-50'
+                    }`}
+                >
+                  {isExportingAnsys ? <Loader2 className="w-3 h-3 animate-spin" /> : <Layers className="w-3 h-3" />}
+                  ANSYS
+                  <ChevronDown className="w-3 h-3 ml-0.5 opacity-70" />
+                </button>
+
+                {isAnsysDropdownOpen && (
+                  <>
+                    {/* Click outside listener overlay */}
+                    <div className="fixed inset-0 z-40" onClick={() => setIsAnsysDropdownOpen(false)}></div>
+
+                    <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 w-48 text-xs py-1 overflow-hidden">
+                      <button
+                        onClick={() => { handleAnsysExport('fluent'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+                        Ansys Fluent (.msh)
+                      </button>
+                      <button
+                        onClick={() => { handleAnsysExport('mechanical'); setIsAnsysDropdownOpen(false) }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full bg-yellow-500"></div>
+                        Ansys Mechanical (.inp)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
 
         {/* Right side - user */}
         <div className="flex items-center gap-2 text-xs text-gray-600">
-          {/* Admin Panel Button - Only show for admin users */}
-          {user?.role === 'admin' && (
-            <button
-              onClick={() => setAdminPanelOpen(true)}
-              className="flex items-center gap-1.5 px-2 py-1 hover:bg-gray-100 rounded transition-colors text-gray-600 hover:text-blue-600"
-              title="Admin Panel"
-            >
-              <BarChart3 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Admin</span>
-            </button>
-          )}
           <User className="w-3.5 h-3.5" />
           <span>{user?.name || user?.email?.split('@')[0]}</span>
           <button
@@ -844,9 +741,6 @@ function App() {
       </header>
 
       {/* Main Content */}
-      {adminPanelOpen ? (
-        <AdminPanel onClose={() => setAdminPanelOpen(false)} />
-      ) : (
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Responsive Sidebar */}
         <div className={`${mode === 'batch' ? 'w-80 xl:w-96 min-w-[280px]' : 'w-56 min-w-[200px]'} max-w-[40vw] border-r border-gray-300 flex flex-col bg-gray-50 overflow-y-auto transition-all duration-300 flex-shrink-0`}>
@@ -855,7 +749,6 @@ function App() {
           {mode === 'batch' ? (
             <BatchMode
               onBatchComplete={(batch) => {
-                console.log('Batch completed:', batch)
                 setLogs(prev => [...prev, `[SUCCESS] Batch ${batch.name || batch.id.slice(0, 8)} completed!`])
               }}
               onLog={(msg) => setLogs(prev => [...prev, msg])}
@@ -1023,20 +916,7 @@ function App() {
                     Curvature-Adaptive
                   </label>
 
-                  {/* Fast Mode Toggle - Experimental */}
-                  <label className="flex items-center gap-2 text-gray-600 cursor-pointer text-xs mt-1" title="Uses SSH compute with optimized settings. Faster but experimental.">
-                    <input
-                      type="checkbox"
-                      checked={fastMode}
-                      onChange={(e) => setFastMode(e.target.checked)}
-                      className="accent-green-500"
-                      disabled={isGenerating}
-                    />
-                    <span className="flex items-center gap-1">
-                      ⚡ Fast Mode
-                      <span className="text-[9px] text-green-600 bg-green-100 px-1 py-0.5 rounded">BETA</span>
-                    </span>
-                  </label>
+
                 </div>
               </div>
 
@@ -1057,8 +937,8 @@ function App() {
                       <option value="sicn">SICN (Ideal=1)</option>
                       <option value="gamma">Gamma (Ideal=1)</option>
                       <option value="skewness">Skewness</option>
-                      <option value="aspectRatio">Aspect Ratio</option>
-                      <option value="minAngle">Minimum Angle</option>
+                      <option value="aspect_ratio">Aspect Ratio</option>
+                      <option value="min_angle">Minimum Angle</option>
                     </select>
                   </div>
                 </div>
@@ -1087,6 +967,8 @@ function App() {
                       Stop
                     </button>
                   )}
+
+
                 </div>
               )}
 
@@ -1096,7 +978,7 @@ function App() {
         </div>
 
         {/* Center Panel - Viewer + Console */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
           {/* 3D Viewer - Takes most of the space */}
           <div className="flex-1 relative min-h-0">
             <MeshViewer
@@ -1188,9 +1070,8 @@ function App() {
         </div>
 
         {/* Feedback Button - Fixed position */}
-        <FeedbackButton userEmail={user?.email} jobId={currentJobId} />
+        <FeedbackButton userEmail={user?.email} jobId={currentJobId || projectStatus?.latest_result?.job_id} />
       </div>
-      )}
     </div>
   )
 }

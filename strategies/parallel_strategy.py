@@ -324,14 +324,19 @@ def _execute_single_strategy_worker(
         score = _calculate_quality_score(metrics, config)
 
         # Serialize mesh data (for saving later)
-        # Serialize mesh data (for saving later)
         # FIX: In-Memory Data Transfer (Optimization)
-        # Try to use /dev/shm (RAM disk) on Linux/Mac if available
-        ram_disk_root = '/dev/shm'
-        if os.path.exists(ram_disk_root) and os.path.isdir(ram_disk_root):
-            temp_dir = ram_disk_root
+        # Try to use project's temp_meshes dir if available, otherwise fallback to system temp
+        project_root = Path(__file__).parent.parent
+        project_temp = project_root / "temp_meshes"
+        
+        if project_temp.exists():
+            temp_dir = str(project_temp)
         else:
-            temp_dir = tempfile.gettempdir()
+            ram_disk_root = '/dev/shm'
+            if os.path.exists(ram_disk_root) and os.path.isdir(ram_disk_root):
+                temp_dir = ram_disk_root
+            else:
+                temp_dir = tempfile.gettempdir()
             
         temp_mesh_path = os.path.join(temp_dir, f"temp_mesh_{strategy_name}_{os.getpid()}.msh")
         gmsh.write(temp_mesh_path)

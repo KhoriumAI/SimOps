@@ -121,14 +121,14 @@ export default function BatchDashboard({
                 </h3>
                 <div className="flex items-center gap-2 mt-1">
                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${job.quality_preset === 'coarse' ? 'bg-yellow-400/20 text-yellow-100' :
-                      job.quality_preset === 'fine' ? 'bg-purple-400/20 text-purple-100' :
-                        'bg-white/20 text-white'
+                    job.quality_preset === 'fine' ? 'bg-purple-400/20 text-purple-100' :
+                      'bg-white/20 text-white'
                     }`}>
                     {job.quality_preset?.toUpperCase()}
                   </span>
                   <span className={`px-2 py-0.5 rounded text-xs ${job.status === 'completed' ? 'bg-green-400/20 text-green-100' :
-                      job.status === 'failed' ? 'bg-red-400/20 text-red-100' :
-                        'bg-white/20'
+                    job.status === 'failed' ? 'bg-red-400/20 text-red-100' :
+                      'bg-white/20'
                     }`}>
                     {job.status}
                   </span>
@@ -158,8 +158,8 @@ export default function BatchDashboard({
               </div>
               <div className="text-center">
                 <div className={`text-2xl font-bold ${(metrics.sicn_avg || 0) >= 0.7 ? 'text-green-600' :
-                    (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
-                      'text-red-600'
+                  (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                    'text-red-600'
                   }`}>
                   {formatMetric(metrics.sicn_avg)}
                 </div>
@@ -195,8 +195,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
                         <span className={`font-mono ${(metrics.sicn_min || 0) >= 0.4 ? 'text-green-600' :
-                            (metrics.sicn_min || 0) >= 0.2 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.sicn_min || 0) >= 0.2 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.sicn_min)}
                         </span>
@@ -204,8 +204,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
                         <span className={`font-mono ${(metrics.sicn_avg || 0) >= 0.7 ? 'text-green-600' :
-                            (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.sicn_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.sicn_avg)}
                         </span>
@@ -213,8 +213,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
                         <span className={`font-mono ${(metrics.sicn_max || 0) >= 0.9 ? 'text-green-600' :
-                            (metrics.sicn_max || 0) >= 0.7 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.sicn_max || 0) >= 0.7 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.sicn_max)}
                         </span>
@@ -224,8 +224,8 @@ export default function BatchDashboard({
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div
                         className={`h-full ${(metrics.sicn_avg || 0) >= 0.7 ? 'bg-green-500' :
-                            (metrics.sicn_avg || 0) >= 0.4 ? 'bg-yellow-500' :
-                              'bg-red-500'
+                          (metrics.sicn_avg || 0) >= 0.4 ? 'bg-yellow-500' :
+                            'bg-red-500'
                           }`}
                         style={{ width: `${(metrics.sicn_avg || 0) * 100}%` }}
                       />
@@ -239,8 +239,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
                         <span className={`font-mono ${(metrics.gamma_min || 0) >= 0.5 ? 'text-green-600' :
-                            (metrics.gamma_min || 0) >= 0.3 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.gamma_min || 0) >= 0.3 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.gamma_min)}
                         </span>
@@ -248,8 +248,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
                         <span className={`font-mono ${(metrics.gamma_avg || 0) >= 0.7 ? 'text-green-600' :
-                            (metrics.gamma_avg || 0) >= 0.4 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.gamma_avg || 0) >= 0.4 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.gamma_avg)}
                         </span>
@@ -257,8 +257,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
                         <span className={`font-mono ${(metrics.gamma_max || 0) >= 0.9 ? 'text-green-600' :
-                            (metrics.gamma_max || 0) >= 0.7 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.gamma_max || 0) >= 0.7 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.gamma_max)}
                         </span>
@@ -267,8 +267,8 @@ export default function BatchDashboard({
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div
                         className={`h-full ${(metrics.gamma_avg || 0) >= 0.7 ? 'bg-green-500' :
-                            (metrics.gamma_avg || 0) >= 0.4 ? 'bg-yellow-500' :
-                              'bg-red-500'
+                          (metrics.gamma_avg || 0) >= 0.4 ? 'bg-yellow-500' :
+                            'bg-red-500'
                           }`}
                         style={{ width: `${(metrics.gamma_avg || 0) * 100}%` }}
                       />
@@ -282,8 +282,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
                         <span className={`font-mono ${(metrics.skewness_min || 0) <= 0.1 ? 'text-green-600' :
-                            (metrics.skewness_min || 0) <= 0.3 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.skewness_min || 0) <= 0.3 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.skewness_min)}
                         </span>
@@ -291,8 +291,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
                         <span className={`font-mono ${(metrics.skewness_avg || 0) <= 0.25 ? 'text-green-600' :
-                            (metrics.skewness_avg || 0) <= 0.5 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.skewness_avg || 0) <= 0.5 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.skewness_avg)}
                         </span>
@@ -300,8 +300,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
                         <span className={`font-mono ${(metrics.skewness_max || 0) <= 0.5 ? 'text-green-600' :
-                            (metrics.skewness_max || 0) <= 0.85 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.skewness_max || 0) <= 0.85 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.skewness_max)}
                         </span>
@@ -311,8 +311,8 @@ export default function BatchDashboard({
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div
                         className={`h-full ${(metrics.skewness_avg || 0) <= 0.25 ? 'bg-green-500' :
-                            (metrics.skewness_avg || 0) <= 0.5 ? 'bg-yellow-500' :
-                              'bg-red-500'
+                          (metrics.skewness_avg || 0) <= 0.5 ? 'bg-yellow-500' :
+                            'bg-red-500'
                           }`}
                         style={{ width: `${Math.min((metrics.skewness_avg || 0) * 100, 100)}%` }}
                       />
@@ -326,8 +326,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Min:</span>
                         <span className={`font-mono ${(metrics.aspect_ratio_min || 1) <= 1.5 ? 'text-green-600' :
-                            (metrics.aspect_ratio_min || 1) <= 2.5 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.aspect_ratio_min || 1) <= 2.5 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.aspect_ratio_min, 2)}
                         </span>
@@ -335,8 +335,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Avg:</span>
                         <span className={`font-mono ${(metrics.aspect_ratio_avg || 1) <= 2 ? 'text-green-600' :
-                            (metrics.aspect_ratio_avg || 1) <= 4 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.aspect_ratio_avg || 1) <= 4 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.aspect_ratio_avg, 2)}
                         </span>
@@ -344,8 +344,8 @@ export default function BatchDashboard({
                       <div className="flex justify-between">
                         <span className="text-gray-600">Max:</span>
                         <span className={`font-mono ${(metrics.aspect_ratio_max || 1) <= 5 ? 'text-green-600' :
-                            (metrics.aspect_ratio_max || 1) <= 10 ? 'text-yellow-600' :
-                              'text-red-600'
+                          (metrics.aspect_ratio_max || 1) <= 10 ? 'text-yellow-600' :
+                            'text-red-600'
                           }`}>
                           {formatMetric(metrics.aspect_ratio_max, 2)}
                         </span>
@@ -355,13 +355,62 @@ export default function BatchDashboard({
                     <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
                       <div
                         className={`h-full ${(metrics.aspect_ratio_avg || 1) <= 2 ? 'bg-green-500' :
-                            (metrics.aspect_ratio_avg || 1) <= 4 ? 'bg-yellow-500' :
-                              'bg-red-500'
+                          (metrics.aspect_ratio_avg || 1) <= 4 ? 'bg-yellow-500' :
+                            'bg-red-500'
                           }`}
                         style={{ width: `${Math.min(((metrics.aspect_ratio_avg || 1) - 1) / 9 * 100, 100)}%` }}
                       />
                     </div>
                   </div>
+
+                  {/* CFD Quality Section */}
+                  {metrics.cfd && (
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 col-span-2">
+                      <div className="flex items-center justify-between mb-3">
+                        <h5 className="text-xs font-semibold text-blue-800 flex items-center gap-1.5 uppercase tracking-wider">
+                          <Activity className="w-3.5 h-3.5" />
+                          CFD Quality Analysis
+                        </h5>
+                        <div className={`px-2 py-0.5 rounded text-[10px] font-bold ${metrics.cfd.cfd_ready ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                          {metrics.cfd.cfd_ready ? 'READY FOR CFD' : 'REVIEW REQUIRED'}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
+                        <div className="flex justify-between items-center py-1 border-b border-blue-100/50">
+                          <span className="text-blue-700/70">Max Non-Orthogonality:</span>
+                          <span className={`font-mono font-bold ${metrics.cfd.geometry_checks?.non_orthogonality?.max <= 65 ? 'text-green-600' : (metrics.cfd.geometry_checks?.non_orthogonality?.max <= 75 ? 'text-yellow-600' : 'text-red-600')}`}>
+                            {metrics.cfd.geometry_checks?.non_orthogonality?.max?.toFixed(1) || '0.0'}°
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center py-1 border-b border-blue-100/50">
+                          <span className="text-blue-700/70">CFD Skewness (Max):</span>
+                          <span className={`font-mono font-bold ${metrics.cfd.geometry_checks?.skewness?.ok ? 'text-green-600' : 'text-yellow-600'}`}>
+                            {metrics.cfd.geometry_checks?.skewness?.max?.toFixed(3) || '0.000'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center py-1 border-b border-blue-100/50">
+                          <span className="text-blue-700/70">Face Pyramids:</span>
+                          <span className={`font-bold ${metrics.cfd.geometry_checks?.face_pyramids?.ok ? 'text-green-600' : 'text-red-600'}`}>
+                            {metrics.cfd.geometry_checks?.face_pyramids?.ok ? 'PASS' : 'FAIL'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center py-1 border-b border-blue-100/50">
+                          <span className="text-blue-700/70">Boundary Openness:</span>
+                          <span className={`font-bold ${metrics.cfd.geometry_checks?.boundary_openness?.ok ? 'text-green-600' : 'text-yellow-600'}`}>
+                            {metrics.cfd.geometry_checks?.boundary_openness?.ok ? 'OK' : 'WARN'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {metrics.cfd.warnings?.length > 0 && (
+                        <div className="mt-3 text-[10px] text-yellow-700 bg-yellow-400/10 p-2 rounded border border-yellow-200">
+                          <div className="font-bold mb-1">Warnings:</div>
+                          {metrics.cfd.warnings.map((w, idx) => <div key={idx}>• {w}</div>)}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Additional Info */}
@@ -606,8 +655,8 @@ export default function BatchDashboard({
                           <tr
                             key={job.id}
                             className={`border-t border-gray-200 ${job.status === 'completed' || job.status === 'failed'
-                                ? 'cursor-pointer hover:bg-blue-50 transition-colors'
-                                : ''
+                              ? 'cursor-pointer hover:bg-blue-50 transition-colors'
+                              : ''
                               }`}
                             onClick={() => {
                               if (job.status === 'completed' || job.status === 'failed') {
@@ -618,8 +667,8 @@ export default function BatchDashboard({
                           >
                             <td className="py-1.5">
                               <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${job.quality_preset === 'coarse' ? 'bg-yellow-100 text-yellow-700' :
-                                  job.quality_preset === 'fine' ? 'bg-blue-100 text-blue-700' :
-                                    'bg-gray-100 text-gray-700'
+                                job.quality_preset === 'fine' ? 'bg-blue-100 text-blue-700' :
+                                  'bg-gray-100 text-gray-700'
                                 }`}>
                                 {job.quality_preset}
                               </span>
@@ -637,8 +686,8 @@ export default function BatchDashboard({
                               {job.element_count?.toLocaleString() || '-'}
                             </td>
                             <td className={`py-1.5 text-right ${sicnAvg >= 0.7 ? 'text-green-600' :
-                                sicnAvg >= 0.4 ? 'text-yellow-600' :
-                                  sicnAvg ? 'text-red-600' : 'text-gray-600'
+                              sicnAvg >= 0.4 ? 'text-yellow-600' :
+                                sicnAvg ? 'text-red-600' : 'text-gray-600'
                               }`}>
                               {sicnAvg?.toFixed(3) || '-'}
                             </td>
