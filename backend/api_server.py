@@ -477,8 +477,13 @@ def register_routes(app):
         DEV-ONLY: Trigger the happy path validation script.
         Returns immediately with a job ID, validation runs in background.
         """
-        # Only allow in development mode
-        if not app.config.get('FLASK_ENV') == 'development' and not os.environ.get('FLASK_DEBUG') == '1':
+        # Only allow in development mode or on development.khorium.ai
+        is_dev = (
+            app.config.get('FLASK_ENV') in ['development', 'dev'] or 
+            os.environ.get('FLASK_DEBUG') == '1' or
+            'development.khorium.ai' in request.host
+        )
+        if not is_dev:
             return jsonify({"error": "This endpoint is only available in development mode"}), 403
         
         import uuid
@@ -541,8 +546,13 @@ def register_routes(app):
         """
         DEV-ONLY: Get validation results by ID.
         """
-        # Only allow in development mode
-        if not app.config.get('FLASK_ENV') == 'development' and not os.environ.get('FLASK_DEBUG') == '1':
+        # Only allow in development mode or on development.khorium.ai
+        is_dev = (
+            app.config.get('FLASK_ENV') in ['development', 'dev'] or 
+            os.environ.get('FLASK_DEBUG') == '1' or
+            'development.khorium.ai' in request.host
+        )
+        if not is_dev:
             return jsonify({"error": "This endpoint is only available in development mode"}), 403
         
         result = _validation_results.get(validation_id)

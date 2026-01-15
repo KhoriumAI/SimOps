@@ -117,23 +117,28 @@ try:
     
     # Extract
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    node_coords = np.array(node_coords).reshape(-1, 3).tolist()
+    
+    # Map tag -> (x,y,z)
+    nodes = {}
+    for i, tag in enumerate(node_tags):
+        nodes[tag] = [node_coords[3*i], node_coords[3*i+1], node_coords[3*i+2]]
+
+    vertices = []
     
     # Get triangles
     elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2)
-    faces = []
-    
-    tag_to_idx = {tag: idx for idx, tag in enumerate(node_tags)}
     
     for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
-        if etype == 2: # Triangle
-             enodes = np.array(enodes).reshape(-1, 3)
-             for tri in enodes:
-                 faces.append([tag_to_idx[n] for n in tri])
+        if etype == 2: # Triangle (3 nodes)
+             for i in range(0, len(enodes), 3):
+                 n1, n2, n3 = enodes[i], enodes[i+1], enodes[i+2]
+                 vertices.extend(nodes[n1])
+                 vertices.extend(nodes[n2])
+                 vertices.extend(nodes[n3])
                  
     gmsh.finalize()
     
-    print(json.dumps({'success': True, 'vertices': node_coords, 'faces': faces}))
+    print(json.dumps({'success': True, 'vertices': vertices, 'numTriangles': len(vertices)//9}))
 except Exception as e:
     print(json.dumps({'success': False, 'error': str(e)}))
 """
