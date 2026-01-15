@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from './contexts/AuthContext'
 import MeshViewer from './components/MeshViewer'
 import FileUpload from './components/FileUpload'
@@ -8,6 +8,7 @@ import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
 import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
 import { API_BASE } from './config'
+import { useProjectWebSocket } from './hooks/useProjectWebSocket'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
@@ -67,7 +68,9 @@ function App() {
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false)
   const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
+  const currentJobIdRef = useRef(null)
 
 
 
@@ -364,6 +367,94 @@ function App() {
       setLogs(prev => [...prev, `[ERROR] Failed to load CAD preview: ${error.message}`])
     }
   }
+
+
+  // --- WebSocket Handlers ---
+  const handleLogLine = (message, timestamp) => {
+    // Helper to add logs and parse progress
+    setLogs(prev => [...prev, message])
+    parseProgressFromLogs([message])
+  }
+
+  const handleJobCompleted = async (data) => {
+    console.log('[WS] Job completed:', data)
+    setLogs(prev => [...prev, '[SUCCESS] Mesh generation completed!'])
+    setMeshProgress({ strategy: 100, '1d': 100, '2d': 100, '3d': 100, optimize: 100, netgen: 100, order2: 100, quality: 100 })
+
+    // Fetch final mesh
+    if (data.project_id) {
+      console.log('[WS] Fetching mesh data for completed job, project_id:', data.project_id)
+      try {
+        await fetchMeshData(data.project_id)
+        setColorMode('quality')
+      } catch (error) {
+        console.error('[WS] Error fetching mesh data:', error)
+        setLogs(prev => [...prev, '[ERROR] Failed to load mesh data. Please refresh the page.'])
+      }
+    }
+
+    // Save duration
+    if (meshStartTime) {
+      setLastMeshDuration(Date.now() - meshStartTime)
+    }
+    setMeshStartTime(null)
+    setIsPolling(false)
+
+    // Refresh project status
+    if (currentProject) {
+      try {
+        const response = await authFetch(`${API_BASE}/projects/${currentProject}/status`)
+        if (response.ok) {
+          const statusData = await response.json()
+          setProjectStatus(statusData)
+        }
+      } catch (e) { console.error(e) }
+    }
+  }
+
+  const handleJobFailed = (data) => {
+    console.log('[WS] Job failed:', data)
+    setLogs(prev => [...prev, `[ERROR] ${data.error || 'Mesh generation failed'}`])
+
+    if (meshStartTime) {
+      setLastMeshDuration(Date.now() - meshStartTime)
+    }
+    setMeshStartTime(null)
+    setIsPolling(false)
+  }
+
+  // Hook for WebSocket connection
+  const { subscribeToLogs, unsubscribeFromLogs } = useProjectWebSocket(
+    currentProject,
+    null, // onStatusUpdate - handled via job_completed/job_failed
+    handleLogLine,
+    handleJobCompleted,
+    handleJobFailed
+  )
+
+  // Subscribe to logs when job starts
+  useEffect(() => {
+    // Check for job_id from projectStatus (for Modal jobs or when status is updated)
+    const jobIdFromStatus = projectStatus?.latest_result?.modal_job_id || projectStatus?.latest_result?.job_id
+
+    // Also check if we have a currentJobId set directly (for local jobs or immediate subscription)
+    const jobIdToUse = currentJobId || jobIdFromStatus
+
+    if (currentProject && jobIdToUse) {
+      if (jobIdToUse !== currentJobIdRef.current) {
+        currentJobIdRef.current = jobIdToUse
+        subscribeToLogs(jobIdToUse)
+      }
+    }
+
+    return () => {
+      if (currentJobIdRef.current) {
+        unsubscribeFromLogs(currentJobIdRef.current)
+        currentJobIdRef.current = null
+      }
+    }
+  }, [currentProject, projectStatus?.latest_result?.modal_job_id, projectStatus?.latest_result?.job_id, currentJobId, subscribeToLogs, unsubscribeFromLogs])
+
 
   const handleFileUpload = async (file) => {
     const formData = new FormData()
