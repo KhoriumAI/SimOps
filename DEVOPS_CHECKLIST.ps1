@@ -122,7 +122,13 @@ function Test-PreCommit {
         Write-Host "  [WARN] No venv found, using system Python" -ForegroundColor Yellow
     }
     
-    # Check 1: Type Safety (mypy)
+    # Check 1: Database Connectivity & Initialization
+    Invoke-Check -Name "Database Connectivity & Initialization" -Check {
+        & $pythonCmd backend/ensure_db.py
+        if ($LASTEXITCODE -ne 0) { throw "Database initialization or connection failed" }
+    }
+
+    # Check 2: Type Safety (mypy)
     Invoke-Check -Name "Type Safety Check (mypy)" -Check {
         Push-Location backend
         try {
@@ -134,7 +140,7 @@ function Test-PreCommit {
         }
     }
     
-    # Check 2: Database Schema Sync (alembic)
+    # Check 3: Database Schema Sync (alembic)
     Invoke-Check -Name "Database Schema Sync (alembic check)" -Check {
         Push-Location backend
         try {
@@ -146,7 +152,7 @@ function Test-PreCommit {
         }
     }
     
-    # Check 3: Environment Variable Audit
+    # Check 4: Environment Variable Audit
     Invoke-Check -Name "Environment Variable Audit" -Check {
         & $pythonCmd scripts/check_env_vars.py
         if ($LASTEXITCODE -ne 0) { throw "env check failed" }

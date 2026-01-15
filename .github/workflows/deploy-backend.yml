@@ -119,6 +119,9 @@ jobs:
                 fi
             fi
 
+            echo "[DEPLOY] Initializing database..."
+            python backend/ensure_db.py || { echo "[ERROR] Database initialization failed"; exit 1; }
+
             # Make monitoring scripts executable
             chmod +x "$PROJECT_ROOT/scripts/monitor_disk_usage.py"
             chmod +x "$PROJECT_ROOT/scripts/monitor_s3_usage.py"
