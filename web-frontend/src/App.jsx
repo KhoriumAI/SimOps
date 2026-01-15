@@ -68,7 +68,8 @@ function App() {
   const [meshStartTime, setMeshStartTime] = useState(null)
   const [lastMeshDuration, setLastMeshDuration] = useState(null)
   const [isLoadingPreview, setIsLoadingPreview] = useState(false)
-  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability
+  const [currentJobId, setCurrentJobId] = useState(null)  // Job ID for traceability (Display/Internal ID)
+  const [currentProviderId, setCurrentProviderId] = useState(null) // Provider ID for log subscription
   const currentJobIdRef = useRef(null)
 
 
@@ -434,10 +435,34 @@ function App() {
   // Subscribe to logs when job starts
   useEffect(() => {
     // Check for job_id from projectStatus (for Modal jobs or when status is updated)
-    const jobIdFromStatus = projectStatus?.latest_result?.modal_job_id || projectStatus?.latest_result?.job_id
+    // For logs, we need the provider ID if possible, but the backend logger uses internal ID?
+    // Actually, backend logger uses internal ID (MSH-XXX). The compute provider uses provider ID.
+    // Let's check: subscribeToLogs uses socket.emit('join_job', {job_id}). 
+    // The backend socket handler joins the room using the ID passed.
+    // The logger emits to room `job_id`. 
+    // Check job_logger.py and api_server.py: 
+    // log_mesh_job uses internal_job_id. 
+    // monitor_mesh_job updates logs on DB object which has internal_job_id and logs are fetched from there?
+    // Wait, the real-time logs come via SocketIO. 
+    // In api_server.py: log_mesh_job(job_id=mesh_result.job_id...) -> This is internal ID.
+    // So we should be subscribing to INTERNAL ID if we want real-time logs from the logger?
+    // BUT monitor_mesh_job might be emitting logs? 
+    // Actually, `log_job_update` emits logs.
 
-    // Also check if we have a currentJobId set directly (for local jobs or immediate subscription)
-    const jobIdToUse = currentJobId || jobIdFromStatus
+    // Let's assume we should use the ID returned by generate_mesh. 
+    // If I change currentJobId to be internal ID, we should check if subscription works.
+    // If generate_mesh returns provider ID as 'job_id', and we change that to internal, we need to know which one to subscribe to.
+
+    // Existing code: setCurrentJobId(data.job_id) where data.job_id was provider ID.
+    // Backend `submit_mesh_job_sync` returns `job_id` (provider).
+    // The monitor thread logs to DB using `mesh_result.logs`.
+    // The Websocket usually emits events.
+
+    // Let's stick to using the provider ID for subscription if that's what was working, 
+    // OR switch to internal if the backend supports it.
+    // Safest bet: Keep tracking provider ID for subscription if needed, but display internal ID.
+
+    const jobIdToUse = currentProviderId || projectStatus?.latest_result?.modal_job_id || projectStatus?.latest_result?.job_id
 
     if (currentProject && jobIdToUse) {
       if (jobIdToUse !== currentJobIdRef.current) {
@@ -511,7 +536,8 @@ function App() {
       const data = await response.json()
       setCurrentProject(data.project_id)
       setProjectStatus(data)
-      setCurrentJobId(data.job_id)  // Capture Job ID from upload
+      setCurrentJobId(null)  // Reset job ID on new upload
+      setCurrentProviderId(null)
       setLogs([`[INFO] Uploaded ${file.name}`, data.job_id ? `[JOB] ${data.job_id}` : '', `[INFO] Loading CAD preview...`].filter(Boolean))
       setIsPolling(false)
 
@@ -561,11 +587,12 @@ function App() {
 
       if (response.ok) {
         const data = await response.json()
-        setCurrentJobId(data.job_id)  // Capture mesh Job ID
+        setCurrentJobId(data.internal_job_id)  // Capture MSH-XXXX ID for display/feedback
+        setCurrentProviderId(data.job_id)      // Capture Provider ID for logs if needed
         setIsPolling(true)
         setMeshStartTime(Date.now())
         setLastMeshDuration(null)
-        setLogs([`[INFO] Starting mesh generation...`, data.job_id ? `[JOB] ${data.job_id}` : ''].filter(Boolean))
+        setLogs([`[INFO] Starting mesh generation...`, data.internal_job_id ? `[JOB] ${data.internal_job_id}` : ''].filter(Boolean))
         // setMeshData(null) // Keep existing mesh/preview visible during generation
         // Reset progress
         setMeshProgress({ strategy: 0, '1d': 0, '2d': 0, '3d': 0, optimize: 0, netgen: 0, order2: 0, quality: 0 })

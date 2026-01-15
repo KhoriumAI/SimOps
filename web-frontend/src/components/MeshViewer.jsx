@@ -1544,7 +1544,7 @@ export default function MeshViewer({
             }}
             dpr={[1, 1.5]} // Limit pixel ratio for performance
             performance={{ min: 0.5 }} // Adaptive performance
-            className="!pt-8"
+            className="w-full h-full"
           >
             <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
             <OrbitControls

@@ -228,7 +228,14 @@ def submit_mesh_job_sync(app, project_id: str, quality_params: dict = None, use_
         elif use_modal_override is False:
             mode = 'LOCAL'
         else:
-            mode = app.config.get('COMPUTE_MODE', 'LOCAL')
+            # First check for explicit COMPUTE_MODE
+            mode = app.config.get('COMPUTE_MODE')
+            if not mode:
+                # Fallback to USE_MODAL_COMPUTE flag
+                if app.config.get('USE_MODAL_COMPUTE', False):
+                    mode = 'CLOUD'
+                else:
+                    mode = 'LOCAL'
             
         # Get Provider
         provider = get_compute_provider(mode)
@@ -241,8 +248,17 @@ def submit_mesh_job_sync(app, project_id: str, quality_params: dict = None, use_
         output_folder.mkdir(parents=True, exist_ok=True)
         
         if mode == 'CLOUD':
-            if not input_path.startswith('s3://'):
+            if not project.filepath.startswith('s3://'):
                 raise ValueError("Cloud compute requires S3 storage. Please upload to S3 first.")
+            
+            # Diagnostic Check for Modal
+            from modal_client import modal_client
+            diag = modal_client.diagnose()
+            if not diag['ready']:
+                 issues = "; ".join(diag['issues'])
+                 print(f"[MESH GEN ERROR] Modal Misconfiguration: {issues}")
+                 raise RuntimeError(f"Cloud Compute Unavailable: {issues}")
+
         else:
             # Local Mode: Need file on disk
             if input_path.startswith('s3://'):
@@ -287,11 +303,12 @@ def submit_mesh_job_sync(app, project_id: str, quality_params: dict = None, use_
         db.session.commit()
         result_id = mesh_result.id
         
+            
         # Track cancellation handle
         with generation_lock:
             running_processes[project_id] = {'provider': provider, 'job_id': job_id}
             
-        return job_id, mode, result_id
+        return job_id, mode, result_id, internal_job_id
 
 
 def monitor_mesh_job(app, project_id, job_id, mode, result_id):
@@ -399,7 +416,7 @@ def monitor_mesh_job(app, project_id, job_id, mode, result_id):
                         project.status = 'completed'
                     else:
                         project.status = 'error'
-                        project.error_message = res.get('error', 'Unknown local error')
+                        project.error_message = res.get('error') or res.get('message') or 'Unknown local error'
                 
                 final_msg = f"[{datetime.now().strftime('%H:%M:%S')}] [SUCCESS] Meshing completed in {time.time()-start_time:.1f}s"
                 logs.append(final_msg)
@@ -761,7 +778,7 @@ def register_routes(app):
 
         try:
             # Synchronously submit job to get ID
-            job_id, mode, result_id = submit_mesh_job_sync(app, project_id, quality_params, use_modal_override)
+            job_id, mode, result_id, internal_job_id = submit_mesh_job_sync(app, project_id, quality_params, use_modal_override)
             
             # Start background monitoring
             thread = Thread(target=monitor_mesh_job, args=(app, project_id, job_id, mode, result_id))
@@ -771,7 +788,8 @@ def register_routes(app):
             return jsonify({
                 "message": "Mesh generation started", 
                 "project_id": project_id,
-                "job_id": job_id
+                "job_id": job_id,
+                "internal_job_id": internal_job_id
             })
             
         except Exception as e:

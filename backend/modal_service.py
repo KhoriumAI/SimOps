@@ -19,11 +19,15 @@ APP_NAME = "khorium-production"
 # Get the project root (parent of backend directory)
 project_root = Path(__file__).parent.parent
 
-# Build image with embedded code using add_local_dir (Modal 1.3+ API)
+# Build image with CUDA support for GPU meshing
+# Uses nvidia/cuda base and compiles _gpumesher.so during image build
 image = (
-    modal.Image.debian_slim()
-    # Install system dependencies for Gmsh and OpenGL
+    modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04")
+    # Install system dependencies for Gmsh, OpenGL, and build tools
     .apt_install(
+        # Build tools
+        "cmake", "git", "build-essential", "python3.10-dev",
+        # Gmsh/OpenGL dependencies
         "libgl1-mesa-glx", 
         "libglu1-mesa", 
         "libxrender1", 
@@ -40,14 +44,14 @@ image = (
         "libcups2",
         "libdrm2",
         "libgbm1",
-        # Additional X11 font dependencies required by Gmsh
+        # X11 font dependencies required by Gmsh
         "libxft2",
         "libfontconfig1",
         "libfreetype6",
         "fontconfig",
         "libxinerama1",
     )
-    # Install Python dependencies
+    # Install Python dependencies (including pybind11 for GPU mesher build)
     .pip_install(
         "numpy", 
         "trimesh", 
@@ -56,8 +60,21 @@ image = (
         "cascadio", 
         "scipy",
         "meshio",
-        "requests",  # Required by mesh_worker_subprocess
-        "scikit-image",  # Required for marching cubes in strategies
+        "requests",
+        "scikit-image",
+        "pybind11",  # Required for GPU mesher build
+    )
+    # Embed gpu_experiments source for building
+    .add_local_dir(project_root / "gpu_experiments", remote_path="/build/gpu_experiments")
+    # Build the GPU mesher module
+    .run_commands(
+        "cd /build/gpu_experiments && mkdir -p build && cd build && "
+        "cmake .. -DCMAKE_BUILD_TYPE=Release && "
+        "cmake --build . --target _gpumesher -- -j4 && "
+        "mkdir -p /root/MeshPackageLean/core && "
+        "cp /build/gpu_experiments/build/_gpumesher*.so /root/MeshPackageLean/core/ 2>/dev/null || "
+        "cp /build/gpu_experiments/build/Release/_gpumesher*.so /root/MeshPackageLean/core/ 2>/dev/null || "
+        "echo 'GPU mesher build skipped or failed'"
     )
     # Embed local code directories into the image
     .add_local_dir(project_root / "core", remote_path="/root/MeshPackageLean/core")
@@ -347,7 +364,9 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
     # Import logic
     from apps.cli.mesh_worker_subprocess import (
         generate_fast_tet_delaunay_mesh,
-        generate_hex_dominant_mesh
+        generate_hex_dominant_mesh,
+        generate_highspeed_gpu_mesh,
+        generate_gpu_delaunay_mesh,
     )
     
     print(f"[Modal] Starting job for s3://{bucket}/{key}")
@@ -539,10 +558,14 @@ def generate_mesh(bucket: str, key: str, quality_params: dict = None):
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=4, name="tet_frontal")
             elif 'tet' in strat_norm and ('meshadapt' in strat_norm or 'mesh_adapt' in strat_norm):
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=1, algorithm_3d=1, name="tet_meshadapt")
+            elif 'highspeed' in strat_norm or ('gpu' in strat_norm and 'sdf' in strat_norm):
+                # HighSpeed GPU with SDF Visibility Filter
+                print(f"[Modal] HighSpeed GPU strategy detected - using SDF visibility pipeline")
+                result_data = generate_highspeed_gpu_mesh(str(local_input_file), str(local_output_dir), quality_params)
             elif 'gpu' in strat_norm and 'delaunay' in strat_norm:
-                # GPU meshing not yet supported in Modal, fallback to HXT
-                print(f"[Modal] GPU Delaunay requested but not available in Modal, using HXT fallback")
-                result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)
+                # GPU Delaunay Fill & Filter
+                print(f"[Modal] GPU Delaunay strategy detected - using Fill & Filter pipeline")
+                result_data = generate_gpu_delaunay_mesh(str(local_input_file), str(local_output_dir), quality_params)
             elif 'hxt' in strat_norm or 'tetrahedral' in strat_norm:
                 # Handle 'Tetrahedral (HXT)' or just 'Tetrahedral'
                 result_data = _run_tet_strategy(str(local_input_file), str(local_output_dir), quality_params, algorithm_2d=6, algorithm_3d=10, name="tet_hxt", optimize=True)

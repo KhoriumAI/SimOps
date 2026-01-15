@@ -25,7 +25,7 @@ const getWsUrl = () => {
 
     const hostname = window.location.hostname;
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
-        return 'http://localhost:5000';
+        return 'http://127.0.0.1:5000';
     }
     if (hostname.includes('s3-website') || hostname.includes('amazonaws.com')) {
         return 'https://development.khorium.ai';

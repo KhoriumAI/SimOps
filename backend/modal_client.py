@@ -98,6 +98,11 @@ class ModalClient:
             return call
         except Exception as e:
             print(f"[ModalClient ERROR] Failed to spawn mesh job: {e}")
+            # Run diagnostics to give better error message
+            diag = self.diagnose()
+            if not diag['ready']:
+                issues = "; ".join(diag['issues'])
+                raise RuntimeError(f"Modal Configuration Error: {issues}") from e
             raise
 
     def spawn_preview_job(self, bucket: str, key: str):
@@ -148,6 +153,44 @@ class ModalClient:
     def is_available(self):
         """Check if Modal is available for use"""
         return MODAL_AVAILABLE
+
+    def diagnose(self) -> Dict[str, Any]:
+        """
+        Run diagnostic checks for Modal configuration.
+        Returns a dictionary with status and issues.
+        """
+        issues = []
+        
+        # Check 1: Package installation
+        if not MODAL_AVAILABLE:
+            issues.append("Modal python package is not installed.")
+            return {"ready": False, "issues": issues}
+
+        # Check 2: Configuration / Token
+        try:
+            # modal.config.config is available even without auth, 
+            # but let's check if we can actually get a token id
+            # Note: accessing private/internal config might be unstable if Modal changes API
+            # Better check: Look for environment variables which are standard for staging
+            token_id = os.environ.get('MODAL_TOKEN_ID')
+            token_secret = os.environ.get('MODAL_TOKEN_SECRET')
+            
+            if not token_id or not token_secret:
+                # Fallback: check if local config file exists (dev environment)
+                # But for staging server, we strictly expect env vars usually
+                import modal.config
+                if not modal.config.config.get("token_id"):
+                     issues.append("Missing Modal credentials (MODAL_TOKEN_ID/SECRET not found in env).")
+            
+        except Exception as e:
+            issues.append(f"Failed to check configuration: {str(e)}")
+
+        return {
+            "ready": len(issues) == 0,
+            "issues": issues,
+            "modal_version": modal.__version__ if MODAL_AVAILABLE else "N/A"
+        }
+
 
 
 # Global instance
