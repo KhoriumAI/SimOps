@@ -1,0 +1,60 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+
+// ========================================================================== //
+// Golden CHT Case - chtMultiRegionFoam                                       //
+// Master Template for Conjugate Heat Transfer Simulations                    //
+// ========================================================================== //
+
+application     chtMultiRegionFoam;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+// VARIABLE: endTime - Number of iterations to run
+// Default: 100 for validation, increase for production runs
+endTime         100;
+
+deltaT          1;
+
+writeControl    timeStep;
+
+// VARIABLE: writeInterval - How often to write results
+writeInterval   10;
+
+purgeWrite      0;
+
+writeFormat     ascii;
+
+writePrecision  8;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+// Function objects for monitoring
+functions
+{
+    fieldMinMax
+    {
+        type            fieldMinMax;
+        libs            ("libfieldFunctionObjects.so");
+        fields          (T);
+        mode            magnitude;
+        writeControl    timeStep;
+        writeInterval   1;
+    }
+}

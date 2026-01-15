@@ -1,0 +1,92 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      blockMeshDict;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Background Mesh                                          //
+// Covers test geometry: chip (10x10x2mm) on heatsink (30x30x5mm)             //
+// With surrounding air domain                                                 //
+// ========================================================================== //
+
+// VARIABLE: convertToMeters - Scale factor from mesh units to meters
+// Default: 0.001 = millimeters to meters
+convertToMeters 0.001;
+
+// Domain bounds: 100x100x50mm centered around geometry
+// VARIABLE: Modify these for different geometry sizes
+vertices
+(
+    (-50 -50 -10)   // 0: min corner
+    ( 50 -50 -10)   // 1
+    ( 50  50 -10)   // 2
+    (-50  50 -10)   // 3
+    (-50 -50  40)   // 4: max corner
+    ( 50 -50  40)   // 5
+    ( 50  50  40)   // 6
+    (-50  50  40)   // 7
+);
+
+blocks
+(
+    // Coarse background mesh - snappyHexMesh will refine
+    // VARIABLE: Cell counts (20 20 10) = ~4000 background cells
+    hex (0 1 2 3 4 5 6 7) (20 20 10) simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 4 7 3)  // -X face
+        );
+    }
+    
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (1 2 6 5)  // +X face
+        );
+    }
+    
+    topWall
+    {
+        type wall;
+        faces
+        (
+            (4 5 6 7)  // +Z face (top)
+        );
+    }
+    
+    bottomWall
+    {
+        type wall;
+        faces
+        (
+            (0 3 2 1)  // -Z face (bottom)
+        );
+    }
+    
+    frontAndBack
+    {
+        type wall;
+        faces
+        (
+            (0 1 5 4)  // -Y face
+            (3 7 6 2)  // +Y face
+        );
+    }
+);

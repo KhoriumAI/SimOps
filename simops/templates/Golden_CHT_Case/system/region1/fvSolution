@@ -1,0 +1,11 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system/region1";
+    object      fvSolution;
+}
+
+// Inherit from main fvSolution for fluid region
+#include "../fvSolution"

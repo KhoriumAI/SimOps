@@ -1,0 +1,47 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant/solid_chip";
+    object      thermophysicalProperties;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Chip (Silicon) Thermophysical Properties                 //
+// ========================================================================== //
+
+thermoType
+{
+    type            heSolidThermo;
+    mixture         pureMixture;
+    transport       constIso;
+    thermo          hConst;
+    equationOfState rhoConst;
+    specie          specie;
+    energy          sensibleEnthalpy;
+}
+
+mixture
+{
+    specie
+    {
+        molWeight   28.09;  // Silicon molecular weight [kg/kmol]
+    }
+    thermodynamics
+    {
+        // VARIABLE: Cp - Specific heat of silicon
+        Cp          700;    // [J/kg/K]
+        Hf          0;
+    }
+    transport
+    {
+        // VARIABLE: kappa - Thermal conductivity
+        kappa       148;    // [W/m/K] for pure silicon
+    }
+    equationOfState
+    {
+        // VARIABLE: rho - Density
+        rho         2330;   // [kg/m^3]
+    }
+}

@@ -1,0 +1,44 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant/region1";
+    object      thermophysicalProperties;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Fluid (Air) Thermophysical Properties                    //
+// OpenFOAM 13 compatible format                                               //
+// ========================================================================== //
+
+thermoType
+{
+    type            heRhoThermo;
+    mixture         pureMixture;
+    transport       sutherland;       // OpenFOAM 13: use sutherland instead of const
+    thermo          hConst;
+    equationOfState perfectGas;
+    specie          specie;
+    energy          sensibleEnthalpy;
+}
+
+mixture
+{
+    specie
+    {
+        molWeight   28.9;  // Air molecular weight [kg/kmol]
+    }
+    thermodynamics
+    {
+        // VARIABLE: Cp - Specific heat of air
+        Cp          1005;   // [J/kg/K]
+        Hf          0;
+    }
+    transport
+    {
+        // Sutherland parameters for air
+        As          1.458e-6;   // Sutherland constant
+        Ts          110.4;      // Sutherland temperature [K]
+    }
+}

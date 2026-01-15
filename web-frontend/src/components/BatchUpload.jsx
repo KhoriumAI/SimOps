@@ -7,11 +7,11 @@ import { Upload, File, X, FolderOpen, CheckCircle, AlertCircle, Loader2 } from '
  * Multi-file dropzone for batch mesh generation.
  * Supports drag & drop of multiple files or folder selection.
  */
-export default function BatchUpload({ 
-  onFilesSelected, 
-  maxFiles = 10, 
+export default function BatchUpload({
+  onFilesSelected,
+  maxFiles = 10,
   maxFileSize = 500 * 1024 * 1024,  // 500MB
-  disabled = false 
+  disabled = false
 }) {
   const [isDragging, setIsDragging] = useState(false)
   const [selectedFiles, setSelectedFiles] = useState([])
@@ -19,19 +19,19 @@ export default function BatchUpload({
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
-  const allowedExtensions = ['.step', '.stp', '.stl']
+  const allowedExtensions = ['.step', '.stp', '.stl', '.msh', '.vtk', '.vtu', '.inp', '.unv']
 
   const validateFile = useCallback((file) => {
     const ext = file.name.toLowerCase().slice(file.name.lastIndexOf('.'))
-    
+
     if (!allowedExtensions.includes(ext)) {
       return { valid: false, error: `Invalid type: ${ext}` }
     }
-    
+
     if (file.size > maxFileSize) {
       return { valid: false, error: `Too large: ${(file.size / (1024 * 1024)).toFixed(1)}MB` }
     }
-    
+
     return { valid: true }
   }, [maxFileSize])
 
@@ -192,7 +192,7 @@ export default function BatchUpload({
         <div className="text-center">
           <Upload className={`w-10 h-10 mx-auto mb-3 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`} />
           <p className="text-sm font-medium text-gray-700">
-            Drop CAD files here
+            Drop CAD or Mesh files here
           </p>
           <p className="text-xs text-gray-500 mt-1">
             or click to browse
@@ -215,7 +215,7 @@ export default function BatchUpload({
             </button>
           </div>
           <p className="text-xs text-gray-400 mt-3">
-            Max {maxFiles} files • STEP, STP, STL • Up to {maxFileSize / (1024 * 1024)}MB each
+            Max {maxFiles} files • CAD (STEP, STL) or Mesh (MSH, VTK, INP) • Up to {maxFileSize / (1024 * 1024)}MB each
           </p>
         </div>
       </div>

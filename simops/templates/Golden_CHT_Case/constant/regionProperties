@@ -1,0 +1,21 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      regionProperties;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Region Properties                                        //
+// Defines fluid and solid regions for chtMultiRegionFoam / foamMultiRun      //
+// NOTE: splitMeshRegions created region1 (fluid) and solid_heatsink          //
+// ========================================================================== //
+
+// OpenFOAM Foundation v13+ format: regions(type (list of region names))
+regions
+(
+    fluid       (region1)
+    solid       (solid_heatsink)
+);

@@ -1,0 +1,36 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0/solid_heatsink";
+    object      T;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Heatsink Temperature Field                               //
+// ========================================================================== //
+
+dimensions      [0 0 0 1 0 0 0];
+
+// VARIABLE: internalField - Initial heatsink temperature [K]
+// Set higher to represent heat source
+internalField   uniform 350;
+
+boundaryField
+{
+    // Interface to fluid region (region1) - coupled heat transfer
+    solid_heatsink_to_region1
+    {
+        type            compressible::turbulentTemperatureCoupledBaffleMixed;
+        Tnbr            T;
+        kappaMethod     solidThermo;
+        value           $internalField;
+    }
+    
+    // All other boundaries - adiabatic (default)
+    ".*"
+    {
+        type            zeroGradient;
+    }
+}

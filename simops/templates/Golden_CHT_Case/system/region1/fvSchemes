@@ -1,0 +1,11 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system/region1";
+    object      fvSchemes;
+}
+
+// Inherit from main fvSchemes for fluid region
+#include "../fvSchemes"

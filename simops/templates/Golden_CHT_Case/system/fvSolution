@@ -1,0 +1,84 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Global fvSolution                                        //
+// Robust solver settings for stability over performance                      //
+// ========================================================================== //
+
+solvers
+{
+    "rho.*"
+    {
+        solver          diagonal;
+    }
+
+    p_rgh
+    {
+        solver          GAMG;
+        tolerance       1e-7;
+        relTol          0.01;
+        smoother        GaussSeidel;
+        nPreSweeps      0;
+        nPostSweeps     2;
+        cacheAgglomeration true;
+        agglomerator    faceAreaPair;
+        nCellsInCoarsestLevel 10;
+        mergeLevels     1;
+    }
+
+    p_rghFinal
+    {
+        $p_rgh;
+        relTol          0;
+    }
+
+    "(U|h|e|k|epsilon|omega)"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-7;
+        relTol          0.1;
+    }
+
+    "(U|h|e|k|epsilon|omega)Final"
+    {
+        $U;
+        relTol          0;
+    }
+}
+
+PIMPLE
+{
+    // STABILITY: Lower momentum predictor for robustness
+    momentumPredictor   no;
+    
+    nCorrectors         2;
+    nNonOrthogonalCorrectors 1;
+    
+    // Under-relaxation for stability
+    pRefCell            0;
+    pRefValue           0;
+}
+
+relaxationFactors
+{
+    // STABILITY: Conservative under-relaxation
+    fields
+    {
+        rho             1.0;
+        p_rgh           0.7;
+    }
+    equations
+    {
+        U               0.5;
+        h               0.5;
+        "(k|epsilon|omega)" 0.5;
+    }
+}

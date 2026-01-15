@@ -308,6 +308,10 @@ class ThermalSimulationTemplate:
     min_temp_limit_c: float = -40.0
     max_gradient_c_mm: Optional[float] = None
     
+    # Contact settings
+    use_tie_contacts: bool = False
+    tie_tolerance: float = 0.001  # 1mm default tolerance for finding contact pairs
+    
     # Mesh requirements
     min_elements: int = 1000
     max_aspect_ratio: float = 20.0
@@ -354,6 +358,10 @@ class ThermalSimulationTemplate:
                 'min_temp_limit_c': self.min_temp_limit_c,
                 'max_gradient_c_mm': self.max_gradient_c_mm,
             },
+            'contact': {
+                'use_tie_contacts': self.use_tie_contacts,
+                'tie_tolerance': self.tie_tolerance,
+            },
             'mesh_requirements': {
                 'min_elements': self.min_elements,
                 'max_aspect_ratio': self.max_aspect_ratio,
@@ -392,6 +400,8 @@ class ThermalSimulationTemplate:
             max_temp_limit_c=pass_fail.get('max_temp_limit_c', 150.0),
             min_temp_limit_c=pass_fail.get('min_temp_limit_c', -40.0),
             max_gradient_c_mm=pass_fail.get('max_gradient_c_mm'),
+            use_tie_contacts=data.get('contact', {}).get('use_tie_contacts', False),
+            tie_tolerance=data.get('contact', {}).get('tie_tolerance', 0.001),
             min_elements=mesh_req.get('min_elements', 1000),
             max_aspect_ratio=mesh_req.get('max_aspect_ratio', 20.0),
         )

@@ -1,0 +1,47 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0/solid_chip";
+    object      T;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Chip Temperature Field                                   //
+// Heat source region with fixed power density                                //
+// ========================================================================== //
+
+dimensions      [0 0 0 1 0 0 0];
+
+// VARIABLE: internalField - Initial chip temperature [K]
+// Set slightly higher to represent heat generation
+internalField   uniform 350;
+
+boundaryField
+{
+    // Interface to heatsink - coupled
+    "solid_chip_to_solid_heatsink"
+    {
+        type            compressible::turbulentTemperatureCoupledBaffleMixed;
+        Tnbr            T;
+        kappaMethod     solidThermo;
+        value           $internalField;
+    }
+    
+    // Interface to fluid (if direct contact)
+    "solid_chip_to_fluid"
+    {
+        type            compressible::turbulentTemperatureCoupledBaffleMixed;
+        Tnbr            T;
+        kappaMethod     solidThermo;
+        value           $internalField;
+    }
+    
+    // Top surface - can be set as heat source (fixed gradient) or fixed temp
+    // VARIABLE: chipTopTemperature - Can modify for heat source
+    ".*"
+    {
+        type            zeroGradient;
+    }
+}

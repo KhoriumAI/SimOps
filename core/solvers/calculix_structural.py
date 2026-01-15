@@ -135,7 +135,7 @@ class CalculiXStructuralAdapter(ISolver):
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
             node_coords = node_coords.reshape(-1, 3) * scale
             
-            # ANTIGRAVITY FIX: Sort by tag to ensure alignment with _parse_frd (which uses sorted keys)
+            # FIX: Sort by tag to ensure alignment with _parse_frd (which uses sorted keys)
             p = np.argsort(node_tags)
             node_tags = node_tags[p]
             node_coords = node_coords[p]
@@ -365,7 +365,7 @@ class CalculiXStructuralAdapter(ISolver):
                              f.write(str(tag))
                         f.write("\n")
                         
-                        # ANTIGRAVITY FIX: Use Rigid Body to distribute load and avoid singularities
+                        # FIX: Use Rigid Body to distribute load and avoid singularities
                         # User Request: "apply stresses to areas... otherwise it will go to infinity"
                         f.write("*RIGID BODY, NSET=N_Tip, REF NODE=999999\n")
                         
@@ -395,7 +395,7 @@ class CalculiXStructuralAdapter(ISolver):
                 f.write("U, S, E, RF\n") # Displacement, Stress, Strain, Reaction Forces
                 f.write("*END STEP\n")
                 
-            # ANTIGRAVITY FIX: Remap element node tags to 0-based indices for visualization
+            # FIX: Remap element node tags to 0-based indices for visualization
             # The all_elems_ret array contains [Tag, Node1, Node2...] where Nodes are 1-based Tags.
             # We need them to be indices into the node_coords array.
             
@@ -455,7 +455,7 @@ class CalculiXStructuralAdapter(ISolver):
                 # ...
                 try:
                     nid = int(line[3:13])
-                    # ANTIGRAVITY FIX: Robust Parser for Windows CalculiX Binary
+                    # FIX: Robust Parser for Windows CalculiX Binary
                     # 1. Slice line[13:] to completely exclude Node ID column (prevent ID-Value merge)
                     # 2. Use Regex to handle overlapping columns with 3-digit exponents (e.g. 1.0E+004-1.0E-003)
                     import re

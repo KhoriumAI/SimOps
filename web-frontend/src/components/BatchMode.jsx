@@ -3,10 +3,11 @@ import { useAuth } from '../contexts/AuthContext'
 import BatchUpload from './BatchUpload'
 import BatchDashboard from './BatchDashboard'
 import { useBatchPolling } from '../hooks/useWebSocket'
-import { 
+import {
   Plus, List, Settings, ToggleLeft, ToggleRight,
-  Loader2, RefreshCw, ChevronDown
+  Loader2, RefreshCw, ChevronDown, Thermometer
 } from 'lucide-react'
+import PhysicsTemplateSelector from './PhysicsTemplateSelector'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -22,13 +23,13 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
  */
 export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const { authFetch } = useAuth()
-  
+
   // Helper to add log
   const addLog = (message) => {
     console.log('[Batch]', message)
     onLog?.(message)
   }
-  
+
   // State
   const [currentBatchId, setCurrentBatchId] = useState(null)
   const [batches, setBatches] = useState([])
@@ -37,7 +38,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const [isUploading, setIsUploading] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  
+
   // Settings
   const [batchName, setBatchName] = useState('')
   const [meshIndependence, setMeshIndependence] = useState(false)
@@ -45,7 +46,13 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   const [curvatureAdaptive, setCurvatureAdaptive] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [meshStrategies, setMeshStrategies] = useState(['Tet (Fast)', 'Tetrahedral (Delaunay)'])
-  
+
+  // Template state
+  const [simulationTemplates, setSimulationTemplates] = useState([])
+  const [selectedTemplate, setSelectedTemplate] = useState(null)
+  const [templateConfig, setTemplateConfig] = useState(null)
+  const [useTemplate, setUseTemplate] = useState(true)
+
   // Fetch available strategies from API
   useEffect(() => {
     const fetchStrategies = async () => {
@@ -65,9 +72,25 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
     fetchStrategies()
   }, [authFetch])
 
+  // Fetch templates
+  useEffect(() => {
+    const fetchTemplates = async () => {
+      try {
+        const response = await authFetch(`${API_BASE}/simulation-templates`)
+        if (response.ok) {
+          const data = await response.json()
+          setSimulationTemplates(data.templates || [])
+        }
+      } catch (err) {
+        console.error('Failed to fetch templates:', err)
+      }
+    }
+    fetchTemplates()
+  }, [authFetch])
+
   // Polling for current batch
   const { batch, refresh, startPolling, stopPolling } = useBatchPolling(
-    currentBatchId, 
+    currentBatchId,
     authFetch,
     2000
   )
@@ -95,7 +118,7 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
   // Start/stop polling based on batch status
   useEffect(() => {
     const finalStates = ['completed', 'failed', 'cancelled']
-    
+
     if (batch?.status === 'processing') {
       startPolling()
     } else if (finalStates.includes(batch?.status)) {
@@ -128,381 +151,417 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
         body: JSON.stringify({
           name: batchDisplayName,
           mesh_independence: meshIndependence,
-          mesh_strategy: meshStrategy,
-          curvature_adaptive: curvatureAdaptive
+          mesh_strategy: useTemplate && selectedTemplate
+            ? `template:${selectedTemplate.id}`
+            : meshStrategy,
+          curvature_adaptive: curvatureAdaptive,
+          template_config: useTemplate && selectedTemplate ? templateConfig : null
         })
       })
+    })
 
-      if (!createResponse.ok) {
-        const err = await createResponse.json()
-        throw new Error(err.error || 'Failed to create batch')
-      }
-
-      const { batch_id } = await createResponse.json()
-      addLog(`[BATCH] Created "${batchDisplayName}" (ID: ${batch_id.slice(0, 8)})`)
-
-      // 2. Upload files FIRST (before setting currentBatchId)
-      setIsUploading(true)
-      addLog(`[BATCH] Uploading ${selectedFiles.length} files...`)
-      selectedFiles.forEach(f => addLog(`   • ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`))
-      
-      const formData = new FormData()
-      selectedFiles.forEach(file => formData.append('files', file))
-
-      const uploadResponse = await authFetch(`${API_BASE}/batch/${batch_id}/upload`, {
-        method: 'POST',
-        body: formData
-      })
-
-      if (!uploadResponse.ok) {
-        const err = await uploadResponse.json()
-        throw new Error(err.error || 'Failed to upload files')
-      }
-
-      const uploadResult = await uploadResponse.json()
-      addLog(`[BATCH] ✓ Upload complete: ${uploadResult.uploaded} files, ${uploadResult.total_jobs} jobs created`)
-      if (meshIndependence) {
-        addLog(`[BATCH] Independence study: Coarse + Medium + Fine = ${uploadResult.total_jobs} mesh jobs`)
-      }
-
-      // 3. NOW set currentBatchId so the polling hook fetches the batch WITH files
-      setCurrentBatchId(batch_id)
-
-      // 4. Refresh batch list
-      await loadBatches()
-      addLog(`[BATCH] Ready to start processing. Click "Start" to begin.`)
-
-      // Clear form but keep the batch selected
-      setSelectedFiles([])
-      setBatchName('')
-
-    } catch (err) {
-      console.error('Create batch error:', err)
-      addLog(`[ERROR] Batch creation failed: ${err.message}`)
-      setError(err.message)
-    } finally {
-      setIsCreating(false)
-      setIsUploading(false)
+    if (!createResponse.ok) {
+      const err = await createResponse.json()
+      throw new Error(err.error || 'Failed to create batch')
     }
-  }
 
-  // Start batch processing
-  const handleStart = async () => {
-    if (!currentBatchId) return
-    setIsLoading(true)
-    addLog(`[BATCH] Starting mesh generation...`)
+    const { batch_id } = await createResponse.json()
+    addLog(`[BATCH] Created "${batchDisplayName}" (ID: ${batch_id.slice(0, 8)})`)
 
-    try {
-      const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/start`, {
-        method: 'POST'
-      })
+    // 2. Upload files FIRST (before setting currentBatchId)
+    setIsUploading(true)
+    addLog(`[BATCH] Uploading ${selectedFiles.length} files...`)
+    selectedFiles.forEach(f => addLog(`   • ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`))
 
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.error || 'Failed to start batch')
-      }
+    const formData = new FormData()
+    selectedFiles.forEach(file => formData.append('files', file))
 
-      addLog(`[BATCH] ▶ Processing started (parallel limit: ${batch?.parallel_limit || 6})`)
-      startPolling()
-    } catch (err) {
-      addLog(`[ERROR] Failed to start: ${err.message}`)
-      setError(err.message)
-    } finally {
-      setIsLoading(false)
+    const uploadResponse = await authFetch(`${API_BASE}/batch/${batch_id}/upload`, {
+      method: 'POST',
+      body: formData
+    })
+
+    if (!uploadResponse.ok) {
+      const err = await uploadResponse.json()
+      throw new Error(err.error || 'Failed to upload files')
     }
-  }
 
-  // Cancel batch
-  const handleCancel = async () => {
-    if (!currentBatchId) return
-    setIsLoading(true)
-    addLog(`[BATCH] Cancelling batch processing...`)
-
-    try {
-      const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/cancel`, {
-        method: 'POST'
-      })
-
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.error || 'Failed to cancel batch')
-      }
-
-      addLog(`[BATCH] ⏹ Processing cancelled`)
-      await refresh()
-    } catch (err) {
-      addLog(`[ERROR] Cancel failed: ${err.message}`)
-      setError(err.message)
-    } finally {
-      setIsLoading(false)
+    const uploadResult = await uploadResponse.json()
+    addLog(`[BATCH] ✓ Upload complete: ${uploadResult.uploaded} files, ${uploadResult.total_jobs} jobs created`)
+    if (meshIndependence) {
+      addLog(`[BATCH] Independence study: Coarse + Medium + Fine = ${uploadResult.total_jobs} mesh jobs`)
     }
+
+    // 3. NOW set currentBatchId so the polling hook fetches the batch WITH files
+    setCurrentBatchId(batch_id)
+
+    // 4. Refresh batch list
+    await loadBatches()
+    addLog(`[BATCH] Ready to start processing. Click "Start" to begin.`)
+
+    // Clear form but keep the batch selected
+    setSelectedFiles([])
+    setBatchName('')
+
+  } catch (err) {
+    console.error('Create batch error:', err)
+    addLog(`[ERROR] Batch creation failed: ${err.message}`)
+    setError(err.message)
+  } finally {
+    setIsCreating(false)
+    setIsUploading(false)
   }
+}
 
-  // Download batch results
-  const handleDownload = async () => {
-    if (!currentBatchId) return
-    setIsLoading(true)
-    addLog(`[BATCH] Preparing download...`)
+// Start batch processing
+const handleStart = async () => {
+  if (!currentBatchId) return
+  setIsLoading(true)
+  addLog(`[BATCH] Starting mesh generation...`)
 
-    try {
-      const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/download`)
-      
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.error || 'Failed to download')
-      }
+  try {
+    const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/start`, {
+      method: 'POST'
+    })
 
-      const blob = await response.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      const filename = `batch_${currentBatchId.slice(0, 8)}.zip`
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
-      addLog(`[BATCH] ✓ Downloaded ${filename}`)
-    } catch (err) {
-      addLog(`[ERROR] Download failed: ${err.message}`)
-      setError(err.message)
-    } finally {
-      setIsLoading(false)
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.error || 'Failed to start batch')
     }
+
+    addLog(`[BATCH] ▶ Processing started (parallel limit: ${batch?.parallel_limit || 6})`)
+    startPolling()
+  } catch (err) {
+    addLog(`[ERROR] Failed to start: ${err.message}`)
+    setError(err.message)
+  } finally {
+    setIsLoading(false)
   }
+}
 
-  // Delete batch
-  const handleDelete = async () => {
-    if (!currentBatchId) return
-    if (!confirm('Delete this batch and all its files?')) return
+// Cancel batch
+const handleCancel = async () => {
+  if (!currentBatchId) return
+  setIsLoading(true)
+  addLog(`[BATCH] Cancelling batch processing...`)
 
-    setIsLoading(true)
-    addLog(`[BATCH] Deleting batch...`)
+  try {
+    const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/cancel`, {
+      method: 'POST'
+    })
 
-    try {
-      const response = await authFetch(`${API_BASE}/batch/${currentBatchId}`, {
-        method: 'DELETE'
-      })
-
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.error || 'Failed to delete batch')
-      }
-
-      addLog(`[BATCH] 🗑 Batch deleted`)
-      setCurrentBatchId(null)
-      await loadBatches()
-    } catch (err) {
-      addLog(`[ERROR] Delete failed: ${err.message}`)
-      setError(err.message)
-    } finally {
-      setIsLoading(false)
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.error || 'Failed to cancel batch')
     }
+
+    addLog(`[BATCH] ⏹ Processing cancelled`)
+    await refresh()
+  } catch (err) {
+    addLog(`[ERROR] Cancel failed: ${err.message}`)
+    setError(err.message)
+  } finally {
+    setIsLoading(false)
   }
+}
 
-  return (
-    <div className="h-full flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="px-3 py-2 border-b border-gray-200 bg-gray-50">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-800">Batch Processing</h2>
-          <button
-            onClick={loadBatches}
-            className="p-1 hover:bg-gray-200 rounded text-gray-500"
-            title="Refresh"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
+// Download batch results
+const handleDownload = async () => {
+  if (!currentBatchId) return
+  setIsLoading(true)
+  addLog(`[BATCH] Preparing download...`)
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
-        {/* Error Banner */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-2 text-xs text-red-600">
-            {error}
-            <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
-          </div>
-        )}
+  try {
+    const response = await authFetch(`${API_BASE}/batch/${currentBatchId}/download`)
 
-        {/* New Batch Form */}
-        {!currentBatchId && (
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-            <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
-              <h3 className="text-xs font-medium text-gray-700">Create New Batch</h3>
-            </div>
-            
-            <div className="p-3 space-y-3">
-              {/* Batch Name */}
-              <div>
-                <label className="text-[10px] uppercase text-gray-500 mb-1 block">Batch Name (optional)</label>
-                <input
-                  type="text"
-                  value={batchName}
-                  onChange={(e) => setBatchName(e.target.value)}
-                  placeholder="e.g., CFD Study - Iteration 1"
-                  className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.error || 'Failed to download')
+    }
 
-              {/* Mesh Independence Toggle */}
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <p className="text-xs font-medium text-gray-700">Mesh Independence Study</p>
-                  <p className="text-[10px] text-gray-500">Generate Coarse, Medium, Fine for each file</p>
-                </div>
-                <button
-                  onClick={() => setMeshIndependence(!meshIndependence)}
-                  className={`p-1 rounded transition-colors ${meshIndependence ? 'text-blue-600' : 'text-gray-400'}`}
-                >
-                  {meshIndependence 
-                    ? <ToggleRight className="w-8 h-8" />
-                    : <ToggleLeft className="w-8 h-8" />
-                  }
-                </button>
-              </div>
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const filename = `batch_${currentBatchId.slice(0, 8)}.zip`
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+    addLog(`[BATCH] ✓ Downloaded ${filename}`)
+  } catch (err) {
+    addLog(`[ERROR] Download failed: ${err.message}`)
+    setError(err.message)
+  } finally {
+    setIsLoading(false)
+  }
+}
 
-              {/* Advanced Settings */}
-              <div>
-                <button
-                  onClick={() => setShowSettings(!showSettings)}
-                  className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-800"
-                >
-                  <Settings className="w-3 h-3" />
-                  Advanced Settings
-                  <ChevronDown className={`w-3 h-3 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
-                </button>
-                
-                {showSettings && (
-                  <div className="mt-2 p-2 bg-gray-50 rounded space-y-2">
-                    <div>
-                      <label className="text-[10px] uppercase text-gray-500 mb-1 block">Strategy</label>
-                      <select
-                        value={meshStrategy}
-                        onChange={(e) => setMeshStrategy(e.target.value)}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      >
-                        {meshStrategies.map(s => (
-                          <option key={s} value={s}>{s}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <label className="flex items-center gap-2 text-xs text-gray-600">
-                      <input
-                        type="checkbox"
-                        checked={curvatureAdaptive}
-                        onChange={(e) => setCurvatureAdaptive(e.target.checked)}
-                        className="accent-blue-500"
-                      />
-                      Curvature-Adaptive
-                    </label>
-                  </div>
-                )}
-              </div>
+// Delete batch
+const handleDelete = async () => {
+  if (!currentBatchId) return
+  if (!confirm('Delete this batch and all its files?')) return
 
-              {/* File Upload */}
-              <BatchUpload
-                onFilesSelected={setSelectedFiles}
-                maxFiles={10}
-                maxFileSize={500 * 1024 * 1024}
-                disabled={isCreating || isUploading}
-              />
+  setIsLoading(true)
+  addLog(`[BATCH] Deleting batch...`)
 
-              {/* Create Button */}
-              <button
-                onClick={createBatch}
-                disabled={selectedFiles.length === 0 || isCreating || isUploading}
-                className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
-                  selectedFiles.length > 0 && !isCreating
-                    ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                    : 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                }`}
-              >
-                {isCreating || isUploading ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    {isUploading ? 'Uploading...' : 'Creating...'}
-                  </>
-                ) : (
-                  <>
-                    <Plus className="w-3.5 h-3.5" />
-                    Create Batch ({selectedFiles.length} files)
-                    {meshIndependence && ` → ${selectedFiles.length * 3} jobs`}
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
+  try {
+    const response = await authFetch(`${API_BASE}/batch/${currentBatchId}`, {
+      method: 'DELETE'
+    })
 
-        {/* Current Batch Dashboard */}
-        {currentBatchId && batch && (
-          <BatchDashboard
-            batch={batch}
-            onStart={handleStart}
-            onCancel={handleCancel}
-            onDownload={handleDownload}
-            onDelete={handleDelete}
-            onFileSelect={onFileSelect}
-            isLoading={isLoading}
-          />
-        )}
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.error || 'Failed to delete batch')
+    }
 
-        {/* Loading state while batch data is being fetched */}
-        {currentBatchId && !batch && (
-          <div className="bg-white rounded-lg border border-gray-200 p-6 flex flex-col items-center justify-center">
-            <Loader2 className="w-6 h-6 animate-spin text-blue-500 mb-2" />
-            <p className="text-xs text-gray-500">Loading batch...</p>
-          </div>
-        )}
+    addLog(`[BATCH] 🗑 Batch deleted`)
+    setCurrentBatchId(null)
+    await loadBatches()
+  } catch (err) {
+    addLog(`[ERROR] Delete failed: ${err.message}`)
+    setError(err.message)
+  } finally {
+    setIsLoading(false)
+  }
+}
 
-        {/* Back to New Batch */}
-        {currentBatchId && (
-          <button
-            onClick={() => setCurrentBatchId(null)}
-            className="w-full px-3 py-2 text-xs text-blue-600 hover:bg-blue-50 rounded transition-colors flex items-center justify-center gap-1"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Create New Batch
-          </button>
-        )}
-
-        {/* Recent Batches */}
-        {batches.length > 0 && !currentBatchId && (
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-            <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
-              <List className="w-3.5 h-3.5 text-gray-500" />
-              <h3 className="text-xs font-medium text-gray-700">Recent Batches</h3>
-            </div>
-            <div className="divide-y divide-gray-100 max-h-48 overflow-y-auto">
-              {batches.map((b) => (
-                <button
-                  key={b.id}
-                  onClick={() => setCurrentBatchId(b.id)}
-                  className="w-full px-3 py-2 text-left hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-gray-800 truncate">
-                      {b.name || `Batch ${b.id.slice(0, 8)}`}
-                    </span>
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      b.status === 'completed' ? 'bg-green-100 text-green-600' :
-                      b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
-                      b.status === 'failed' ? 'bg-red-100 text-red-600' :
-                      'bg-gray-100 text-gray-600'
-                    }`}>
-                      {b.status}
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-gray-500 mt-0.5">
-                    {b.total_files} files • {b.completed_jobs}/{b.total_jobs} jobs
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+return (
+  <div className="h-full flex flex-col overflow-hidden">
+    {/* Header */}
+    <div className="px-3 py-2 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-800">Batch Processing</h2>
+        <button
+          onClick={loadBatches}
+          className="p-1 hover:bg-gray-200 rounded text-gray-500"
+          title="Refresh"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+        </button>
       </div>
     </div>
+
+    <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      {/* Error Banner */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-2 text-xs text-red-600">
+          {error}
+          <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
+        </div>
+      )}
+
+      {/* New Batch Form */}
+      {!currentBatchId && (
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
+            <h3 className="text-xs font-medium text-gray-700">Create New Batch</h3>
+          </div>
+
+          <div className="p-3 space-y-3">
+            {/* Batch Name */}
+            <div>
+              <label className="text-[10px] uppercase text-gray-500 mb-1 block">Batch Name (optional)</label>
+              <input
+                type="text"
+                value={batchName}
+                onChange={(e) => setBatchName(e.target.value)}
+                placeholder="e.g., CFD Study - Iteration 1"
+                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+          </div>
+
+          {/* Template Selection vs Manual Settings Toggle */}
+          <div className="bg-gray-100 p-1 rounded-lg flex text-xs mb-3">
+            <button
+              onClick={() => setUseTemplate(true)}
+              className={`flex-1 py-1.5 px-3 rounded-md font-medium transition-all ${useTemplate ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+            >
+              <div className="flex items-center justify-center gap-1.5">
+                <Thermometer className="w-3.5 h-3.5" />
+                Physics Template
+              </div>
+            </button>
+            <button
+              onClick={() => setUseTemplate(false)}
+              className={`flex-1 py-1.5 px-3 rounded-md font-medium transition-all ${!useTemplate ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+            >
+              <div className="flex items-center justify-center gap-1.5">
+                <Settings className="w-3.5 h-3.5" />
+                Manual Mesh Settings
+              </div>
+            </button>
+          </div>
+
+          {/* Template Selector */}
+          {useTemplate && simulationTemplates.length > 0 && (
+            <div className="mb-3">
+              <PhysicsTemplateSelector
+                templates={simulationTemplates}
+                selectedTemplate={selectedTemplate}
+                onSelect={(template) => {
+                  setSelectedTemplate(template)
+                  setTemplateConfig(template.config)
+                  // Auto-set useful defaults based on template type if needed
+                }}
+                onConfigChange={setTemplateConfig}
+              />
+            </div>
+          )}
+
+          {/* Manual Settings (only if not using template) */}
+          {(!useTemplate) && (
+            <div>
+              <div className="p-2 bg-gray-50 rounded space-y-2 border border-gray-100">
+                <div>
+                  <label className="text-[10px] uppercase text-gray-500 mb-1 block">Strategy</label>
+                  <select
+                    value={meshStrategy}
+                    onChange={(e) => setMeshStrategy(e.target.value)}
+                    className="w-full px-2 py-1 text-xs border border-gray-300 rounded bg-white"
+                  >
+                    {meshStrategies.map(s => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Common Settings */}
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="text-xs font-medium text-gray-700">Mesh Independence Study</p>
+              <p className="text-[10px] text-gray-500">Generate Coarse, Medium, Fine for each file</p>
+            </div>
+            <button
+              onClick={() => setMeshIndependence(!meshIndependence)}
+              className={`p-1 rounded transition-colors ${meshIndependence ? 'text-blue-600' : 'text-gray-400'}`}
+            >
+              {meshIndependence
+                ? <ToggleRight className="w-8 h-8" />
+                : <ToggleLeft className="w-8 h-8" />
+              }
+            </button>
+          </div>
+
+        </div>
+
+              {/* File Upload */}
+      <BatchUpload
+        onFilesSelected={setSelectedFiles}
+        maxFiles={10}
+        maxFileSize={500 * 1024 * 1024}
+        disabled={isCreating || isUploading}
+      />
+
+      {/* Create Button */}
+      <button
+        onClick={createBatch}
+        disabled={selectedFiles.length === 0 || isCreating || isUploading}
+        className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${selectedFiles.length > 0 && !isCreating
+            ? 'bg-blue-600 hover:bg-blue-700 text-white'
+            : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+          }`}
+      >
+        {isCreating || isUploading ? (
+          <>
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {isUploading ? 'Uploading...' : 'Creating...'}
+          </>
+        ) : (
+          <>
+            <Plus className="w-3.5 h-3.5" />
+            Create Batch ({selectedFiles.length} files)
+            {meshIndependence && ` → ${selectedFiles.length * 3} jobs`}
+          </>
+        )}
+      </button>
+    </div>
+  </div>
+)}
+
+{/* Current Batch Dashboard */ }
+{
+  currentBatchId && batch && (
+    <BatchDashboard
+      batch={batch}
+      onStart={handleStart}
+      onCancel={handleCancel}
+      onDownload={handleDownload}
+      onDelete={handleDelete}
+      onFileSelect={onFileSelect}
+      isLoading={isLoading}
+    />
+  )
+}
+
+{/* Loading state while batch data is being fetched */ }
+{
+  currentBatchId && !batch && (
+    <div className="bg-white rounded-lg border border-gray-200 p-6 flex flex-col items-center justify-center">
+      <Loader2 className="w-6 h-6 animate-spin text-blue-500 mb-2" />
+      <p className="text-xs text-gray-500">Loading batch...</p>
+    </div>
+  )
+}
+
+{/* Back to New Batch */ }
+{
+  currentBatchId && (
+    <button
+      onClick={() => setCurrentBatchId(null)}
+      className="w-full px-3 py-2 text-xs text-blue-600 hover:bg-blue-50 rounded transition-colors flex items-center justify-center gap-1"
+    >
+      <Plus className="w-3.5 h-3.5" />
+      Create New Batch
+    </button>
+  )
+}
+
+{/* Recent Batches */ }
+{
+  batches.length > 0 && !currentBatchId && (
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+        <List className="w-3.5 h-3.5 text-gray-500" />
+        <h3 className="text-xs font-medium text-gray-700">Recent Batches</h3>
+      </div>
+      <div className="divide-y divide-gray-100 max-h-48 overflow-y-auto">
+        {batches.map((b) => (
+          <button
+            key={b.id}
+            onClick={() => setCurrentBatchId(b.id)}
+            className="w-full px-3 py-2 text-left hover:bg-gray-50 transition-colors"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-gray-800 truncate">
+                {b.name || `Batch ${b.id.slice(0, 8)}`}
+              </span>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${b.status === 'completed' ? 'bg-green-100 text-green-600' :
+                  b.status === 'processing' ? 'bg-blue-100 text-blue-600' :
+                    b.status === 'failed' ? 'bg-red-100 text-red-600' :
+                      'bg-gray-100 text-gray-600'
+                }`}>
+                {b.status}
+              </span>
+            </div>
+            <div className="text-[10px] text-gray-500 mt-0.5">
+              {b.total_files} files • {b.completed_jobs}/{b.total_jobs} jobs
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+      </div >
+    </div >
   )
 }

@@ -1,0 +1,158 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      snappyHexMeshDict;
+}
+
+// ========================================================================== //
+// Golden CHT Case - snappyHexMeshDict                                        //
+// TUNED FOR DIRTY CAD: High nRelaxIter, loose tolerances                     //
+// ========================================================================== //
+
+castellatedMesh true;
+snap            true;
+addLayers       false;  // Disable layers for stability
+
+geometry
+{
+    // VARIABLE: STL geometry files - Replace with actual CAD files
+    heatsink
+    {
+        type triSurfaceMesh;
+        file "heatsink.stl";
+    }
+    
+    chip
+    {
+        type triSurfaceMesh;
+        file "chip.stl";
+    }
+}
+
+
+castellatedMeshControls
+{
+    // STABILITY: Generous cell limits
+    maxLocalCells       200000;
+    maxGlobalCells      5000000;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.10;
+    nCellsBetweenLevels 4;  // More cells between levels = smoother
+
+    // Features - using implicit snapping for dirty CAD
+    features
+    (
+        // Empty = implicit feature detection
+    );
+
+    refinementSurfaces
+    {
+        heatsink
+        {
+            level (2 3);
+            
+            // Create cell zone for solid region
+            cellZone        solid_heatsink;
+            cellZoneInside  inside;
+            faceZone        heatsink_interface;
+        }
+        
+        chip
+        {
+            level (3 4);  // Higher refinement for chip
+            
+            cellZone        solid_chip;
+            cellZoneInside  inside;
+            faceZone        chip_interface;
+        }
+    }
+
+    // STABILITY: Moderate feature angle
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {
+        // Optional: Add refinement boxes here
+    }
+
+    // VARIABLE: locationInMesh - Point guaranteed to be in fluid region
+    // Must be OUTSIDE all solid geometry STLs, coordinates in METERS
+    locationInMesh (0 0 0.025);  // Above the heatsink/chip (25mm = 0.025m)
+
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    // STABILITY: Higher iterations for dirty geometry
+    nSmoothPatch        5;      // More smoothing passes
+    tolerance           2.0;    // Looser snap tolerance
+    nSolveIter          100;    // More solver iterations
+    
+    // KEY STABILITY SETTING: nRelaxIter 5+ for dirty CAD
+    nRelaxIter          5;
+    
+    nFeatureSnapIter    15;     // More feature snapping iterations
+    
+    // Implicit feature snapping (more robust)
+    implicitFeatureSnap     true;
+    explicitFeatureSnap     false;
+    multiRegionFeatureSnap  true;  // Enable for multi-region
+}
+
+addLayersControls
+{
+    // Disabled for stability - enable for production
+    relativeSizes       true;
+    layers
+    {
+    }
+    expansionRatio      1.2;
+    finalLayerThickness 0.5;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+    nRelaxIter          5;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals      3;
+    nSmoothThickness    10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle  90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter          50;
+}
+
+meshQualityControls
+{
+    // STABILITY: Relaxed quality thresholds for dirty CAD
+    maxNonOrtho         70;     // Default 65, relaxed
+    maxBoundarySkewness 25;     // Default 20, relaxed
+    maxInternalSkewness 5;      // Default 4, relaxed
+    maxConcave          85;     // Default 80, relaxed
+    
+    minVol              1e-13;
+    minTetQuality       1e-15;  // Very permissive
+    minArea             -1;
+    minTwist            0.01;   // Slightly relaxed
+    minDeterminant      0.001;
+    minFaceWeight       0.02;
+    minVolRatio         0.01;
+    minTriangleTwist    -1;
+    
+    nSmoothScale        4;
+    errorReduction      0.75;
+    
+    // Relaxation for snapping
+    relaxed
+    {
+        maxNonOrtho     75;
+    }
+}
+
+mergeTolerance 1e-6;
+
+debug 0;

@@ -198,7 +198,7 @@ class CalculiXAdapter(ISolver):
             
             # Ensure Unique Connectivity (Crucial for CalculiX shell normal estimation)
             # Ensure Unique Connectivity (Crucial for CalculiX shell normal estimation)
-            # ANTIGRAVITY FIX: Bypassed sorting logic to preserve winding order.
+            # FIX: Bypassed sorting logic to preserve winding order.
             # Gmsh getElements returns correct topology; sorting destroys it.
             if tri3_list:
                 tri3_elems = np.vstack(tri3_list)
@@ -469,7 +469,7 @@ class CalculiXAdapter(ISolver):
                      f.write(f"E_Vol, BF, {bf_val:g}\n")
                      logger.info(f"   [Physics] Applied Volumetric Heat: {heat_load}W -> BF={bf_val:g}")
                 f.write("*BOUNDARY\n")
-                # ANTIGRAVITY FIX: ALL temperature inputs are in CELSIUS.
+                # FIX: ALL temperature inputs are in CELSIUS.
                 # Check multiple key aliases for heat source temperature
                 t_hot_in = config.get("heat_source_temperature")
                 if t_hot_in is None:
@@ -611,7 +611,7 @@ class CalculiXAdapter(ISolver):
                 f.write("NT\n")
                 f.write("*END STEP\n")
             
-            # ANTIGRAVITY FIX: Remap element node tags to 0-based indices
+            # FIX: Remap element node tags to 0-based indices
             # The all_elems array contains [Tag, Node1, Node2...] where Nodes are 1-based Tags.
             # We need them to be indices into the node_coords array.
             

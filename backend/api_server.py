@@ -406,6 +406,43 @@ def register_routes(app):
             'default': 'Tet (Fast)'
         })
 
+    @app.route('/api/simulation-templates', methods=['GET'])
+    def get_simulation_templates():
+        """
+        Return available physics simulation templates (Physics Cards).
+        Used by the frontend to display template selection UI.
+        """
+        try:
+            from core.templates.simulation_templates import TEMPLATE_LIBRARY, MATERIAL_LIBRARY, list_materials
+            
+            templates = []
+            for key, template in TEMPLATE_LIBRARY.items():
+                templates.append({
+                    'id': key,
+                    'name': template.name,
+                    'description': template.description,
+                    'solver': template.solver,
+                    'material': template.material,
+                    'steady_state': template.steady_state,
+                    'max_temp_limit_c': template.max_temp_limit_c,
+                    'config': template.to_config_dict(),
+                    'inputs': [
+                        {'key': 'hot_surface_temp_c', 'label': 'Heat Source (°C)', 'type': 'number', 'default': template.hot_surface_temp_c},
+                        {'key': 'ambient_temp_c', 'label': 'Ambient Temp (°C)', 'type': 'number', 'default': template.ambient_temp_c},
+                        {'key': 'convection_coeff', 'label': 'Convection (W/m²K)', 'type': 'number', 'default': template.convection_coeff},
+                        {'key': 'material', 'label': 'Material', 'type': 'select', 'options': list(MATERIAL_LIBRARY.keys()), 'default': template.material},
+                    ]
+                })
+            
+            return jsonify({
+                'templates': templates,
+                'materials': list_materials(),
+                'featured': ['electronics_cooling', 'heat_sink', 'led_housing']
+            })
+        except ImportError as e:
+            return jsonify({'error': f'Failed to load templates: {str(e)}'}), 500
+
+
     @app.route('/api/upload', methods=['POST'])
     @jwt_required()
     def upload_cad_file():

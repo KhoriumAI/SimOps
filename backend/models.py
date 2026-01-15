@@ -453,10 +453,89 @@ def create_batch_jobs_for_file(batch_file, batch, mesh_independence=False):
     """
     jobs = []
     
+    # Check if file is already a mesh
+    mesh_extensions = ['msh', 'vtk', 'vtu', 'inp', 'unv']
+    if batch_file.file_type.lower() in mesh_extensions:
+        # Create a single 'imported' job
+        job = BatchJob(
+            batch_id=batch.id,
+            file_id=batch_file.id,
+            quality_preset='imported',
+            mesh_strategy='imported',
+            target_elements=0,
+            max_element_size=0,
+            curvature_adaptive=False,
+            status='completed',
+            progress=100,
+            completed_at=datetime.utcnow(),
+            output_path=batch_file.storage_path, # Use original file
+            output_filename=batch_file.original_filename,
+            output_file_size=batch_file.file_size
+        )
+        db.session.add(job)
+        jobs.append(job)
+        return jobs
+
     if mesh_independence:
         presets = ['coarse', 'medium', 'fine']
     else:
         presets = ['medium']
+        
+    # Check for template config
+    template_config = None
+    if batch.mesh_strategy and batch.mesh_strategy.startswith('template:'):
+        try:
+            import json
+            from storage import get_storage
+            
+            storage = get_storage()
+            config_filename = f"batch_{batch.id}_config.json"
+            
+            # Try to read config file
+            # In local storage, we can just check if file exists
+            # In S3, we'd need to try/except
+            # Since get_storage provides file_exists, use that
+            # Note: file_exists expects full path usually, but for S3 it handles key logic internally?
+            # LocalStorage.file_exists checks path. S3Storage checks key.
+            # But keys are constructed with user_email/file_type.
+            # In save_batch, we used user.email and file_type='config'.
+            
+            # Need user email to reconstruct path
+            user = User.query.get(batch.user_id)
+            if user:
+                # Reconstruct key/path logic. This is brittle but avoiding full dependency
+                # Better to use storage.get_file assuming we know how it was saved
+                # LocalStorage: base_path / filename. 
+                # S3Storage: user_email / 'config' / filename
+                
+                # Check LocalStorage implementation:
+                # save_file ignores user_email/file_type in LocalStorage!
+                # It just saves to base_path / filename.
+                # So we can just ask for filename in get_file IF checks pass.
+                
+                # Let's try to get the file content directly
+                # For S3, we need user_email and file_type
+                try:
+                    # We need to construct the filepath/key that was used for saving
+                    # S3: user_email/config/filename
+                    # Local: filename
+                    
+                    # This logic SHOULD be in storage backend, but get_file takes a single path
+                    # Let's try to construct it based on expected behavior
+                    
+                    if current_app.config.get('USE_S3'):
+                        file_path = f"{user.email}/config/{config_filename}"
+                    else:
+                        file_path = str(Path(current_app.config['UPLOAD_FOLDER']) / config_filename)
+                        
+                    file_content = storage.get_file(file_path)
+                    template_config = json.loads(file_content)
+                    # print(f"Loaded config for batch {batch.id}")
+                except Exception:
+                    # Maybe stored flat?
+                    pass
+        except Exception as e:
+            pass # Ignore errors, fall back to defaults
     
     for preset_name in presets:
         preset = MESH_PRESETS[preset_name]
@@ -464,10 +543,13 @@ def create_batch_jobs_for_file(batch_file, batch, mesh_independence=False):
             batch_id=batch.id,
             file_id=batch_file.id,
             quality_preset=preset_name,
+            # If using template, mesh_strategy string is "template:xxx", passed as-is
+            # The worker will need to parse this or use custom_params
             mesh_strategy=batch.mesh_strategy,
             target_elements=preset['target_elements'],
             max_element_size=preset['max_element_size'],
             curvature_adaptive=preset['curvature_adaptive'],
+            custom_params=template_config # Pass the full template config
         )
         db.session.add(job)
         jobs.append(job)

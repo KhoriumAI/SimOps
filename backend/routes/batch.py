@@ -87,6 +87,29 @@ def create_batch():
     db.session.add(batch)
     db.session.commit()
     
+    # Check for template config
+    template_config = data.get('template_config')
+    if template_config and batch.mesh_strategy.startswith('template:'):
+        try:
+            import json
+            from storage import get_storage
+            
+            storage = get_storage()
+            config_filename = f"batch_{batch.id}_config.json"
+            
+            # Save config to storage (local or S3)
+            # We use 'config' as file_type to separate from uploads/mesh
+            storage.save_file(
+                file_data=json.dumps(template_config, indent=2).encode('utf-8'),
+                filename=config_filename,
+                user_email=user.email,
+                file_type='config'
+            )
+            print(f"[BATCH] Saved template config for batch {batch.id}")
+        except Exception as e:
+            print(f"[BATCH] Failed to save template config: {e}")
+            # Non-fatal error, but warn
+    
     return jsonify({
         "batch_id": batch.id,
         "status": batch.status,

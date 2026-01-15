@@ -1,0 +1,45 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant/fluid";
+    object      thermophysicalProperties;
+}
+
+// ========================================================================== //
+// Golden CHT Case - Fluid (Air) Thermophysical Properties                    //
+// ========================================================================== //
+
+thermoType
+{
+    type            heRhoThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectGas;
+    specie          specie;
+    energy          sensibleEnthalpy;
+}
+
+mixture
+{
+    specie
+    {
+        molWeight   28.9;  // Air molecular weight [kg/kmol]
+    }
+    thermodynamics
+    {
+        // VARIABLE: Cp - Specific heat of air
+        Cp          1005;   // [J/kg/K]
+        Hf          0;
+    }
+    transport
+    {
+        // VARIABLE: mu - Dynamic viscosity
+        mu          1.85e-5;    // [Pa.s] at ~25°C
+        
+        // VARIABLE: Pr - Prandtl number
+        Pr          0.71;
+    }
+}

@@ -68,7 +68,7 @@ class Config:
     UPLOAD_FOLDER = BASE_DIR / "uploads"
     OUTPUT_FOLDER = BASE_DIR / "outputs"
     MAX_CONTENT_LENGTH = int(os.environ.get('MAX_FILE_SIZE_MB', 500)) * 1024 * 1024  # Default 500MB
-    ALLOWED_EXTENSIONS = {'.step', '.stp', '.stl'}
+    ALLOWED_EXTENSIONS = {'.step', '.stp', '.stl', '.msh', '.vtk', '.vtu', '.inp', '.unv'}
     
     # Batch Processing Settings (configurable via .env)
     BATCH_MAX_FILES = int(os.environ.get('BATCH_MAX_FILES', 10))  # Max files per batch
