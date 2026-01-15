@@ -104,6 +104,21 @@ jobs:
             echo "[DEPLOY] .env file created at $BACKEND_DIR/.env"
             
             echo "[DEPLOY] Installing monitoring cron jobs..."
+            
+            # Ensure crontab is available
+            if ! command -v crontab &> /dev/null; then
+                echo "[DEPLOY] crontab not found. Installing cronie..."
+                if command -v yum &> /dev/null; then
+                    sudo yum install -y cronie
+                    sudo systemctl enable crond
+                    sudo systemctl start crond
+                elif command -v apt-get &> /dev/null; then
+                    sudo apt-get update && sudo apt-get install -y cron
+                else
+                    echo "[WARNING] Could not install cron. Monitoring jobs may fail."
+                fi
+            fi
+
             # Make monitoring scripts executable
             chmod +x "$PROJECT_ROOT/scripts/monitor_disk_usage.py"
             chmod +x "$PROJECT_ROOT/scripts/monitor_s3_usage.py"
