@@ -44,6 +44,26 @@ modal run scripts/run_local_modal.py --input-file path/to/model.step
 ```
 See [docs/local_development.md](docs/local_development.md) for details.
 
+## DevOps Checklist
+
+Before committing, pushing, or deploying, run the unified devops checklist:
+
+```powershell
+# Run all checks (recommended before commits)
+.\DEVOPS_CHECKLIST.ps1
+
+# Run only pre-commit checks (type safety, schema sync, env vars)
+.\DEVOPS_CHECKLIST.ps1 -PreCommit
+
+# Run only pre-push checks (happy path validation)
+.\DEVOPS_CHECKLIST.ps1 -PrePush
+
+# Run post-deployment verification
+.\DEVOPS_CHECKLIST.ps1 -PostPush -Url https://api.khorium.ai
+```
+
+The script consolidates all devops checks from `CONTRIBUTING.md`, `DEPLOYMENT.md`, and validation guides into one executable checklist. See [`DEVOPS_CHECKLIST.ps1`](DEVOPS_CHECKLIST.ps1) for details.
+
 ## Requirements
 
 - Python 3.11+

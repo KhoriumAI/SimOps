@@ -848,6 +848,67 @@ function App() {
         <div className="flex items-center gap-2 text-xs text-gray-600">
           <User className="w-3.5 h-3.5" />
           <span>{user?.name || user?.email?.split('@')[0]}</span>
+
+          {/* Dev-only validation button */}
+          {(window.location.hostname === 'localhost' ||
+            window.location.hostname === '127.0.0.1' ||
+            window.location.hostname.includes('development.khorium.ai')) && (
+              <button
+                onClick={async () => {
+                  try {
+                    // Use current API_BASE so it works on both local and dev environments
+                    const response = await authFetch(`${API_BASE}/dev/validate`, { method: 'POST' })
+                    if (response.ok) {
+                      const data = await response.json()
+                      console.log(`🔍 Validation Started - ID: ${data.validation_id}`)
+                      console.log('Polling for results...')
+
+                      // Poll for results
+                      const pollInterval = setInterval(async () => {
+                        try {
+                          const resultResponse = await authFetch(`${API_BASE}/dev/validate/${data.validation_id}`)
+                          if (resultResponse.ok) {
+                            const result = await resultResponse.json()
+
+                            if (result.status !== 'running') {
+                              clearInterval(pollInterval)
+
+                              // Print all output to console
+                              console.log('\n=== VALIDATION RESULTS ===')
+                              console.log(`Status: ${result.status}`)
+                              console.log(`Exit Code: ${result.exit_code}`)
+                              console.log('\n=== OUTPUT ===')
+                              result.output.forEach(line => console.log(line))
+                              console.log('=== END ===\n')
+
+                              // Show completion alert
+                              const icon = result.exit_code === 0 ? '✅' : '❌'
+                              alert(`${icon} Validation ${result.status}\n\nExit Code: ${result.exit_code}\n\nCheck browser console (F12) for full output.`)
+                            }
+                          }
+                        } catch (pollErr) {
+                          console.error('Polling error:', pollErr)
+                          clearInterval(pollInterval)
+                        }
+                      }, 2000) // Poll every 2 seconds
+
+                      // Initial alert
+                      alert(`✅ Validation Started\n\nValidation ID: ${data.validation_id}\n\nResults will appear in browser console (F12).\nPolling for output...`)
+                    } else {
+                      const error = await response.json()
+                      alert(`❌ Failed: ${error.error}`)
+                    }
+                  } catch (err) {
+                    alert(`❌ Error: ${err.message}`)
+                  }
+                }}
+                className="ml-2 px-2 py-1 text-[10px] font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 rounded border border-purple-300 transition-colors"
+                title="Run happy path validation (Dev Only)"
+              >
+                🔍 Validate
+              </button>
+            )}
+
           <button
             onClick={logout}
             className="p-1 hover:bg-gray-100 rounded transition-colors text-gray-500 hover:text-gray-700"

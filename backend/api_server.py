@@ -472,6 +472,91 @@ def register_routes(app):
     def health_check():
         return jsonify({"status": "healthy", "service": "mesh-generation-api", "version": "2.0"})
 
+    # In-memory storage for validation results
+    _validation_results = {}
+
+    @app.route('/api/dev/validate', methods=['POST'])
+    def trigger_validation():
+        """
+        DEV-ONLY: Trigger the happy path validation script.
+        Returns immediately with a job ID, validation runs in background.
+        """
+        # Only allow in development mode
+        if not app.config.get('FLASK_ENV') == 'development' and not os.environ.get('FLASK_DEBUG') == '1':
+            return jsonify({"error": "This endpoint is only available in development mode"}), 403
+        
+        import uuid
+        validation_id = str(uuid.uuid4())
+        
+        # Initialize result storage
+        _validation_results[validation_id] = {
+            'status': 'running',
+            'output': [],
+            'exit_code': None
+        }
+        
+        # Run validation script in background thread
+        def run_validation():
+            import subprocess
+            try:
+                result = subprocess.run(
+                    [sys.executable, '-u', 'scripts/validate_happy_path.py', '--url', 'http://127.0.0.1:5000'],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                # Store results
+                output_lines = result.stdout.split('\n') if result.stdout else []
+                if result.stderr:
+                    output_lines.extend(['', '=== STDERR ==='] + result.stderr.split('\n'))
+                
+                _validation_results[validation_id] = {
+                    'status': 'completed',
+                    'output': output_lines,
+                    'exit_code': result.returncode
+                }
+                
+                print(f"[VALIDATION {validation_id}] Completed with exit code: {result.returncode}")
+                
+            except subprocess.TimeoutExpired:
+                _validation_results[validation_id] = {
+                    'status': 'timeout',
+                    'output': ['Validation timed out after 5 minutes'],
+                    'exit_code': -1
+                }
+            except Exception as e:
+                _validation_results[validation_id] = {
+                    'status': 'error',
+                    'output': [f"Error: {str(e)}"],
+                    'exit_code': -1
+                }
+        
+        thread = Thread(target=run_validation, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            "message": "Validation started",
+            "validation_id": validation_id
+        })
+
+    @app.route('/api/dev/validate/<validation_id>', methods=['GET'])
+    def get_validation_result(validation_id: str):
+        """
+        DEV-ONLY: Get validation results by ID.
+        """
+        # Only allow in development mode
+        if not app.config.get('FLASK_ENV') == 'development' and not os.environ.get('FLASK_DEBUG') == '1':
+            return jsonify({"error": "This endpoint is only available in development mode"}), 403
+        
+        result = _validation_results.get(validation_id)
+        if not result:
+            return jsonify({"error": "Validation ID not found"}), 404
+        
+        return jsonify(result)
+
+
+
     @app.route('/api/strategies', methods=['GET'])
     def get_mesh_strategies():
         """

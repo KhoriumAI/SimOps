@@ -1,4 +1,4 @@
-.PHONY: check type-check schema-check env-check install-dev help
+.PHONY: check type-check schema-check env-check install-dev validate help
 
 help:
 	@echo "Available targets:"
@@ -6,6 +6,7 @@ help:
 	@echo "  make type-check    - Run mypy type checking"
 	@echo "  make schema-check  - Run Alembic schema sync check"
 	@echo "  make env-check     - Run environment variable audit"
+	@echo "  make validate      - Run happy path validation script"
 	@echo "  make install-dev   - Install development dependencies"
 
 check: type-check schema-check env-check
@@ -28,3 +29,6 @@ install-dev:
 	@echo "Installing development dependencies..."
 	pip install -r backend/requirements.txt
 
+validate:
+	@echo "Running happy path validation..."
+	python -u scripts/validate_happy_path.py --url http://127.0.0.1:5000

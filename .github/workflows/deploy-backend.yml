@@ -103,6 +103,18 @@ jobs:
             
             echo "[DEPLOY] .env file created at $BACKEND_DIR/.env"
             
+            echo "[DEPLOY] Installing monitoring cron jobs..."
+            # Make monitoring scripts executable
+            chmod +x "$PROJECT_ROOT/scripts/monitor_disk_usage.py"
+            chmod +x "$PROJECT_ROOT/scripts/monitor_s3_usage.py"
+            
+            # Install cron jobs (check every hour)
+            (crontab -l 2>/dev/null | grep -v "monitor_disk_usage\|monitor_s3_usage"; \
+             echo "0 * * * * cd $PROJECT_ROOT && python3 scripts/monitor_disk_usage.py --threshold 80 2>&1 | logger -t disk-monitor"; \
+             echo "30 * * * * cd $PROJECT_ROOT && python3 scripts/monitor_s3_usage.py --bucket muaz-webdev-assets --threshold-gb 100 2>&1 | logger -t s3-monitor") | crontab -
+            
+            echo "[DEPLOY] Monitoring cron jobs installed successfully"
+            
             echo "[DEPLOY] Killing any legacy processes on ports 3000 or 5000..."
             sudo fuser -k 3000/tcp 2>/dev/null || true
             sudo fuser -k 5000/tcp 2>/dev/null || true

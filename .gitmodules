@@ -1,0 +1,3 @@
+[submodule "gpu_experiments/gDel3D_modern"]
+	path = gpu_experiments/gDel3D_modern
+	url = https://github.com/m-m-a-z/gDel3D_modern.git

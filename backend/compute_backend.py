@@ -45,7 +45,123 @@ class JobState:
         self.start_time = time.time()
         self.log_done = Event()
 
-# ... (ComputeProvider abstract class skipped) ...
+class ComputeProvider(ABC):
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
+
+    @property
+    @abstractmethod
+    def mode(self) -> str:
+        pass
+
+    @abstractmethod
+    def submit_job(self, task_type: str, **kwargs) -> str:
+        pass
+
+    @abstractmethod
+    def get_status(self, job_id: str) -> Dict:
+        pass
+
+    @abstractmethod
+    def fetch_results(self, job_id: str) -> Dict:
+        pass
+
+    @abstractmethod
+    def cancel_job(self, job_id: str):
+        pass
+        
+    @abstractmethod
+    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
+        pass
+
+class LocalProvider(ComputeProvider):
+    def __init__(self):
+        self._name = "Local Compute (Subprocess)"
+        
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def mode(self) -> str:
+        return "LOCAL"
+
+    def generate_preview(self, cad_file_path: str, timeout: int = 120) -> Dict:
+        """
+        Generate preview using local Gmsh in a subprocess.
+        """
+        import subprocess
+        import json
+        import tempfile
+        import sys
+        
+        # Script to run in subprocess
+        script = """
+import gmsh
+import sys
+import json
+import numpy as np
+
+try:
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("preview")
+    gmsh.merge(sys.argv[1])
+    gmsh.model.occ.synchronize()
+    
+    # Generate 2D mesh
+    gmsh.option.setNumber("Mesh.Algorithm", 1) # MeshAdapt
+    gmsh.model.mesh.generate(2)
+    
+    # Extract
+    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+    node_coords = np.array(node_coords).reshape(-1, 3).tolist()
+    
+    # Get triangles
+    elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2)
+    faces = []
+    
+    tag_to_idx = {tag: idx for idx, tag in enumerate(node_tags)}
+    
+    for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
+        if etype == 2: # Triangle
+             enodes = np.array(enodes).reshape(-1, 3)
+             for tri in enodes:
+                 faces.append([tag_to_idx[n] for n in tri])
+                 
+    gmsh.finalize()
+    
+    print(json.dumps({'success': True, 'vertices': node_coords, 'faces': faces}))
+except Exception as e:
+    print(json.dumps({'success': False, 'error': str(e)}))
+"""
+        try:
+             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                 f.write(script)
+                 script_path = f.name
+                 
+             result = subprocess.run(
+                 [sys.executable, script_path, cad_file_path],
+                 capture_output=True,
+                 text=True,
+                 timeout=timeout
+             )
+             
+             if os.path.exists(script_path):
+                os.unlink(script_path)
+             
+             if result.returncode != 0:
+                 return {'success': False, 'error': f"Preview process failed: {result.stderr}"}
+                 
+             try:
+                 return json.loads(result.stdout.strip())
+             except:
+                 return {'success': False, 'error': f"Invalid JSON from preview: {result.stdout[:100]}"}
+                 
+        except Exception as e:
+             return {'success': False, 'error': str(e)}
 
     def submit_job(self, task_type: str, **kwargs) -> str:
         import uuid

@@ -17,7 +17,7 @@ try:
     import modal
     MODAL_AVAILABLE = True
 except ImportError:
-    modal = None
+    modal = None  # type: ignore
     MODAL_AVAILABLE = False
     print("[ModalClient] WARNING: modal package not installed. Modal features disabled.")
 
