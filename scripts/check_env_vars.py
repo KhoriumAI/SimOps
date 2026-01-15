@@ -86,13 +86,13 @@ def main() -> int:
     missing = code_vars - example_vars
     
     if missing:
-        print("❌ FAILED: Environment variables used in code but missing from .env.example:")
+        print("[FAIL] Environment variables used in code but missing from .env.example:")
         for var in sorted(missing):
             print(f"  - {var}")
         print(f"\nTotal: {len(missing)} missing variable(s)")
         return 1
     else:
-        print(f"✅ PASSED: All {len(code_vars)} environment variables are documented in .env.example")
+        print(f"[PASS] All {len(code_vars)} environment variables are documented in .env.example")
         return 0
 
 

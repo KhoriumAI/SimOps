@@ -100,9 +100,10 @@ function App() {
         if (response.ok) {
           const data = await response.json()
           // Filter out unsupported/experimental strategies
+          // NOTE: GPU meshing is currently disabled for stability. To re-enable, remove 'gpu' from the filter below.
           const allowedStrategies = (data.names || []).filter(name => {
             const lower = name.toLowerCase()
-            return !lower.includes('gpu delaunay') && !lower.includes('polyhedral')
+            return !lower.includes('gpu') && !lower.includes('polyhedral')
           })
 
           setMeshStrategies(allowedStrategies)

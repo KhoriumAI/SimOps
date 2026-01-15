@@ -57,9 +57,20 @@ export default function BatchMode({ onBatchComplete, onLog, onFileSelect }) {
         const response = await authFetch(`${API_BASE}/strategies`)
         if (response.ok) {
           const data = await response.json()
-          setMeshStrategies(data.names || ['Tet (Fast)', 'Tetrahedral (Delaunay)'])
-          if (data.default) {
+
+          // Filter out unsupported/experimental strategies (disabled for stability)
+          // To re-enable GPU meshing, remove 'gpu' from this filter.
+          const allowedStrategies = (data.names || []).filter(name => {
+            const lower = name.toLowerCase()
+            return !lower.includes('gpu') && !lower.includes('polyhedral')
+          })
+
+          setMeshStrategies(allowedStrategies.length > 0 ? allowedStrategies : ['Tet (Fast)', 'Tetrahedral (Delaunay)'])
+
+          if (data.default && allowedStrategies.includes(data.default)) {
             setMeshStrategy(data.default)
+          } else if (allowedStrategies.length > 0) {
+            setMeshStrategy(allowedStrategies[0])
           }
         }
       } catch (err) {
