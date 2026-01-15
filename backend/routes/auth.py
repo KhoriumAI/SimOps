@@ -162,17 +162,19 @@ def forgot_password():
     
     try:
         db.session.commit()
-        print(f"[AUTH] Generated reset token for {email}: {token[:10]}...")
+        print(f"[AUTH] Generated and saved reset token for {email}: {token[:10]}...")
         
         # Send email
-        send_reset_email(user.email, token)
+        if send_reset_email(user.email, token):
+            return jsonify({'message': 'A password reset link has been sent to your email address.'}), 200
+        else:
+            print(f"[AUTH] Failed to send reset email to {email}")
+            return jsonify({'error': 'Internal server error: Failed to send reset email. Please try again later.'}), 500
         
     except Exception as e:
         db.session.rollback()
-        print(f"[AUTH] Error during password reset request: {e}")
+        print(f"[AUTH] Error during password reset request for {email}: {e}")
         return jsonify({'error': 'Internal server error'}), 500
-        
-    return jsonify({'message': 'A password reset link has been sent to your email address.'}), 200
 
 
 @auth_bp.route('/reset-password', methods=['POST'])

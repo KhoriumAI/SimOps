@@ -23,6 +23,10 @@ class User(db.Model):
     last_login = db.Column(db.DateTime, nullable=True)
     last_api_request_at = db.Column(db.DateTime, nullable=True)  # Track last API request for time online calculation
     
+    # Password reset tokens
+    reset_token = db.Column(db.String(100), unique=True, nullable=True, index=True)
+    reset_token_expires = db.Column(db.DateTime, nullable=True)
+    
     # Storage quota (in bytes) - default 1GB
     storage_quota = db.Column(db.BigInteger, default=1073741824)
     storage_used = db.Column(db.BigInteger, default=0)
