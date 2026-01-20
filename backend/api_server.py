@@ -632,6 +632,72 @@ def register_routes(app):
             'default': 'Tetrahedral (HXT)'
         })
 
+    @app.route('/api/session/latest', methods=['GET'])
+    @jwt_required()
+    def get_latest_session():
+        """
+        State Rehydration Endpoint
+        
+        Returns the user's most recent active project/mesh session.
+        Used by frontend on page load to restore state without re-uploading files.
+        
+        Returns:
+        - project: Full project details with latest mesh result
+        - has_active_job: True if a mesh job is currently processing (for WebSocket reconnection)
+        - job_id: The provider job ID for reconnecting to logs (if processing)
+        - internal_job_id: The MSH-XXXX ID for display
+        """
+        try:
+            current_user_id = int(get_jwt_identity())
+            
+            # Find the most recently accessed/updated project for this user
+            # Prioritize: 1) processing jobs, 2) recently completed, 3) recently uploaded
+            
+            # First check for any actively processing jobs
+            processing_project = Project.query.filter_by(
+                user_id=current_user_id,
+                status='processing'
+            ).order_by(Project.updated_at.desc()).first()
+            
+            if processing_project:
+                # Get the latest mesh result for this project
+                latest_result = processing_project.mesh_results.order_by(MeshResult.created_at.desc()).first()
+                return jsonify({
+                    'project': processing_project.to_dict(include_results=True),
+                    'has_active_job': True,
+                    'job_id': latest_result.modal_job_id if latest_result else None,
+                    'internal_job_id': latest_result.job_id if latest_result else None,
+                    'status': 'processing'
+                })
+            
+            # Otherwise, get the most recently updated project (completed or uploaded)
+            latest_project = Project.query.filter_by(
+                user_id=current_user_id
+            ).order_by(Project.updated_at.desc()).first()
+            
+            if not latest_project:
+                return jsonify({
+                    'project': None,
+                    'has_active_job': False,
+                    'message': 'No previous session found'
+                })
+            
+            latest_result = latest_project.mesh_results.order_by(MeshResult.created_at.desc()).first()
+            
+            return jsonify({
+                'project': latest_project.to_dict(include_results=True),
+                'has_active_job': False,
+                'job_id': latest_result.modal_job_id if latest_result else None,
+                'internal_job_id': latest_result.job_id if latest_result else None,
+                'status': latest_project.status
+            })
+            
+        except Exception as e:
+            print(f"[SESSION ERROR] Failed to get latest session: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
     @app.route('/api/upload', methods=['POST'])
     @jwt_required()
     def upload_cad_file():
