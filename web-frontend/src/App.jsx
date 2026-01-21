@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from './contexts/AuthContext'
 import MeshViewer from './components/MeshViewer'
 import FileUpload from './components/FileUpload'
@@ -95,12 +95,12 @@ function App() {
 
   // State Rehydration - automatically restore previous session on page load
   const [isRestoringSession, setIsRestoringSession] = useState(true)
-  const { isRestoring, restoredSession, error: restoreError } = useSessionRestore(authFetch)
-  const { 
-    saveViewSettings, 
-    saveMeshSettings, 
-    saveCameraPosition, 
-    saveLastProjectId 
+  const { isRestoring, restoredSession } = useSessionRestore(authFetch)
+  const {
+    saveViewSettings,
+    saveMeshSettings,
+    saveCameraPosition,
+    saveLastProjectId
   } = useLocalStatePersistence()
 
   // Ref to track if we've already applied restored session (prevent double-application)
@@ -895,7 +895,7 @@ function App() {
           </div>
         </div>
       )}
-      
+
       {/* Compact Header Bar - Light Theme */}
       <header className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-3 text-gray-800">
         <div className="flex items-center gap-4">
