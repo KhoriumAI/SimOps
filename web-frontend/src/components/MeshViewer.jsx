@@ -609,6 +609,43 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
   )
 }
 
+// Component to track camera position and save it on change
+function CameraTracker({ onCameraChange, initialPosition, initialTarget }) {
+  const { camera, controls } = useThree()
+  const lastSaveTime = useRef(0)
+  const hasSetInitial = useRef(false)
+  
+  // Set initial camera position if provided
+  useEffect(() => {
+    if (hasSetInitial.current) return
+    if (initialPosition && camera) {
+      camera.position.set(initialPosition.x, initialPosition.y, initialPosition.z)
+      if (initialTarget && controls?.target) {
+        controls.target.set(initialTarget.x, initialTarget.y, initialTarget.z)
+      }
+      camera.updateProjectionMatrix()
+      hasSetInitial.current = true
+    }
+  }, [initialPosition, initialTarget, camera, controls])
+  
+  // Track camera changes with debounce
+  useFrame(() => {
+    if (!onCameraChange || !camera) return
+    
+    // Only save every 500ms to avoid excessive writes
+    const now = Date.now()
+    if (now - lastSaveTime.current < 500) return
+    
+    lastSaveTime.current = now
+    onCameraChange(
+      { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+      controls?.target ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : null
+    )
+  })
+  
+  return null
+}
+
 export default function MeshViewer({
   meshData,
   projectId,
@@ -626,7 +663,11 @@ export default function MeshViewer({
   setColorMode,
   // Mesh progress from App
   meshProgress,
-  loadingStartTime
+  loadingStartTime,
+  // Camera persistence
+  onCameraChange,
+  initialCameraPosition,
+  initialCameraTarget,
 }) {
   // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
   // Also allow for uploaded mesh files that aren't preview
@@ -1546,7 +1587,13 @@ export default function MeshViewer({
             performance={{ min: 0.5 }} // Adaptive performance
             className="w-full h-full"
           >
-            <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
+            <PerspectiveCamera 
+              makeDefault 
+              position={initialCameraPosition ? [initialCameraPosition.x, initialCameraPosition.y, initialCameraPosition.z] : [100, 100, 100]} 
+              fov={45} 
+              near={0.1} 
+              far={10000} 
+            />
             <OrbitControls
               enableDamping={false}
               dampingFactor={0}
@@ -1554,6 +1601,13 @@ export default function MeshViewer({
               panSpeed={0.8}
               zoomSpeed={2.4}
               makeDefault
+            />
+            
+            {/* Camera position tracker for session persistence */}
+            <CameraTracker 
+              onCameraChange={onCameraChange}
+              initialPosition={initialCameraPosition}
+              initialTarget={initialCameraTarget}
             />
 
             <Lights dynamic={dynamicLighting} />

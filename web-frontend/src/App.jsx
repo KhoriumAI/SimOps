@@ -6,9 +6,10 @@ import Terminal from './components/Terminal'
 import MeshTimer, { MeshTimerCompact } from './components/MeshTimer'
 import BatchMode from './components/BatchMode'
 import FeedbackButton from './components/FeedbackButton'
-import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2 } from 'lucide-react'
+import { Download, LogOut, User, Square, ChevronDown, ChevronUp, Terminal as TerminalIcon, Copy, Clock, Layers, File, BarChart3, Loader2, RefreshCw } from 'lucide-react'
 import { API_BASE } from './config'
 import { useProjectWebSocket } from './hooks/useProjectWebSocket'
+import { useSessionRestore, useLocalStatePersistence } from './hooks/useSessionRestore'
 
 // Preset sizes: maps preset names to min/max element sizes
 const presetSizes = {
@@ -91,6 +92,146 @@ function App() {
   const [meshStrategies, setMeshStrategies] = useState([
     'Tetrahedral (Fast)',  // Fallback default
   ])
+
+  // State Rehydration - automatically restore previous session on page load
+  const [isRestoringSession, setIsRestoringSession] = useState(true)
+  const { isRestoring, restoredSession } = useSessionRestore(authFetch)
+  const {
+    saveViewSettings,
+    saveMeshSettings,
+    saveCameraPosition,
+    saveLastProjectId
+  } = useLocalStatePersistence()
+
+  // Ref to track if we've already applied restored session (prevent double-application)
+  const hasAppliedRestore = useRef(false)
+
+  // Apply restored session data once available
+  useEffect(() => {
+    if (hasAppliedRestore.current || isRestoring || !restoredSession) {
+      if (!isRestoring && !restoredSession) {
+        setIsRestoringSession(false)
+      }
+      return
+    }
+
+    hasAppliedRestore.current = true
+    console.log('[Session Restore] Applying restored session...')
+
+    const applyRestoredSession = async () => {
+      const { project, hasActiveJob, jobId, internalJobId, status, viewSettings, meshSettings } = restoredSession
+
+      // Apply view settings from localStorage
+      if (viewSettings) {
+        if (viewSettings.showAxes !== undefined) setShowAxes(viewSettings.showAxes)
+        if (viewSettings.colorMode) setColorMode(viewSettings.colorMode)
+        if (viewSettings.qualityMetric) setQualityMetric(viewSettings.qualityMetric)
+        if (viewSettings.showHistogram !== undefined) setShowHistogram(viewSettings.showHistogram)
+        if (viewSettings.consoleOpen !== undefined) setConsoleOpen(viewSettings.consoleOpen)
+      }
+
+      // Apply mesh settings from localStorage
+      if (meshSettings) {
+        if (meshSettings.qualityPreset) setQualityPreset(meshSettings.qualityPreset)
+        if (meshSettings.maxElementSize) {
+          setMaxElementSize(meshSettings.maxElementSize)
+          setMaxSizeStr(String(meshSettings.maxElementSize))
+        }
+        if (meshSettings.minElementSize) {
+          setMinElementSize(meshSettings.minElementSize)
+          setMinSizeStr(String(meshSettings.minElementSize))
+        }
+        if (meshSettings.elementOrder) setElementOrder(meshSettings.elementOrder)
+        if (meshSettings.meshStrategy) setMeshStrategy(meshSettings.meshStrategy)
+        if (meshSettings.curvatureAdaptive !== undefined) setCurvatureAdaptive(meshSettings.curvatureAdaptive)
+      }
+
+      // Apply project state from backend
+      if (project) {
+        setCurrentProject(project.id)
+        setProjectStatus(project)
+        saveLastProjectId(project.id)
+
+        // Set logs with restoration message
+        setLogs([
+          `[INFO] Session restored - ${project.filename || 'Previous project'}`,
+          hasActiveJob ? `[INFO] Reconnecting to active job: ${internalJobId || jobId}...` : '',
+          status === 'completed' ? `[SUCCESS] Mesh generation completed previously` : '',
+          status === 'error' ? `[ERROR] Previous mesh generation failed: ${project.error_message || 'Unknown error'}` : '',
+        ].filter(Boolean))
+
+        // If job is actively processing, reconnect
+        if (hasActiveJob && (jobId || internalJobId)) {
+          setCurrentJobId(internalJobId)
+          setCurrentProviderId(jobId)
+          setIsPolling(true)
+          setMeshStartTime(Date.now()) // Will show timer from now (not perfect but acceptable)
+          setLogs(prev => [...prev, `[INFO] Reconnected to mesh generation job`])
+        }
+
+        // Fetch mesh data if completed
+        if (status === 'completed' && project.latest_result) {
+          setLogs(prev => [...prev, `[INFO] Loading previous mesh...`])
+          try {
+            await fetchMeshData(project.id)
+            setColorMode('quality') // Show quality colors for completed mesh
+            setLogs(prev => [...prev, `[SUCCESS] Mesh loaded successfully`])
+          } catch (err) {
+            console.error('[Session Restore] Failed to load mesh:', err)
+            setLogs(prev => [...prev, `[WARNING] Could not load mesh visualization: ${err.message}`])
+          }
+        } else if (status === 'uploaded') {
+          // Fetch CAD preview for uploaded but not yet meshed projects
+          setLogs(prev => [...prev, `[INFO] Loading CAD preview...`])
+          try {
+            await fetchCadPreview(project.id, project.filename, true)
+          } catch (err) {
+            console.error('[Session Restore] Failed to load preview:', err)
+          }
+        }
+      }
+
+      setIsRestoringSession(false)
+    }
+
+    applyRestoredSession()
+  }, [isRestoring, restoredSession])
+
+  // Persist view settings when they change
+  useEffect(() => {
+    // Don't persist during initial restoration
+    if (isRestoringSession) return
+
+    saveViewSettings({
+      showAxes,
+      colorMode,
+      qualityMetric,
+      showHistogram,
+      consoleOpen,
+    })
+  }, [showAxes, colorMode, qualityMetric, showHistogram, consoleOpen, isRestoringSession, saveViewSettings])
+
+  // Persist mesh settings when they change
+  useEffect(() => {
+    // Don't persist during initial restoration
+    if (isRestoringSession) return
+
+    saveMeshSettings({
+      qualityPreset,
+      maxElementSize,
+      minElementSize,
+      elementOrder,
+      meshStrategy,
+      curvatureAdaptive,
+    })
+  }, [qualityPreset, maxElementSize, minElementSize, elementOrder, meshStrategy, curvatureAdaptive, isRestoringSession, saveMeshSettings])
+
+  // Save project ID when it changes
+  useEffect(() => {
+    if (currentProject) {
+      saveLastProjectId(currentProject)
+    }
+  }, [currentProject, saveLastProjectId])
 
   // Fetch available strategies from backend on mount
   useEffect(() => {
@@ -740,6 +881,21 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-100 text-gray-900">
+      {/* Session Restoration Overlay */}
+      {isRestoringSession && (
+        <div className="absolute inset-0 z-50 bg-white/90 backdrop-blur-sm flex items-center justify-center">
+          <div className="text-center space-y-4">
+            <div className="relative">
+              <RefreshCw className="w-12 h-12 text-blue-600 animate-spin mx-auto" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-800">Restoring Session</h2>
+              <p className="text-sm text-gray-500 mt-1">Loading your previous work...</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Compact Header Bar - Light Theme */}
       <header className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-3 text-gray-800">
         <div className="flex items-center gap-4">
@@ -1187,6 +1343,10 @@ function App() {
               // Progress props
               meshProgress={meshProgress}
               loadingStartTime={meshStartTime}
+              // Camera persistence props
+              onCameraChange={saveCameraPosition}
+              initialCameraPosition={restoredSession?.cameraPosition}
+              initialCameraTarget={restoredSession?.cameraTarget}
             />
           </div>
 
