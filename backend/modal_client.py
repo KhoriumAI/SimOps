@@ -13,11 +13,12 @@ import time
 from typing import Dict, Any, Optional
 
 # Optional modal import - server can run without it
+modal: Any
 try:
     import modal
     MODAL_AVAILABLE = True
 except ImportError:
-    modal = None  # type: ignore
+    modal = None
     MODAL_AVAILABLE = False
     print("[ModalClient] WARNING: modal package not installed. Modal features disabled.")
 

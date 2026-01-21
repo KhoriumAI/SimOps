@@ -15,7 +15,7 @@ check: type-check schema-check env-check
 
 type-check:
 	@echo "Running mypy type checks..."
-	cd backend && mypy . --config-file mypy.ini
+	cd backend && python -m mypy . --config-file mypy.ini
 
 schema-check:
 	@echo "Running Alembic schema sync check..."
