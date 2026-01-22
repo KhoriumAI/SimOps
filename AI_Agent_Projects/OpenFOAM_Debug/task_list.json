@@ -1,0 +1,29 @@
+{
+    "project_name": "OpenFOAM_Debug",
+    "created": "2026-01-22T02:45:00-08:00",
+    "problem_statement": "OpenFOAM simulations via WSL fail silently, returning placeholder data (0 elements, 0 temps). The E2E test shows the pipeline returns quickly but with empty results.",
+    "hypotheses": [
+        {
+            "id": "H1",
+            "title": "WSL Path Escaping Bug",
+            "description": "Windows paths with spaces or backslashes may not be correctly converted to WSL format, causing gmshToFoam to fail.",
+            "task_folder": "task_H1_wsl_paths",
+            "prompt_file": "prompts/H1_wsl_paths.md"
+        },
+        {
+            "id": "H2",
+            "title": "Gmsh Mesh Format Incompatibility",
+            "description": "gmshToFoam may require MSH version 2 format and specific element types. The current mesh may use unsupported formats.",
+            "task_folder": "task_H2_mesh_format",
+            "prompt_file": "prompts/H2_mesh_format.md"
+        },
+        {
+            "id": "H3",
+            "title": "Exception Swallowing in Pipeline",
+            "description": "The OpenFOAMRunner may be catching exceptions and returning placeholder data instead of propagating errors.",
+            "task_folder": "task_H3_exception_handling",
+            "prompt_file": "prompts/H3_exception_handling.md"
+        }
+    ],
+    "integration_notes": "Each hypothesis is self-contained. Fixes should be applied to shadow copies in task folders. The Weaver stage will merge successful fixes."
+}

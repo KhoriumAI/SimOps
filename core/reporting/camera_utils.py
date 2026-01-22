@@ -75,11 +75,10 @@ def setup_camera(plotter, view_name: str, mesh_bounds: Tuple[float, ...], zoom: 
     dz = zmax - zmin
     char_length = np.sqrt(dx**2 + dy**2 + dz**2)
     
-    # Set focal point (usually mesh center or origin for aligned meshes)
-    focal_point = view_config["focal_point"]
-    plotter.camera.focal_point = focal_point
+    # Set focal point to mesh center to ensure flexible centering
+    plotter.camera.focal_point = center
     
-    # Set camera position
+    # Set camera position relative to center
     if "position" in view_config:
         # Normalize position vector and scale by characteristic length
         pos = np.array(view_config["position"])
@@ -92,7 +91,8 @@ def setup_camera(plotter, view_name: str, mesh_bounds: Tuple[float, ...], zoom: 
             # For perspective (isometric), closer for better depth
             camera_distance = char_length * 3.0 / zoom
         
-        plotter.camera.position = pos_normalized * camera_distance
+        # Position is Center + Offset
+        plotter.camera.position = center + (pos_normalized * camera_distance)
     
     # Set up vector
     plotter.camera.up = view_config["up"]

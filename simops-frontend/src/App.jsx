@@ -31,9 +31,11 @@ function App() {
     const abortRef = useRef(null)
     const timeoutsRef = useRef([])
     const stopRequestedRef = useRef(false)
+    const jobIdRef = useRef(null)
 
     // Physics Parameters (Deterministic)
-    const [power, setPower] = useState(50) // Watts
+    const [hotWallTemp, setHotWallTemp] = useState(373.15) // Kelvin (100°C above ambient)
+    const [hotWallFace, setHotWallFace] = useState('z_min') // Which face: z_min, z_max, x_min, x_max, y_min, y_max
     const [ambientTemp, setAmbientTemp] = useState(293.15) // Kelvin
     const [convection, setConvection] = useState(20) // W/m2K
     const [material, setMaterial] = useState('Aluminum')
@@ -41,7 +43,7 @@ function App() {
     const [timestep, setTimestep] = useState(0.1) // seconds
     const [duration, setDuration] = useState(10.0) // seconds
     const [initialTemp, setInitialTemp] = useState(293.15) // K
-    const [iterations, setIterations] = useState(1000)
+    const [iterations, setIterations] = useState(50)
     const [tolerance, setTolerance] = useState(1e-3)
     const [writeInterval, setWriteInterval] = useState(50)
     const [colormap, setColormap] = useState('jet')
@@ -117,6 +119,40 @@ function App() {
                 )
             }
         })
+    }
+
+    const pollJobUntilComplete = async (jobId, signal) => {
+        while (true) {
+            const statusRes = await fetch(`http://localhost:8000/api/job/${jobId}`, { signal })
+            if (!statusRes.ok) {
+                let errorMsg = `Status check failed with ${statusRes.status}`
+                try {
+                    const errorData = await statusRes.json()
+                    errorMsg = errorData.error || errorMsg
+                } catch {
+                    const text = await statusRes.text()
+                    errorMsg = text || errorMsg
+                }
+                throw new Error(errorMsg)
+            }
+
+            const statusData = await statusRes.json()
+
+            if (statusData.status === 'running') {
+                await waitWithAbort(1000, signal)
+                continue
+            }
+
+            if (statusData.status === 'success') {
+                return statusData.results
+            }
+
+            if (statusData.status === 'cancelled') {
+                throw new Error('Simulation cancelled by user.')
+            }
+
+            throw new Error(statusData.error || 'Simulation failed')
+        }
     }
 
     const addLog = (msg, type = 'info') => {
@@ -217,12 +253,19 @@ function App() {
     }
 
     const stopSimulation = () => {
+        stopRequestedRef.current = true
         if (abortRef.current) {
-            stopRequestedRef.current = true
             abortRef.current.abort()
             abortRef.current = null
         }
         clearPendingTimeouts()
+        const jobId = jobIdRef.current
+        const cancelOptions = { method: 'POST' }
+        if (jobId) {
+            cancelOptions.headers = { 'Content-Type': 'application/json' }
+            cancelOptions.body = JSON.stringify({ job_id: jobId })
+        }
+        fetch('http://localhost:8000/api/cancel', cancelOptions).catch(() => { })
         setIsProcessing(false)
     }
 
@@ -230,6 +273,7 @@ function App() {
         if (!uploadedFilename) return
         setIsProcessing(true)
         setActiveStep('result')
+        setSimResults(null)
         clearPendingTimeouts()
         stopRequestedRef.current = false
         abortRef.current = new AbortController()
@@ -238,7 +282,8 @@ function App() {
         try {
             // Build config directly from UI inputs (deterministic, no AI)
             const config = {
-                heat_source_power: power,
+                heat_source_temperature: hotWallTemp,
+                hot_wall_face: hotWallFace,
                 ambient_temperature: ambientTemp,
                 initial_temperature: initialTemp,
                 convection_coefficient: convection,
@@ -261,7 +306,7 @@ function App() {
                 addLog("   (OpenFOAM not available - using fast Python solver)", 'info')
             }
 
-            addLog(`Starting simulation: ${power}W heat source, ${ambientTemp}K ambient`, 'info')
+            addLog(`Starting simulation: Hot wall ${hotWallTemp}K, Ambient ${ambientTemp}K`, 'info')
             addLog(`Step 1: Configuring solver (${simMode})`, 'step')
 
             // Simulate setup delay
@@ -271,7 +316,11 @@ function App() {
             await waitWithAbort(500, signal)
             addLog(`Step 3: Setting boundary conditions`, 'step')
 
-            const simRes = await fetch('http://localhost:8000/api/simulate', {
+            // Wait 5 seconds then show "Running simulation"
+            await waitWithAbort(5000, signal)
+            addLog(`Step 4: Running simulation...`, 'step')
+
+            const startRes = await fetch('http://localhost:8000/api/simulate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -282,83 +331,97 @@ function App() {
             })
 
             // Check response status BEFORE parsing JSON
-            if (!simRes.ok) {
-                let errorMsg = `Simulation failed with status ${simRes.status}`
+            if (!startRes.ok) {
+                let errorMsg = `Simulation failed with status ${startRes.status}`
                 try {
-                    const errorData = await simRes.json()
+                    const errorData = await startRes.json()
                     errorMsg = errorData.error || errorMsg
                 } catch {
-                    const text = await simRes.text()
+                    const text = await startRes.text()
                     errorMsg = text || errorMsg
                 }
                 throw new Error(errorMsg)
             }
 
-            const simData = await simRes.json()
+            const startData = await startRes.json()
 
-            if (simData.status === 'success') {
-                setSimResults(simData.results)
-                const resultIterations = simData.results.iterations_run ?? simData.results.iterations
-                const maxIters = simData.results.max_iterations ?? iterations
-                const resultTolerance = simData.results.tolerance ?? tolerance
-                const finalResidual = simData.results.final_residual
-                const converged = simData.results.converged !== false
-
-                if (!converged) {
-                    addLog(`Step 4: Solving equations (failed to converge in ${resultIterations ?? maxIters} iterations)`, 'error')
-                    if (Number.isFinite(finalResidual) && Number.isFinite(resultTolerance)) {
-                        addLog(`   Final residual: ${finalResidual.toExponential(2)} (tol ${resultTolerance.toExponential(2)})`, 'error')
-                    } else if (Number.isFinite(finalResidual)) {
-                        addLog(`   Final residual: ${finalResidual.toExponential(2)}`, 'error')
-                    }
-                } else if (Number.isFinite(resultIterations)) {
-                    addLog(`Step 4: Solving equations (converged in ${resultIterations} iterations)`, 'success')
-                    if (Number.isFinite(resultTolerance)) {
-                        addLog(`   Convergence: ${resultTolerance.toExponential(2)}`, 'success')
-                    }
-                } else {
-                    addLog(`Step 4: Solving equations (direct solve)`, 'success')
-                }
-                addLog(`   Max Temperature: ${simData.results.max_temperature_C?.toFixed(1) || simData.results.max_temp?.toFixed(1)}°C`, 'success')
-                addLog(`Step 5: Generating visualization`, 'success')
-                addLog(`Simulation completed successfully!`, 'success')
-
-                // Auto-download and open PDF if available
-                if (simData.results.pdf_url) {
-                    const pdfUrl = `http://localhost:8000${simData.results.pdf_url}`
-                    addLog(`Opening PDF report...`, 'info')
-
-                    // Open PDF in new tab
-                    window.open(pdfUrl, '_blank')
-
-                    // Also trigger download
-                    const link = document.createElement('a')
-                    link.href = pdfUrl
-                    link.download = `SimOps_Report_${Date.now()}.pdf`
-                    document.body.appendChild(link)
-                    link.click()
-                    document.body.removeChild(link)
-
-                    addLog(`   PDF opened in new tab and downloaded`, 'success')
-                } else if (simData.results.report_url) {
-                    // Fallback to HTML report
-                    const reportUrl = `http://localhost:8000${simData.results.report_url}`
-                    window.open(reportUrl, '_blank')
-                    addLog(`   HTML report opened in new tab`, 'success')
-                }
-
-                // Note about VTK viewer limitation with builtin solver
-                if (!openfoamAvailable && simData.results.vtk_url) {
-                    addLog(`   Note: 3D viewer not supported for builtin solver results`, 'info')
-                    addLog(`   (Use PDF report for visualization)`, 'info')
-                }
-            } else {
-                throw new Error(simData.error || "Simulation failed")
+            if (startData.status !== 'started' || !startData.job_id) {
+                throw new Error(startData.error || 'Simulation failed to start')
             }
 
+            jobIdRef.current = startData.job_id
+            const results = await pollJobUntilComplete(startData.job_id, signal)
+            setSimResults(results)
+            const resultIterations = results.iterations_run ?? results.iterations
+            const maxIters = results.max_iterations ?? iterations
+            const resultTolerance = results.tolerance ?? tolerance
+            const finalResidual = results.final_residual
+            const converged = results.converged !== false
+
+            if (!converged) {
+                addLog(`Solving failed to converge in ${resultIterations ?? maxIters} iterations`, 'error')
+                if (Number.isFinite(finalResidual) && Number.isFinite(resultTolerance)) {
+                    addLog(`   Final residual: ${finalResidual.toExponential(2)} (tol ${resultTolerance.toExponential(2)})`, 'error')
+                } else if (Number.isFinite(finalResidual)) {
+                    addLog(`   Final residual: ${finalResidual.toExponential(2)}`, 'error')
+                }
+            } else if (Number.isFinite(resultIterations)) {
+                addLog(`Converged in ${resultIterations} iterations`, 'success')
+                if (Number.isFinite(resultTolerance)) {
+                    addLog(`   Convergence: ${resultTolerance.toExponential(2)}`, 'success')
+                }
+            } else {
+                addLog(`Solution complete (direct solve)`, 'success')
+            }
+            addLog(`   Max Temperature: ${results.max_temperature_C?.toFixed(1) || results.max_temp?.toFixed(1)}°C`, 'success')
+            addLog(`Visualization generated`, 'success')
+            addLog(`Simulation completed successfully!`, 'success')
+
+            // Auto-download and open PDF if available
+            if (results.pdf_url) {
+                const pdfUrl = `http://localhost:8000${results.pdf_url}`
+                addLog(`Opening PDF report...`, 'info')
+
+                // Open PDF in new tab (use noopener for security)
+                const pdfWindow = window.open(pdfUrl, '_blank', 'noopener,noreferrer')
+                if (!pdfWindow) {
+                    addLog(`   Warning: Popup blocked. Please allow popups for this site.`, 'error')
+                }
+
+                // Also trigger download
+                const link = document.createElement('a')
+                link.href = pdfUrl
+                link.download = `SimOps_Report_${Date.now()}.pdf`
+                link.target = '_blank'
+                link.rel = 'noopener noreferrer'
+                document.body.appendChild(link)
+                link.click()
+                document.body.removeChild(link)
+
+                addLog(`   PDF opened in new tab and downloaded`, 'success')
+            } else if (results.report_url) {
+                // Fallback to HTML report - open in new tab
+                const reportUrl = `http://localhost:8000${results.report_url}`
+                const reportWindow = window.open(reportUrl, '_blank', 'noopener,noreferrer')
+                if (!reportWindow) {
+                    addLog(`   Warning: Popup blocked. Please allow popups for this site.`, 'error')
+                    // Fallback: show message with clickable link
+                    addLog(`   Click here to view report: ${reportUrl}`, 'info')
+                } else {
+                    addLog(`   HTML report opened in new tab`, 'success')
+                }
+            }
+
+            // Note about VTK viewer limitation with builtin solver
+            if (!openfoamAvailable && results.vtk_url) {
+                addLog(`   Note: 3D viewer not supported for builtin solver results`, 'info')
+                addLog(`   (Use PDF report for visualization)`, 'info')
+            }
         } catch (e) {
             if (e?.name === 'AbortError') {
                 addLog(stopRequestedRef.current ? 'Simulation stopped by user.' : 'Simulation cancelled.', 'info')
+            } else if (e?.message === 'Simulation cancelled by user.') {
+                addLog('Simulation stopped by user.', 'info')
             } else {
                 addLog(`Error: ${e.message}`, 'error')
             }
@@ -367,6 +430,7 @@ function App() {
             abortRef.current = null
             clearPendingTimeouts()
             stopRequestedRef.current = false
+            jobIdRef.current = null
         }
     }
 
@@ -431,7 +495,9 @@ function App() {
                                         </button>
                                         <button
                                             onClick={() => setSimMode('transient')}
-                                            className={`flex-1 py-1 text-[9px] uppercase font-bold rounded transition-all ${simMode === 'transient' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                            disabled
+                                            title="In Progress! :D"
+                                            className={`flex-1 py-1 text-[9px] uppercase font-bold rounded transition-all opacity-40 cursor-not-allowed text-muted-foreground`}
                                         >
                                             Transient
                                         </button>
@@ -460,14 +526,38 @@ function App() {
                                     </select>
                                 </div>
 
+
                                 <SmartInput
-                                    label="Heat Power"
-                                    tooltip="Total thermal energy generated by the source."
-                                    value={power}
-                                    onChange={setPower}
-                                    units="W"
-                                    min={0}
+                                    label="Hot Wall Temp"
+                                    tooltip="Fixed temperature applied at the selected boundary face."
+                                    value={hotWallTemp}
+                                    onChange={setHotWallTemp}
+                                    units="K"
+                                    min={273.15}
                                 />
+                                <div className="flex flex-col gap-1">
+                                    <label className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium flex items-center gap-1.5">
+                                        Hot Wall Face
+                                        <div className="relative group/tip cursor-help">
+                                            <HelpCircle className="w-2.5 h-2.5 opacity-40 hover:opacity-80 transition-opacity" />
+                                            <div className="absolute left-full ml-2 top-0 px-2 py-1 bg-popover text-popover-foreground text-[10px] rounded border border-border shadow-xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-opacity whitespace-normal w-48 z-50">
+                                                Which face to apply the hot temperature BC. Cold BC is applied to the opposite face.
+                                            </div>
+                                        </div>
+                                    </label>
+                                    <select
+                                        value={hotWallFace}
+                                        onChange={(e) => setHotWallFace(e.target.value)}
+                                        className="w-full bg-input/50 border border-border rounded px-2 py-1 text-xs font-mono text-foreground focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                                    >
+                                        <option value="z_min">Z-Min (Bottom)</option>
+                                        <option value="z_max">Z-Max (Top)</option>
+                                        <option value="x_min">X-Min (Left)</option>
+                                        <option value="x_max">X-Max (Right)</option>
+                                        <option value="y_min">Y-Min (Front)</option>
+                                        <option value="y_max">Y-Max (Back)</option>
+                                    </select>
+                                </div>
                                 <SmartInput
                                     label="Ambient Temp"
                                     tooltip="Temperature of the surrounding environment."
@@ -654,7 +744,17 @@ function App() {
                             })}
                             {simResults?.report_url && (
                                 <div className="text-blue-400 mt-2">
-                                    {'   '} <a href={`http://localhost:8000${simResults.report_url}`} target="_blank" rel="noreferrer" className="hover:underline underline-offset-4 decoration-blue-400/30">View Analysis Report</a>
+                                    {'   '} <a
+                                        href={`http://localhost:8000${simResults.report_url}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="hover:underline underline-offset-4 decoration-blue-400/30"
+                                        onClick={(e) => {
+                                            // Ensure it opens in new tab
+                                            e.preventDefault()
+                                            window.open(e.currentTarget.href, '_blank', 'noopener,noreferrer')
+                                        }}
+                                    >View Analysis Report</a>
                                 </div>
                             )}
                         </div>
@@ -667,4 +767,3 @@ function App() {
 }
 
 export default App
-

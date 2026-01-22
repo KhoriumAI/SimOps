@@ -173,6 +173,18 @@ class CFDMeshStrategy:
             # Write output
             self._log(f"Writing mesh to: {output_file}")
             
+            # [Fix] Remove Physical Groups of dim 0 (Points)
+            # gmshToFoam fails with "Unhandled element 15" if point physical groups exist.
+            # We only need Surface (2) and Volume (3) groups for OpenFOAM.
+            phys_groups = gmsh.model.getPhysicalGroups()
+            removed_points = 0
+            for dim, tag in phys_groups:
+                if dim == 0:
+                    gmsh.model.removePhysicalGroups([(dim, tag)])
+                    removed_points += 1
+            if removed_points > 0:
+                self._log(f"  [Fix] Removed {removed_points} point physical groups (incompatible with gmshToFoam)")
+            
             # [Critical] Force MSH 2.2 for OpenFOAM compatibility
             # gmshToFoam often results in "bad stream" or "unknown element" with MSH 4.1
             gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)

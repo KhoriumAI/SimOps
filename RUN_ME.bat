@@ -16,17 +16,35 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/4] Pulling latest images (optional)...
-docker-compose pull
+echo Select startup mode:
+echo   [R] Rebuild Docker images (backend/frontend) and run
+echo   [S] Start with existing images
+echo   [Q] Quit
+echo.
 
-echo [2/4] Starting SimOps services in background...
+:prompt
+set /p choice=Choose [R/S/Q]: 
+if /I "%choice%"=="R" goto rebuild
+if /I "%choice%"=="S" goto run
+if /I "%choice%"=="Q" exit /b 0
+echo Invalid choice. Please enter R, S, or Q.
+echo.
+goto prompt
+
+:rebuild
+echo Rebuilding Docker images...
+docker-compose build
+goto run
+
+:run
+echo Starting SimOps services in background...
 docker-compose up -d
 
-echo [3/4] Waiting for services to initialize...
+echo Waiting for services to initialize...
 echo (This may take 15-30 seconds on first run)
 timeout /t 15 /nobreak
 
-echo [4/4] Launching SimOps Workbench in your browser...
+echo Launching SimOps Workbench in your browser...
 start http://localhost:3000
 
 echo.

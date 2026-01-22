@@ -35,7 +35,7 @@ class SolverSettings(BaseModel):
     transient: bool = Field(True, description="True for transient, False for steady-state")
     duration: float = Field(60.0, description="Simulation time in seconds")
     time_step: float = Field(1.0, description="Time step in seconds", gt=0)
-    iterations: int = Field(1000, description="Max iterations", gt=0)
+    iterations: int = Field(50, description="Max iterations", gt=0)
 
 class MeshSettings(BaseModel):
     """Meshing parameters."""
@@ -51,6 +51,8 @@ class SimConfig(BaseModel):
     boundary_conditions: List[BoundaryCondition] = Field(default_factory=list)
     solver_settings: SolverSettings = Field(default_factory=SolverSettings)
     mesh_settings: MeshSettings = Field(default_factory=MeshSettings)
+    ambient_temperature: float = Field(293.15, description="Ambient temperature in Kelvin", gt=0)
+    heat_source_temperature: float = Field(373.15, description="Heat source temperature in Kelvin", gt=0)
 
     class Config:
         use_enum_values = True

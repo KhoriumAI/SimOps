@@ -5,7 +5,6 @@ import { EffectComposer, SSAO, Bloom } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { VTKLoader, STLLoader } from 'three-stdlib'
 import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Settings2, Maximize, Minimize, Ruler, AlertTriangle } from 'lucide-react'
-import { motion, AnimatePresence } from 'framer-motion'
 
 class ErrorBoundary extends React.Component {
     constructor(props) {
@@ -24,6 +23,11 @@ class ErrorBoundary extends React.Component {
     }
     render() {
         if (this.state.hasError) {
+            // Check for specific error to supress
+            if (this.state.error?.message?.includes && this.state.error.message.includes("Unsupported DATASET type") && this.props.fallback) {
+                return this.props.fallback
+            }
+
             return (
                 <Html center>
                     <div className="flex flex-col items-center justify-center h-full text-red-500 p-4 bg-black/90 w-96 rounded border border-red-500/50">
@@ -74,27 +78,69 @@ function EngineeringMesh({ url, wireframe, opacity, useMatcap }) {
     const Loader = isStl ? STLLoader : VTKLoader
 
     const geometry = useLoader(Loader, url)
-    // Matcap: 'Matcap_Gray' provides a good neutral engineering look
-    // Matcap removed for offline stability. Using standard material.
+
+    // Colormap state
+    const [stats, setStats] = useState({ min: 0, max: 0, hasTemp: false })
 
     useMemo(() => {
         if (geometry) {
             geometry.computeBoundingBox()
             geometry.center()
             geometry.computeVertexNormals()
+
+            // Thermal Color Mapping Logic
+            // 1. Find temperature attribute
+            let tempAttr = geometry.attributes.T || geometry.attributes.temperature || geometry.attributes.Temperature
+
+            // If not found in standard attributes, check userData (common in some loaders)
+            if (!tempAttr && geometry.userData?.pointData) {
+                // Try to find it in pointData
+                // Note: VTKLoader might put data in geometry.attributes directly if it's a BufferGeometry
+            }
+
+            if (tempAttr) {
+                const count = tempAttr.count
+                let min = Infinity, max = -Infinity
+
+                // 2. Compute Range
+                for (let i = 0; i < count; i++) {
+                    const val = tempAttr.getX(i)
+                    if (val < min) min = val
+                    if (val > max) max = val
+                }
+
+                // 3. Generate Colors
+                // Simple Blue-Red Colormap (Jet-like)
+                const colors = []
+                const color = new THREE.Color()
+
+                for (let i = 0; i < count; i++) {
+                    const val = tempAttr.getX(i)
+                    const t = (val - min) / (max - min || 1)
+
+                    // Lerp from Blue (0,0,1) to Red (1,0,0) via Green/Yellow?
+                    // Simple 3-stop: Blue -> Green -> Red
+                    // Or standard HSV sweep. Let's do a simple HSL sweep: 240 (blue) -> 0 (red)
+                    // H: 0.66 -> 0.0
+                    color.setHSL(0.66 * (1.0 - t), 1.0, 0.5)
+
+                    colors.push(color.r, color.g, color.b)
+                }
+
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+                setStats({ min, max, hasTemp: true })
+            }
         }
     }, [geometry])
 
     return (
         <mesh castShadow receiveShadow>
-            {/* Clone geometry to allow independent wireframe mesh if needed */}
             <primitive object={geometry} />
             <meshStandardMaterial
-                color="#e5e7eb"
+                vertexColors={stats.hasTemp}
+                color={stats.hasTemp ? undefined : "#e5e7eb"}
                 roughness={0.4}
-                metalness={0.6}
-                transparent={opacity < 1}
-                opacity={opacity}
+                metalness={0.1}
                 side={THREE.DoubleSide}
             />
 
@@ -163,21 +209,15 @@ export default function ResultViewer({ meshData, filename, isLoading, loadingMes
             className="w-full h-full relative overflow-hidden bg-gradient-to-br from-[#2b2b2b] to-[#1a1a1a]"
             onContextMenu={handleContextMenu}
         >
-            {/* Loading Overlay */}
-            <AnimatePresence>
-                {isLoading && (
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        style={{ bottom: consoleOffset }}
-                        className="absolute inset-x-0 top-0 z-50 bg-background/80 flex flex-col items-center justify-center text-foreground"
-                    >
-                        <Loader2 className="w-8 h-8 animate-spin text-primary mb-2" />
-                        <p className="text-xs font-mono animate-pulse text-muted-foreground">{loadingMessage || 'PROCESSING GEOMETRY...'}</p>
-                    </motion.div>
-                )}
-            </AnimatePresence>
+            {/* Corner Loading Indicator - No Overlay */}
+            {isLoading && (
+                <div className="absolute top-4 right-4 z-50 flex items-center gap-2 bg-card/95 backdrop-blur border border-primary/30 rounded-lg px-3 py-2 shadow-xl">
+                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                    <span className="text-xs font-mono text-foreground">
+                        {loadingMessage || 'PROCESSING...'}
+                    </span>
+                </div>
+            )}
 
             {/* Canvas */}
             <Canvas shadows dpr={[1, 2]} gl={{ preserveDrawingBuffer: true }}>
@@ -197,7 +237,16 @@ export default function ResultViewer({ meshData, filename, isLoading, loadingMes
                 <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
 
                 <Center>
-                    <ErrorBoundary>
+                    <ErrorBoundary fallback={
+                        previewUrl ? (
+                            <EngineeringMesh
+                                url={previewUrl}
+                                wireframe={wireframe}
+                                opacity={opacity}
+                                useMatcap={useMatcap}
+                            />
+                        ) : null
+                    } key={meshUrl}>
                         <Suspense fallback={null}>
                             {meshUrl || previewUrl ? (
                                 <EngineeringMesh
@@ -232,12 +281,9 @@ export default function ResultViewer({ meshData, filename, isLoading, loadingMes
             <div className="absolute top-2 left-2 flex flex-col gap-2 pointer-events-none">
                 {filename && (
                     <div className="pointer-events-auto bg-card/90 backdrop-blur border-l-2 border-primary p-2 shadow-lg min-w-[180px]">
-                        <div className="flex items-center gap-2 mb-1">
+                        <div className="flex items-center gap-2">
                             <Box className="w-3 h-3 text-primary" />
                             <span className="text-[10px] font-bold text-foreground uppercase tracking-wider">{filename}</span>
-                        </div>
-                        <div className="text-[9px] font-mono text-muted-foreground">
-                            {meshUrl ? 'ACTIVE MESH' : 'NO GEOMETRY'}
                         </div>
                     </div>
                 )}

@@ -59,10 +59,14 @@ class ThermalPDFReportGenerator:
         min_temp = data.get('min_temp_k') or data.get('min_temp_c', 0.0) + 273.15
         delta_t = max_temp - min_temp
         
+        # Get heat source temperature (applied at z_min)
+        source_temp_k = data.get('source_temp_k') or data.get('heat_source_temperature') or (data.get('source_temp_c', 100.0) + 273.15)
+        source_temp_c = source_temp_k - 273.15
+        
         metrics = [
             ("Strategy", data.get('strategy_name', 'Default')),
             ("Ambient Temperature", f"{data.get('ambient_temp_c', 20.0):.1f} °C"),
-            ("Heat Source", f"{data.get('source_temp_c', 100.0):.1f} °C"),
+            ("Heat Source (z_min)", f"{source_temp_c:.1f} °C ({source_temp_k:.1f} K)"),
             ("Max Temperature", f"{max_temp:.2f} K ({max_temp - 273.15:.2f} °C)"),
             ("Min Temperature", f"{min_temp:.2f} K ({min_temp - 273.15:.2f} °C)"),
             ("Temperature Range (ΔT)", f"{delta_t:.2f} K"),

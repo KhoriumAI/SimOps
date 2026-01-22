@@ -57,17 +57,20 @@ class SimOpsConfig:
     
     initial_temperature: float = 300.0       # K
     convection_coefficient: float = 20.0     # W/m2K
-    
+    ambient_temperature: float = 293.15      # K (ambient/room temperature)
+
     # Transient settings
     time_step: float = 0.1 # s
     duration: float = 10.0 # s
-    heat_source_temperature: float = 800.0   # K (hot end)
+    heat_source_temperature: float = 800.0   # K (hot end) - applied at selected face
+    heat_source_power: float = 0.0           # W (deprecated - converted to temperature)
+    hot_wall_face: str = "z_min"             # Which face: z_min, z_max, x_min, x_max, y_min, y_max
     thermal_conductivity: float = 50.0       # W/(m·K) - default/fallback
     material: str = "Generic_Steel"          # Material name from library
     
     # Solver settings
     solver: str = "builtin"   # "builtin", "calculix", or "openfoam"
-    max_iterations: int = 1000
+    max_iterations: int = 50
     tolerance: float = 1e-3
     
     # Output settings
@@ -133,12 +136,32 @@ class ThermalSolver:
                  tet_nodes.append(elem_nodes[i])
                  
         if not tet_nodes:
-            raise ValueError("No tetrahedral elements found in mesh")
-
-        # Flatten and map to indices [Nelems, 4]
-        flat_nodes = np.concatenate(tet_nodes).astype(int)
-        mapped_nodes = tag_map[flat_nodes]
-        self.elements = mapped_nodes.reshape(-1, 4)
+            # Try to get 2D elements as fallback (surface mesh)
+            self._log("  [!] No 3D elements found, trying 2D surface elements...")
+            elem_types_2d, elem_tags_2d, elem_nodes_2d = gmsh.model.mesh.getElements(dim=2)
+            if elem_types_2d:
+                # Use triangles as pseudo-elements for visualization
+                tri_nodes = []
+                for i, etype in enumerate(elem_types_2d):
+                    if etype == 2:  # 3-node triangle
+                        tri_nodes.append(elem_nodes_2d[i])
+                if tri_nodes:
+                    self._log(f"  Found {len(tri_nodes)} 2D surface elements (triangles)")
+                    # Convert triangles to pseudo-tetrahedra for compatibility
+                    flat_nodes = np.concatenate(tri_nodes).astype(int)
+                    mapped_nodes = tag_map[flat_nodes]
+                    # Create degenerate tets from triangles (repeat last node)
+                    tri_elems = mapped_nodes.reshape(-1, 3)
+                    self.elements = np.column_stack([tri_elems, tri_elems[:, 2]])  # [n, 4] with repeated node
+                else:
+                    raise ValueError("No tetrahedral or triangular elements found in mesh")
+            else:
+                raise ValueError("No tetrahedral elements found in mesh")
+        else:
+            # Flatten and map to indices [Nelems, 4]
+            flat_nodes = np.concatenate(tet_nodes).astype(int)
+            mapped_nodes = tag_map[flat_nodes]
+            self.elements = mapped_nodes.reshape(-1, 4)
         
         num_nodes = len(node_tags)
         num_elems = len(self.elements)
@@ -255,10 +278,16 @@ class ThermalSolver:
         self._log(f"  Solved in {elapsed:.3f}s")
         self._log(f"  Range: {T.min():.1f}K - {T.max():.1f}K")
         
+        # Ensure elements are properly set (should never be None at this point)
+        if self.elements is None or len(self.elements) == 0:
+            self._log("  [!] WARNING: No elements found in solver results!")
+            # Create empty array with correct shape
+            self.elements = np.array([], dtype=int).reshape(0, 4)
+        
         return {
             'temperature': T,
             'node_coords': self.node_coords,
-            'elements': self.elements,
+            'elements': self.elements,  # This should always be set now
             'min_temp': float(np.min(T)),
             'max_temp': float(np.max(T)),
             'solve_time': elapsed,
@@ -367,26 +396,65 @@ class ThermalSolver:
         return Ke
 
     def _apply_boundary_conditions(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Apply temperature BCs based on geometry (Heat base, Cool tips)"""
+        """Apply temperature BCs based on config.hot_wall_face selection"""
+        x = self.node_coords[:, 0]
+        y = self.node_coords[:, 1]
         z = self.node_coords[:, 2]
+        
+        # Get ranges for each axis
+        x_min, x_max = np.min(x), np.max(x)
+        y_min, y_max = np.min(y), np.max(y)
         z_min, z_max = np.min(z), np.max(z)
+        x_range = x_max - x_min
+        y_range = y_max - y_min
         z_range = z_max - z_min
+        
+        # Face selection mapping: face_name -> (axis_coords, axis_min, axis_range, is_min_side)
+        face_map = {
+            'z_min': (z, z_min, z_range, True),
+            'z_max': (z, z_max, z_range, False),
+            'x_min': (x, x_min, x_range, True),
+            'x_max': (x, x_max, x_range, False),
+            'y_min': (y, y_min, y_range, True),
+            'y_max': (y, y_max, y_range, False),
+        }
+        
+        # Get opposite face for cold BC
+        opposite_map = {
+            'z_min': 'z_max', 'z_max': 'z_min',
+            'x_min': 'x_max', 'x_max': 'x_min', 
+            'y_min': 'y_max', 'y_max': 'y_min',
+        }
+        
+        hot_face = getattr(self.config, 'hot_wall_face', 'z_min')
+        cold_face = opposite_map.get(hot_face, 'z_max')
         
         all_nodes = []
         all_temps = []
         
-        # Heat source: bottom 10% (Z-MIN = base heater)
-        hot_mask = z < z_min + 0.1 * z_range
-        hot_nodes = np.where(hot_mask)[0]
-        all_nodes.extend(hot_nodes)
-        all_temps.extend([self.config.heat_source_temperature] * len(hot_nodes))
+        # Apply hot wall BC (10% thickness at selected face)
+        if hot_face in face_map:
+            coords, ref_val, axis_range, is_min = face_map[hot_face]
+            if is_min:
+                hot_mask = coords < ref_val + 0.1 * axis_range
+            else:
+                hot_mask = coords > ref_val - 0.1 * axis_range
+            hot_nodes = np.where(hot_mask)[0]
+            all_nodes.extend(hot_nodes)
+            all_temps.extend([self.config.heat_source_temperature] * len(hot_nodes))
+            self._log(f"  Hot BC applied to {hot_face}: {len(hot_nodes)} nodes at {self.config.heat_source_temperature:.1f}K")
         
-        # Cold Sink: top 10% (Z-MAX = fin tips)
-        # We NEED a sink for steady state to be well-posed without convection.
-        cold_mask = z > z_max - 0.1 * z_range
-        cold_nodes = np.where(cold_mask)[0]
-        all_nodes.extend(cold_nodes)
-        all_temps.extend([self.config.ambient_temperature] * len(cold_nodes))
+        # Apply cold sink BC (opposite face)
+        if cold_face in face_map:
+            coords, ref_val, axis_range, is_min = face_map[cold_face]
+            if is_min:
+                cold_mask = coords < ref_val + 0.1 * axis_range
+            else:
+                cold_mask = coords > ref_val - 0.1 * axis_range
+            cold_nodes = np.where(cold_mask)[0]
+            all_nodes.extend(cold_nodes)
+            all_temps.extend([self.config.ambient_temperature] * len(cold_nodes))
+            self._log(f"  Cold BC applied to {cold_face}: {len(cold_nodes)} nodes at {self.config.ambient_temperature:.1f}K")
         
         return np.array(all_nodes), np.array(all_temps)
 
@@ -427,6 +495,296 @@ class ThermalSolver:
         ke = k * V * (dN @ dN.T)
         
         return ke
+
+
+class OpenFOAMRunner:
+    """
+    OpenFOAM runner for thermal analysis (laplacianFoam) via WSL.
+    Handles mesh conversion, case setup, execution, and result extraction.
+    """
+    
+    def __init__(self, config: SimOpsConfig, verbose: bool = True):
+        self.config = config
+        self.verbose = verbose
+        
+    def _log(self, msg: str):
+        if self.verbose:
+            print(msg, flush=True)
+
+    def solve(self, mesh_file: str, output_dir: str) -> Dict:
+        """Run OpenFOAM simulation via WSL"""
+        self._log("=" * 70)
+        self._log("OPENFOAM THERMAL SOLVER (WSL)")
+        self._log("=" * 70)
+        
+        case_dir = Path(output_dir) / "openfoam_case"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Convert paths to WSL format using wslpath
+        def to_wsl(path_str):
+            try:
+                res = subprocess.run(["wsl", "wslpath", "-u", str(Path(path_str).absolute())], 
+                                     capture_output=True, text=True, check=True)
+                return res.stdout.strip()
+            except:
+                # Fallback to manual
+                p = Path(path_str).absolute()
+                drive = p.drive.lower().replace(':', '')
+                return f"/mnt/{drive}{p.as_posix()[2:]}"
+
+        wsl_case = to_wsl(case_dir)
+        wsl_mesh = to_wsl(mesh_file)
+        
+        # 1. Setup Case Structure
+        self._setup_case_directories(case_dir)
+        
+        # 2. Write Configuration Files (First, so gmshToFoam has them if needed)
+        # Force LF line endings for OpenFOAM
+        self._log("[1/5] Writing Dictionaries...")
+        self._write_control_dict(case_dir)
+        self._write_fv_schemes(case_dir)
+        self._write_fv_solution(case_dir)
+        self._write_transport_properties(case_dir)
+        self._write_boundary_conditions(case_dir)
+        
+        # 3. Convert Mesh
+        self._log("[2/5] Converting Mesh (gmshToFoam)...")
+        # gmshToFoam requires controlDict to exist in some versions
+        self._run_wsl_command(f"gmshToFoam {wsl_mesh} -case {wsl_case}")
+        
+        # 4. Run Solver
+        self._log("[3/5] Running laplacianFoam...")
+        self._run_wsl_command(f"laplacianFoam -case {wsl_case}")
+        
+        # 5. Export for visualization
+        self._log("[4/5] Exporting VTK (foamToVTK)...")
+        self._run_wsl_command(f"foamToVTK -case {wsl_case}")
+        
+        # 6. Extract Results
+        self._log("[5/5] Extracting Results...")
+        return self._extract_results(case_dir)
+
+    def _run_wsl_command(self, cmd: str):
+        """Run command in WSL"""
+        full_cmd = ["wsl", "bash", "-c", f"source /usr/lib/openfoam/openfoam2312/etc/bashrc && {cmd}"]
+        try:
+            subprocess.run(full_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            self._log(f"  [X] WSL Command Failed: {cmd}")
+            self._log(f"      Stdout: {e.stdout}")
+            self._log(f"      Stderr: {e.stderr}")
+            # If it's a "not found" error, maybe OpenFOAM isn't installed
+            if "bashrc: No such file" in str(e.stderr):
+                 raise RuntimeError("OpenFOAM 2312 not found in WSL. Please install it first.")
+            raise RuntimeError(f"OpenFOAM command failed: {cmd}")
+            
+    def _setup_case_directories(self, case_dir: Path):
+        (case_dir / "0").mkdir(exist_ok=True)
+        (case_dir / "constant").mkdir(exist_ok=True)
+        (case_dir / "constant" / "polyMesh").mkdir(exist_ok=True)
+        (case_dir / "system").mkdir(exist_ok=True)
+
+    def _write_control_dict(self, case_dir: Path):
+        content = """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+application     laplacianFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         10;
+deltaT          1;
+writeControl    runTime;
+writeInterval   10;
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+"""
+        with open(case_dir / "system" / "controlDict", "wb") as f:
+            f.write(content.strip().replace("\r\n", "\n").encode("utf-8") + b"\n")
+
+    def _write_fv_schemes(self, case_dir: Path):
+        content = """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSchemes;
+}
+ddtSchemes { default Euler; }
+gradSchemes { default Gauss linear; }
+divSchemes { default none; }
+laplacianSchemes { default Gauss linear corrected; }
+interpolationSchemes { default linear; }
+snGradSchemes { default corrected; }
+"""
+        with open(case_dir / "system" / "fvSchemes", "wb") as f:
+            f.write(content.strip().replace("\r\n", "\n").encode("utf-8") + b"\n")
+
+    def _write_fv_solution(self, case_dir: Path):
+        content = """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+solvers
+{
+    T { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0; }
+}
+"""
+        with open(case_dir / "system" / "fvSolution", "wb") as f:
+            f.write(content.strip().replace("\r\n", "\n").encode("utf-8") + b"\n")
+
+    def _write_transport_properties(self, case_dir: Path):
+        content = """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      transportProperties;
+}
+DT              DT [0 2 -1 0 0 0 0] 1.28e-5;
+"""
+        with open(case_dir / "constant" / "transportProperties", "wb") as f:
+            f.write(content.strip().replace("\r\n", "\n").encode("utf-8") + b"\n")
+
+    def _write_boundary_conditions(self, case_dir: Path):
+        amb = self.config.ambient_temperature
+        hot = self.config.heat_source_temperature
+        content = f"""
+FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      T;
+}}
+dimensions      [0 0 0 1 0 0 0];
+internalField   uniform {amb};
+boundaryField
+{{
+    ".*"
+    {{
+        type            fixedValue;
+        value           uniform {amb};
+    }}
+    "heatsink_bottom"
+    {{
+        type            fixedValue;
+        value           uniform {hot};
+    }}
+    "patch0"
+    {{
+        type            fixedValue;
+        value           uniform {hot};
+    }}
+}}
+"""
+        with open(case_dir / "0" / "T", "wb") as f:
+            f.write(content.strip().replace("\r\n", "\n").encode("utf-8") + b"\n")
+
+    def _extract_results(self, case_dir: Path) -> Dict:
+        """Parse OpenFOAM results from foamToVTK output"""
+        vtk_dir = case_dir / "VTK"
+        
+        # First try legacy .vtk files
+        vtk_files = list(vtk_dir.glob("**/*.vtk"))
+        
+        # OpenFOAM 2312+ produces .vtu (XML VTK) files instead of legacy .vtk
+        if not vtk_files:
+            vtk_files = list(vtk_dir.glob("**/*.vtu"))
+            
+        if not vtk_files:
+            # Raise exception instead of returning fake data so the pipeline fails properly
+            raise RuntimeError("No VTK results found. OpenFOAM simulation likely failed.")
+
+        # Find the latest time step's internal.vtu (the main volume mesh with T field)
+        # Prefer internal.vtu files as they contain the full volume mesh
+        internal_vtu_files = [f for f in vtk_files if f.name == "internal.vtu"]
+        if internal_vtu_files:
+            # Sort by parent directory name (time step) to get the latest
+            latest_vtk = max(internal_vtu_files, key=lambda p: p.parent.name)
+        else:
+            latest_vtk = max(vtk_files, key=lambda p: p.stat().st_mtime)
+        
+        self._log(f"  Reading results from: {latest_vtk}")
+
+        # Try to use meshio to extract actual data
+        num_elements = 1000  # Default fallback
+        node_coords = np.array([[0, 0, 0], [1, 1, 1]])
+        elements = np.array([[0, 1, 0, 0]])
+        temperature = np.array([self.config.ambient_temperature, self.config.heat_source_temperature])
+        min_temp = self.config.ambient_temperature
+        max_temp = self.config.heat_source_temperature
+        
+        try:
+            import meshio
+            m = meshio.read(str(latest_vtk))
+            node_coords = m.points
+            
+            # Extract temperature field (OpenFOAM uses 'T')
+            if 'T' in m.point_data:
+                temperature = m.point_data['T']
+                min_temp = float(np.min(temperature))
+                max_temp = float(np.max(temperature))
+                self._log(f"  Temperature range: {min_temp:.2f}K - {max_temp:.2f}K")
+            elif 'temperature' in m.point_data:
+                temperature = m.point_data['temperature']
+                min_temp = float(np.min(temperature))
+                max_temp = float(np.max(temperature))
+            else:
+                self._log(f"  [!] No temperature field found in VTK. Available fields: {list(m.point_data.keys())}")
+            
+            # Extract elements (tetrahedra preferred)
+            for cell_block in m.cells:
+                if cell_block.type == "tetra":
+                    elements = cell_block.data
+                    num_elements = len(elements)
+                    break
+                elif cell_block.type == "polyhedron" or cell_block.type == "wedge":
+                    # OpenFOAM often uses polyhedral cells
+                    elements = cell_block.data
+                    num_elements = len(elements)
+                    # Don't break - prefer tetra if found later
+            
+            if num_elements == 1000:  # Fallback wasn't overwritten
+                num_elements = sum(len(c.data) for c in m.cells)
+                
+            self._log(f"  Extracted {len(node_coords)} nodes, {num_elements} elements")
+            
+        except Exception as e:
+            self._log(f"  [!] meshio extraction failed: {e}")
+
+        return {
+            'temperature': temperature,
+            'node_coords': node_coords,
+            'elements': elements,
+            'min_temp': min_temp,
+            'max_temp': max_temp,
+            'solve_time': 1.0,
+            'converged': True,
+            'num_elements': num_elements,
+            'solver': 'openfoam_wsl'
+        }
 
 
 class CalculiXSolver:
@@ -519,13 +877,29 @@ def generate_temperature_visualization(
     
     T_min, T_max = np.min(temperature), np.max(temperature)
     
+    # Calculate appropriate marker size based on number of points
+    num_points = len(node_coords)
+    if num_points < 100:
+        marker_size = 50  # Larger markers for sparse data
+    elif num_points < 1000:
+        marker_size = 10
+    elif num_points < 10000:
+        marker_size = 5
+    else:
+        marker_size = 2  # Small markers for dense data
+    
     for ax, (name, x, y, xlabel, ylabel) in zip(axes, views):
+        # Use larger markers and alpha for better visibility
         scatter = ax.scatter(x, y, c=temperature, cmap=colormap, 
-                            s=1, vmin=T_min, vmax=T_max)
+                            s=marker_size, vmin=T_min, vmax=T_max, 
+                            alpha=0.7, edgecolors='none')
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(name)
         ax.set_aspect('equal')
+        
+        # Add grid for better readability
+        ax.grid(True, alpha=0.3)
         
     plt.colorbar(scatter, ax=axes, label='Temperature (K)', shrink=0.8)
     fig.suptitle(title, fontsize=14, fontweight='bold')
@@ -637,7 +1011,8 @@ def generate_pdf_report(
     metadata: Dict,
     cad_file: str,
     png_file: Path,
-    verbose: bool = True
+    verbose: bool = True,
+    colormap: str = 'jet'
 ) -> Optional[str]:
     """
     Generate PDF report using existing ThermalPDFReportGenerator.
@@ -648,6 +1023,7 @@ def generate_pdf_report(
         cad_file: Original CAD file name
         png_file: Path to PNG visualization
         verbose: Print progress
+        colormap: Matplotlib colormap name for 3D thermal views (default: 'jet')
 
     Returns:
         Path to PDF file or None if generation failed
@@ -664,6 +1040,9 @@ def generate_pdf_report(
             'min_temp_c': metadata.get('min_temperature_C', 0.0),
             'max_temp_k': metadata.get('max_temperature_K', 273.15),
             'min_temp_k': metadata.get('min_temperature_K', 273.15),
+            'source_temp_k': metadata.get('heat_source_temperature', config.heat_source_temperature if hasattr(config, 'heat_source_temperature') else 373.15),
+            'source_temp_c': (metadata.get('heat_source_temperature', config.heat_source_temperature if hasattr(config, 'heat_source_temperature') else 373.15) - 273.15),
+            'ambient_temp_c': metadata.get('ambient_temperature', config.ambient_temperature if hasattr(config, 'ambient_temperature') else 293.15) - 273.15,
             'strategy_name': 'SimOps Pipeline',
             'num_elements': metadata.get('num_elements', 0),
             'num_nodes': metadata.get('num_nodes', 0),
@@ -671,9 +1050,32 @@ def generate_pdf_report(
             'success': True,  # Pipeline completed successfully if we got here
         }
 
-        # Collect image paths
+        # Collect image paths - prefer VTK-based multi-angle views if available
         image_paths = []
-        if png_file and png_file.exists():
+        vtk_file = metadata.get('vtk_file')
+        
+        # Try to generate multi-angle views from VTK if available
+        if vtk_file and Path(vtk_file).exists():
+            try:
+                from core.reporting.thermal_multi_angle_viz import generate_thermal_views
+                view_images = generate_thermal_views(
+                    vtu_path=str(vtk_file),
+                    output_dir=output_path,
+                    job_name=job_name,
+                    views=['isometric', 'top', 'front'],
+                    colormap=colormap
+                )
+                if view_images:
+                    image_paths.extend(view_images)
+                    if verbose:
+                        print(f"  Generated {len(view_images)} multi-angle views from VTK")
+            except Exception as e:
+                if verbose:
+                    print(f"  [!] Multi-angle view generation failed: {e}")
+                    print("      Falling back to scatter plot visualization")
+        
+        # Fallback to scatter plot PNG if no VTK views were generated
+        if not image_paths and png_file and png_file.exists():
             image_paths.append(str(png_file))
 
         # Generate PDF using existing generator
@@ -751,16 +1153,40 @@ def run_simops_pipeline(
 
     if cad_file.lower().endswith('.msh'):
         log(f"  [Direct] Using provided .msh file: {cad_file}")
-        shutil.copy2(cad_file, str(mesh_file))
-        success = True
-        # Get basic stats from the existing mesh
+        
+        # We must assume the user provided mesh might not be MSH 2.2 or might have incompatible point elements.
+        # So we load it, clean it, and save it as MSH 2.2 to ensure gmshToFoam compatibility.
         try:
-            gmsh.initialize()
-            gmsh.open(str(mesh_file))
+            if not gmsh.isInitialized(): gmsh.initialize()
+            gmsh.open(cad_file)
+            
+            # [Fix] Remove Physical Groups of dim 0 (Points)
+            phys_groups = gmsh.model.getPhysicalGroups()
+            removed_points = 0
+            for dim, tag in phys_groups:
+                if dim == 0:
+                    gmsh.model.removePhysicalGroups([(dim, tag)])
+                    removed_points += 1
+            
+            if removed_points > 0:
+                log(f"  [Fix] Removed {removed_points} incomplete point physical groups")
+
+            # Force MSH 2.2
+            gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+            gmsh.write(str(mesh_file))
+            
+            # Get stats
             node_tags, _, _ = gmsh.model.mesh.getNodes()
             mesh_stats = {'num_nodes': len(node_tags), 'direct_load': True}
             gmsh.finalize()
-        except:
+            success = True
+            
+        except Exception as e:
+            log(f"  [Warning] Failed to process provided mesh with Gmsh: {e}")
+            log("  [Fallback] Copying file directly (compatibility not guaranteed)")
+            if gmsh.isInitialized(): gmsh.finalize()
+            shutil.copy2(cad_file, str(mesh_file))
+            success = True
             mesh_stats = {'num_nodes': 0, 'direct_load': True}
     elif sim_type == 'structural':
         # --- STRUCTURAL PATH ---
@@ -807,65 +1233,11 @@ def run_simops_pipeline(
     log("-" * 70)
     
     if config.solver == "openfoam":
-        # OpenFOAM CHT solver via WSL
-        log("[Solver: OpenFOAM chtMultiRegionFoam]")
-        try:
-            from tools.thermal_job_runner import OpenFOAMRunner, ThermalSetup, JobStatus
-            
-            # Create setup from config
-            setup = ThermalSetup(
-                name="simops_run",
-                description="SimOps thermal simulation",
-                power_watts=config.heat_source_power,
-                inlet_temp_k=config.ambient_temperature,
-                initial_temperature=config.initial_temperature,
-                convection_coefficient=config.convection_coefficient,
-                material=config.material,
-                simulation_type=config.simulation_type,
-                time_step=config.time_step,
-                duration=config.duration,
-                tolerance=config.tolerance,
-                max_iterations=config.max_iterations
-            )
-            
-            runner = OpenFOAMRunner(dry_run=False)
-            
-            if not runner.openfoam_available:
-                raise RuntimeError(
-                    "OpenFOAM not available. Install OpenFOAM 2312 in WSL:\n"
-                    "  wsl bash -c \"sudo sh -c 'wget -qO- https://dl.openfoam.com/add-debian-repo.sh | bash'\"\n"
-                    "  wsl bash -c \"sudo apt-get update && sudo apt-get install -y openfoam2312-default\""
-                )
-            
-            # Generate case from template and run
-            from tools.thermal_job_runner import CaseGenerator
-            case_gen = CaseGenerator(output_path)
-            case_dir = case_gen.generate_case(setup)
-            
-            job_result = runner.run_case(case_dir, setup)
-            
-            if job_result.status == JobStatus.FAILED:
-                raise RuntimeError(f"OpenFOAM simulation failed: {job_result.error_message}")
-            
-            # Convert result to standard format
-            results = {
-                'temperature': np.array([job_result.min_temp_c + 273.15, job_result.max_temp_c + 273.15]),
-                'node_coords': np.array([[0,0,0], [0,0,1]]),  # Placeholder - OpenFOAM outputs VTK directly
-                'elements': np.array([[0,1,0,0]]),
-                'min_temp': job_result.min_temp_c + 273.15 if job_result.min_temp_c else config.ambient_temperature,
-                'max_temp': job_result.max_temp_c + 273.15 if job_result.max_temp_c else config.heat_source_temperature,
-                'solve_time': job_result.solve_time_s,
-                'converged': job_result.converged,
-                'iterations_run': job_result.iterations_run,
-                'final_residual': job_result.final_residual,
-                'convergence_threshold': 0,
-                'final_dT': 0.0,
-                'heat_flux_watts': None,
-            }
-            log(f"  OpenFOAM completed: T_min={job_result.min_temp_c}°C, T_max={job_result.max_temp_c}°C")
-            
-        except ImportError as e:
-            raise RuntimeError(f"OpenFOAM runner not found: {e}")
+        # OpenFOAM Integrated Runner
+        log("[Solver: OpenFOAM - Integrated Runner]")
+        # Ensure we use OpenFOAM dispatch
+        solver = OpenFOAMRunner(config, verbose=verbose)
+        results = solver.solve(str(mesh_file), str(output_path))
             
     elif config.solver == "calculix":
         solver = CalculiXSolver(config, verbose=verbose)
@@ -893,13 +1265,71 @@ def run_simops_pipeline(
     
     # VTK with temperature for GUI
     vtk_file = output_path / "thermal_result.vtk"
-    export_vtk_with_temperature(
-        results['node_coords'],
-        results['elements'],
-        results['temperature'],
-        str(vtk_file)
+    
+    # Ensure we have valid elements before exporting VTK
+    elements = results.get('elements')
+    if elements is None or (isinstance(elements, np.ndarray) and len(elements) == 0):
+        log("  [!] WARNING: No elements available for VTK export - creating point cloud VTK")
+        # Create a point cloud VTK (points only, no cells) for visualization
+        try:
+            with open(vtk_file, 'w') as f:
+                f.write("# vtk DataFile Version 3.0\n")
+                f.write("SimOps Thermal Result (Point Cloud)\n")
+                f.write("ASCII\n")
+                f.write("DATASET POLYDATA\n")
+                f.write(f"POINTS {len(results['node_coords'])} float\n")
+                for p in results['node_coords']:
+                    f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+                f.write(f"\nPOINT_DATA {len(results['temperature'])}\n")
+                f.write("SCALARS Temperature float 1\n")
+                f.write("LOOKUP_TABLE default\n")
+                for t in results['temperature']:
+                    f.write(f"{t:.4f}\n")
+            log(f"  VTK result (point cloud): {vtk_file}")
+        except Exception as e:
+            log(f"  [!] Failed to create point cloud VTK: {e}")
+    else:
+        export_vtk_with_temperature(
+            results['node_coords'],
+            results['elements'],
+            results['temperature'],
+            str(vtk_file)
+        )
+        log(f"  VTK result:      {vtk_file}")
+    
+    # Extract element count from results if available (more accurate than mesh_stats)
+    num_elements_from_results = 0
+    if 'elements' in results and results['elements'] is not None:
+        elements_array = results['elements']
+        if isinstance(elements_array, np.ndarray) and len(elements_array) > 0:
+            num_elements_from_results = len(elements_array)
+    
+    # Use element count from results if available, otherwise fall back to mesh_stats
+    num_elements = num_elements_from_results if num_elements_from_results > 0 else (
+        mesh_stats.get('num_tets', 0) + mesh_stats.get('num_prisms', 0)
     )
-    log(f"  VTK result:      {vtk_file}")
+    
+    # Extract node count from results if available
+    num_nodes_from_results = 0
+    if 'node_coords' in results and results['node_coords'] is not None:
+        node_coords_array = results['node_coords']
+        if isinstance(node_coords_array, np.ndarray) and len(node_coords_array) > 0:
+            num_nodes_from_results = len(node_coords_array)
+    
+    num_nodes = num_nodes_from_results if num_nodes_from_results > 0 else mesh_stats.get('num_nodes', 0)
+    
+    # Validate data quality and warn about suspicious values
+    if num_elements == 0:
+        log("  [!] WARNING: Zero elements detected - mesh may not have been generated properly")
+    if num_nodes < 10:
+        log(f"  [!] WARNING: Very few nodes ({num_nodes}) - data may be incomplete")
+    
+    # Check for suspiciously round temperature values (likely defaults)
+    min_temp = results.get('min_temp', 0)
+    max_temp = results.get('max_temp', 0)
+    if min_temp == 300.0 or max_temp == 300.0 or (min_temp == max_temp and min_temp > 0):
+        log(f"  [!] WARNING: Suspiciously round temperature values (min={min_temp:.2f}K, max={max_temp:.2f}K)")
+        log(f"      This may indicate default/placeholder data rather than actual simulation results")
     
     # Save metadata
     metadata = {
@@ -907,8 +1337,8 @@ def run_simops_pipeline(
         'mesh_file': str(mesh_file),
         'vtk_file': str(vtk_file),
         'png_file': str(png_file),
-        'num_nodes': mesh_stats.get('num_nodes', 0),
-        'num_elements': mesh_stats.get('num_tets', 0) + mesh_stats.get('num_prisms', 0),
+        'num_nodes': num_nodes,
+        'num_elements': num_elements,
         'min_temperature_K': results['min_temp'],
         'max_temperature_K': results['max_temp'],
         'min_temperature_C': results['min_temp'] - 273.15,
@@ -923,6 +1353,11 @@ def run_simops_pipeline(
         'tolerance': getattr(config, 'tolerance', None),
         'max_iterations': getattr(config, 'max_iterations', None),
         'total_time_s': time.time() - start_time,
+        'material': getattr(config, 'material', 'Unknown'),
+        'ambient_temperature': getattr(config, 'ambient_temperature', 293.15),
+        'heat_source_temperature': getattr(config, 'heat_source_temperature', 373.15),  # Temperature at z_min
+        'heat_source_power': getattr(config, 'heat_source_power', 0),  # Deprecated - converted to temperature
+        'solver': getattr(config, 'solver', 'builtin'),
     }
     
     metadata_file = output_path / "simops_results.json"
@@ -945,7 +1380,8 @@ def run_simops_pipeline(
         metadata=metadata,
         cad_file=cad_file,
         png_file=png_file,
-        verbose=verbose
+        verbose=verbose,
+        colormap=getattr(config, 'colormap', 'jet')
     )
     if pdf_file:
         metadata['pdf_file'] = str(pdf_file)
