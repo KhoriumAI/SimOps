@@ -122,3 +122,25 @@ repro_*.sta
 # Test-specific directories
 structural_test_env/
 debug_structural_cube/
+
+# Forge Workflow
+_forge/
+
+# SimOps cache and output directories
+.simops/
+simops_output/
+thermal_runs/
+thermal_runs_real/
+output_sweep/
+verification_runs/
+jobs_log/
+
+# Rust build artifacts (Tauri)
+**/target/
+desktop-app/src-tauri/target/
+
+# User uploads (root level)
+uploads/
+
+# Example/test cases (if not needed in repo)
+ExampleOF_Cases/

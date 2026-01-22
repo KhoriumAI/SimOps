@@ -117,7 +117,7 @@ def run_wizard(target_cad: Optional[str] = None):
         target_cad = prompt("Target CAD File (or just Job Name)", default="simulation")
     
     path = Path(target_cad)
-    if path.suffix.lower() not in ['.step', '.stp', '.brep', '']: 
+    if path.suffix.lower() not in ['.step', '.stp', '.brep', '.msh', '']: 
         # Just a name?
         job_name = path.stem
         json_path = path.with_suffix('.json') if path.suffix else Path(f"{job_name}.json")

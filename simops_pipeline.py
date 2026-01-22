@@ -55,9 +55,12 @@ class SimOpsConfig:
     mesh_size_factor: float = 1.0
     second_order_mesh: bool = False # Added for Structural
     
-    # Thermal settings
-    heat_source_power: float = 1e6          # W
-    ambient_temperature: float = 300.0       # K
+    initial_temperature: float = 300.0       # K
+    convection_coefficient: float = 20.0     # W/m2K
+    
+    # Transient settings
+    time_step: float = 0.1 # s
+    duration: float = 10.0 # s
     heat_source_temperature: float = 800.0   # K (hot end)
     thermal_conductivity: float = 50.0       # W/(m·K) - default/fallback
     material: str = "Generic_Steel"          # Material name from library
@@ -65,7 +68,7 @@ class SimOpsConfig:
     # Solver settings
     solver: str = "builtin"   # "builtin", "calculix", or "openfoam"
     max_iterations: int = 1000
-    tolerance: float = 1e-6
+    tolerance: float = 1e-3
     
     # Output settings
     output_format: str = "vtk"   # vtk, msh
@@ -260,6 +263,8 @@ class ThermalSolver:
             'max_temp': float(np.max(T)),
             'solve_time': elapsed,
             'converged': True,
+            'iterations_run': None,
+            'final_residual': None,
             'convergence_threshold': 0,
             'final_dT': 0.0,
             'heat_flux_watts': None,
@@ -627,6 +632,74 @@ def export_vtk_with_temperature(
     return str(output_path)
 
 
+def generate_pdf_report(
+    output_path: Path,
+    metadata: Dict,
+    cad_file: str,
+    png_file: Path,
+    verbose: bool = True
+) -> Optional[str]:
+    """
+    Generate PDF report using existing ThermalPDFReportGenerator.
+
+    Args:
+        output_path: Output directory path
+        metadata: Simulation metadata dictionary
+        cad_file: Original CAD file name
+        png_file: Path to PNG visualization
+        verbose: Print progress
+
+    Returns:
+        Path to PDF file or None if generation failed
+    """
+    try:
+        from core.reporting.thermal_report import ThermalPDFReportGenerator
+
+        # Extract job name from CAD file
+        job_name = Path(cad_file).stem
+
+        # Prepare data for PDF generator (matching ThermalPDFReportGenerator's expected format)
+        report_data = {
+            'max_temp_c': metadata.get('max_temperature_C', 0.0),
+            'min_temp_c': metadata.get('min_temperature_C', 0.0),
+            'max_temp_k': metadata.get('max_temperature_K', 273.15),
+            'min_temp_k': metadata.get('min_temperature_K', 273.15),
+            'strategy_name': 'SimOps Pipeline',
+            'num_elements': metadata.get('num_elements', 0),
+            'num_nodes': metadata.get('num_nodes', 0),
+            'solve_time': metadata.get('solve_time_s', 0.0),
+            'success': True,  # Pipeline completed successfully if we got here
+        }
+
+        # Collect image paths
+        image_paths = []
+        if png_file and png_file.exists():
+            image_paths.append(str(png_file))
+
+        # Generate PDF using existing generator
+        generator = ThermalPDFReportGenerator(job_name=job_name, output_dir=output_path)
+        pdf_path = generator.generate(
+            job_name=job_name,
+            output_dir=output_path,
+            data=report_data,
+            image_paths=image_paths
+        )
+
+        return str(pdf_path)
+
+    except ImportError as e:
+        if verbose:
+            print(f"  [!] PDF generation skipped: Missing reportlab ({e})")
+            print("      Install with: pip install reportlab")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] PDF generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+        return None
+
+
 def run_simops_pipeline(
     cad_file: str,
     output_dir: str = "simops_output",
@@ -666,9 +739,9 @@ def run_simops_pipeline(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-# Step 1: Generate Mesh (Dynamic Strategy)
+    # Step 1: Generate Mesh (Dynamic Strategy or Direct MSH)
     sim_type = getattr(config, 'simulation_type', 'cfd')
-    log(f"STEP 1: GENERATING MESH ({sim_type.upper()})")
+    log(f"STEP 1: HANDLING MESH ({sim_type.upper()})")
     log("-" * 70)
 
     mesh_file = output_path / "mesh.msh"
@@ -676,7 +749,20 @@ def run_simops_pipeline(
     success = False
     mesh_stats = {}
 
-    if sim_type == 'structural':
+    if cad_file.lower().endswith('.msh'):
+        log(f"  [Direct] Using provided .msh file: {cad_file}")
+        shutil.copy2(cad_file, str(mesh_file))
+        success = True
+        # Get basic stats from the existing mesh
+        try:
+            gmsh.initialize()
+            gmsh.open(str(mesh_file))
+            node_tags, _, _ = gmsh.model.mesh.getNodes()
+            mesh_stats = {'num_nodes': len(node_tags), 'direct_load': True}
+            gmsh.finalize()
+        except:
+            mesh_stats = {'num_nodes': 0, 'direct_load': True}
+    elif sim_type == 'structural':
         # --- STRUCTURAL PATH ---
         try:
             from structural_strategy import StructuralMeshStrategy, StructuralMeshConfig
@@ -714,13 +800,74 @@ def run_simops_pipeline(
         )
 
     if not success:
-        raise RuntimeError(f"Mesh generation failed: {mesh_stats.get('error')}")
+        raise RuntimeError(f"Mesh handling failed: {mesh_stats.get('error')}")
     
     # Step 2: Run thermal solver
     log("STEP 2: SOLVING THERMAL PROBLEM")
     log("-" * 70)
     
-    if config.solver == "calculix":
+    if config.solver == "openfoam":
+        # OpenFOAM CHT solver via WSL
+        log("[Solver: OpenFOAM chtMultiRegionFoam]")
+        try:
+            from tools.thermal_job_runner import OpenFOAMRunner, ThermalSetup, JobStatus
+            
+            # Create setup from config
+            setup = ThermalSetup(
+                name="simops_run",
+                description="SimOps thermal simulation",
+                power_watts=config.heat_source_power,
+                inlet_temp_k=config.ambient_temperature,
+                initial_temperature=config.initial_temperature,
+                convection_coefficient=config.convection_coefficient,
+                material=config.material,
+                simulation_type=config.simulation_type,
+                time_step=config.time_step,
+                duration=config.duration,
+                tolerance=config.tolerance,
+                max_iterations=config.max_iterations
+            )
+            
+            runner = OpenFOAMRunner(dry_run=False)
+            
+            if not runner.openfoam_available:
+                raise RuntimeError(
+                    "OpenFOAM not available. Install OpenFOAM 2312 in WSL:\n"
+                    "  wsl bash -c \"sudo sh -c 'wget -qO- https://dl.openfoam.com/add-debian-repo.sh | bash'\"\n"
+                    "  wsl bash -c \"sudo apt-get update && sudo apt-get install -y openfoam2312-default\""
+                )
+            
+            # Generate case from template and run
+            from tools.thermal_job_runner import CaseGenerator
+            case_gen = CaseGenerator(output_path)
+            case_dir = case_gen.generate_case(setup)
+            
+            job_result = runner.run_case(case_dir, setup)
+            
+            if job_result.status == JobStatus.FAILED:
+                raise RuntimeError(f"OpenFOAM simulation failed: {job_result.error_message}")
+            
+            # Convert result to standard format
+            results = {
+                'temperature': np.array([job_result.min_temp_c + 273.15, job_result.max_temp_c + 273.15]),
+                'node_coords': np.array([[0,0,0], [0,0,1]]),  # Placeholder - OpenFOAM outputs VTK directly
+                'elements': np.array([[0,1,0,0]]),
+                'min_temp': job_result.min_temp_c + 273.15 if job_result.min_temp_c else config.ambient_temperature,
+                'max_temp': job_result.max_temp_c + 273.15 if job_result.max_temp_c else config.heat_source_temperature,
+                'solve_time': job_result.solve_time_s,
+                'converged': job_result.converged,
+                'iterations_run': job_result.iterations_run,
+                'final_residual': job_result.final_residual,
+                'convergence_threshold': 0,
+                'final_dT': 0.0,
+                'heat_flux_watts': None,
+            }
+            log(f"  OpenFOAM completed: T_min={job_result.min_temp_c}°C, T_max={job_result.max_temp_c}°C")
+            
+        except ImportError as e:
+            raise RuntimeError(f"OpenFOAM runner not found: {e}")
+            
+    elif config.solver == "calculix":
         solver = CalculiXSolver(config, verbose=verbose)
         results = solver.solve(str(mesh_file), str(output_path))
     else:
@@ -739,7 +886,7 @@ def run_simops_pipeline(
         results['node_coords'],
         results['temperature'],
         str(png_file),
-        colormap=config.colormap,
+        colormap=getattr(config, 'colormap', 'jet'),
         title=f"Thermal Analysis: {Path(cad_file).stem}"
     )
     log(f"  Temperature map: {png_file}")
@@ -767,6 +914,14 @@ def run_simops_pipeline(
         'min_temperature_C': results['min_temp'] - 273.15,
         'max_temperature_C': results['max_temp'] - 273.15,
         'solve_time_s': results['solve_time'],
+        'min_temp': results.get('min_temp'),
+        'max_temp': results.get('max_temp'),
+        'solve_time': results.get('solve_time'),
+        'converged': results.get('converged'),
+        'iterations_run': results.get('iterations_run'),
+        'final_residual': results.get('final_residual'),
+        'tolerance': getattr(config, 'tolerance', None),
+        'max_iterations': getattr(config, 'max_iterations', None),
         'total_time_s': time.time() - start_time,
     }
     
@@ -780,7 +935,22 @@ def run_simops_pipeline(
     log("STEP 4: CLEANUP TEMPORARY FILES")
     log("-" * 70)
     cleanup_output_dir(str(output_path))
-    
+
+    # Step 5: Generate PDF Report
+    log("")
+    log("STEP 5: GENERATING PDF REPORT")
+    log("-" * 70)
+    pdf_file = generate_pdf_report(
+        output_path=output_path,
+        metadata=metadata,
+        cad_file=cad_file,
+        png_file=png_file,
+        verbose=verbose
+    )
+    if pdf_file:
+        metadata['pdf_file'] = str(pdf_file)
+        log(f"  PDF Report:      {pdf_file}")
+
     log("")
     log("=" * 70)
     log("   SIMOPS PIPELINE COMPLETE")
@@ -789,7 +959,7 @@ def run_simops_pipeline(
     log(f"   Results:    {output_path.absolute()}")
     log("=" * 70)
     log("")
-    
+
     return metadata
 
 
@@ -810,6 +980,7 @@ Examples:
     
     parser.add_argument("cad_file", help="Input CAD file (STEP, IGES)")
     parser.add_argument("-o", "--output", default="simops_output", help="Output directory")
+    parser.add_argument("-c", "--config", help="JSON Config string")
     parser.add_argument("--layers", type=int, default=5, help="Number of boundary layers")
     parser.add_argument("--growth", type=float, default=1.2, help="Boundary layer growth rate")
     parser.add_argument("--solver", choices=["builtin", "calculix"], default="builtin",
@@ -818,11 +989,24 @@ Examples:
     
     args = parser.parse_args()
     
-    config = SimOpsConfig(
-        num_boundary_layers=args.layers,
-        growth_rate=args.growth,
-        solver=args.solver,
-    )
+    # Load config from JSON or defaults
+    config = SimOpsConfig()
+    
+    if args.config:
+        try:
+            config_dict = json.loads(args.config)
+            # Map dict to SimOpsConfig fields
+            for k, v in config_dict.items():
+                if hasattr(config, k):
+                    setattr(config, k, v)
+        except json.JSONDecodeError:
+            print("[ERROR] Invalid JSON config", file=sys.stderr)
+            sys.exit(1)
+            
+    # CLI args override config if set explicitly (simple check if not default)
+    if args.layers != 5: config.num_boundary_layers = args.layers
+    if args.growth != 1.2: config.growth_rate = args.growth
+    if args.solver != "builtin": config.solver = args.solver
     
     try:
         results = run_simops_pipeline(

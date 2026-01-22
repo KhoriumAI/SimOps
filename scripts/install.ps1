@@ -43,8 +43,50 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $ScriptDir
 
 try {
+    # ==========================================================================
+    # OPENFOAM PREREQUISITE CHECK
+    # ==========================================================================
+    Write-Host @"
+
+================================================================================
+                    PREREQUISITE: OpenFOAM Installation
+================================================================================
+
+SimOps requires OpenFOAM for CFD simulations. If you only need meshing and
+CalculiX thermal analysis, you can skip OpenFOAM.
+
+  ╔══════════════════════════════════════════════════════════════════════════╗
+  ║  REQUIRED VERSION: ESI OpenFOAM v2312 (from openfoam.com)                ║
+  ║                                                                          ║
+  ║  ⚠️  DO NOT install OpenFOAM Foundation (cfd.direct) or other versions.  ║
+  ║      Schema formats differ between versions and WILL cause errors!      ║
+  ╚══════════════════════════════════════════════════════════════════════════╝
+
+  INSTALLATION OPTIONS:
+  
+  [OPTION A - Docker (Recommended)] ───────────────────────────────────────────
+    Docker Desktop handles OpenFOAM automatically via the worker container.
+    No additional installation required if proceeding with this installer.
+    
+  [OPTION B - WSL2 (Windows)] ─────────────────────────────────────────────────
+    1. Enable WSL2:  wsl --install
+    2. Install Ubuntu from Microsoft Store  
+    3. In Ubuntu terminal, run:
+       curl -s https://dl.openfoam.com/add-debian-repo.sh | sudo bash
+       sudo apt install openfoam2312-default
+       echo 'source /usr/lib/openfoam/openfoam2312/etc/bashrc' >> ~/.bashrc
+       
+  [OPTION C - macOS (Docker)] ─────────────────────────────────────────────────
+    Install Docker Desktop for Mac, then this installer handles the rest.
+
+  Download Link: https://www.openfoam.com/download/install-windows
+
+================================================================================
+"@ -ForegroundColor Yellow
+
     # Check Docker
     Write-Step "Checking Docker..."
+
     $dockerCheck = docker version 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Docker is not running. Please start Docker Desktop and try again."

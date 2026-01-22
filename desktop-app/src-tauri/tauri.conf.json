@@ -1,0 +1,102 @@
+{
+    "build": {
+        "beforeBuildCommand": "npm run build",
+        "beforeDevCommand": "npm run dev",
+        "devPath": "http://localhost:1420",
+        "distDir": "../../simops-frontend/dist"
+    },
+    "package": {
+        "productName": "SimOps",
+        "version": "0.1.1"
+    },
+    "tauri": {
+        "allowlist": {
+            "all": false,
+            "shell": {
+                "all": false,
+                "open": true,
+                "scope": [
+                    {
+                        "name": "binaries/api_server",
+                        "sidecar": true
+                    }
+                ]
+            },
+            "dialog": {
+                "all": true
+            },
+            "fs": {
+                "all": true,
+                "scope": [
+                    "$APPCONFIG/*",
+                    "$APPDATA/*"
+                ]
+            },
+            "http": {
+                "all": false,
+                "scope": [
+                    "http://localhost:5001/*"
+                ]
+            }
+        },
+        "bundle": {
+            "active": true,
+            "category": "DeveloperTool",
+            "copyright": "Copyright 2026 SimOps",
+            "externalBin": [
+                "binaries/api_server"
+            ],
+            "icon": [
+                "icons/32x32.png",
+                "icons/128x128.png",
+                "icons/128x128@2x.png",
+                "icons/icon.icns",
+                "icons/icon.ico"
+            ],
+            "identifier": "com.khorium.simops",
+            "longDescription": "High-fidelity simulation operations and visualization tool.",
+            "macOS": {
+                "entitlements": null,
+                "exceptionDomain": "",
+                "frameworks": [],
+                "signingIdentity": null
+            },
+            "windows": {
+                "nsis": {
+                    "installMode": "currentUser",
+                    "displayLanguageSelector": false
+                }
+            },
+            "resources": [
+                "../../simops-backend/api_server.py",
+                "../../simops_pipeline.py",
+                "../../core/**/*"
+            ],
+            "shortDescription": "SimOps Desktop Shell",
+            "targets": [
+                "nsis",
+                "msi"
+            ]
+        },
+        "security": {
+            "csp": null
+        },
+        "updater": {
+            "active": true,
+            "endpoints": [
+                "https://github.com/KhoriumAI/SimOps/releases/latest/download/latest.json"
+            ],
+            "dialog": true,
+            "pubkey": "RWTWGg54LL1xJ28X8HcJs4cNFxh/IKLHUGDOlK/n59217F3aog3vKf8O"
+        },
+        "windows": [
+            {
+                "fullscreen": false,
+                "height": 800,
+                "resizable": true,
+                "title": "SimOps",
+                "width": 1200
+            }
+        ]
+    }
+}

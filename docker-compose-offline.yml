@@ -38,6 +38,8 @@ services:
   # FRONTEND: React Web Application (Nginx)
   # =================================================================
   frontend:
+    build:
+      context: ./simops-frontend
     image: simops-frontend:offline
     container_name: simops_frontend
     depends_on:
@@ -55,6 +57,8 @@ services:
   # BACKEND: Flask API Server
   # =================================================================
   backend:
+    build:
+      context: ./simops-backend
     image: simops-backend:offline
     container_name: simops_backend
     depends_on:

@@ -1,0 +1,46 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2312                                  |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    arch        "LSB;label=32;scalar=64";
+    class       polyBoundaryMesh;
+    location    "constant/solid_chip/polyMesh";
+    object      boundary;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+3
+(
+    chip_top
+    {
+        type            patch;
+        physicalType    patch;
+        nFaces          14;
+        startFace       102;
+    }
+    defaultFaces
+    {
+        type            patch;
+        nFaces          32;
+        startFace       116;
+    }
+    solid_chip_to_solid_heatsink
+    {
+        type            mappedWall;
+        inGroups        1(wall);
+        nFaces          14;
+        startFace       148;
+        sampleMode      nearestPatchFace;
+        sampleRegion    solid_heatsink;
+        samplePatch     solid_heatsink_to_solid_chip;
+    }
+)
+
+// ************************************************************************* //

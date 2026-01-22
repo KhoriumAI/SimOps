@@ -301,7 +301,7 @@ class ThermalSimulationTemplate:
     
     # Solver settings
     max_iterations: int = 1000
-    convergence_tolerance: float = 1e-6
+    convergence_tolerance: float = 1e-3
     
     # Pass/fail criteria
     max_temp_limit_c: Optional[float] = None  # Auto from material if None
@@ -396,7 +396,7 @@ class ThermalSimulationTemplate:
             duration_s=physics.get('duration', 60.0),
             time_step_s=physics.get('time_step', 1.0),
             max_iterations=physics.get('max_iterations', 1000),
-            convergence_tolerance=physics.get('convergence_tolerance', 1e-6),
+            convergence_tolerance=physics.get('convergence_tolerance', 1e-3),
             max_temp_limit_c=pass_fail.get('max_temp_limit_c', 150.0),
             min_temp_limit_c=pass_fail.get('min_temp_limit_c', -40.0),
             max_gradient_c_mm=pass_fail.get('max_gradient_c_mm'),

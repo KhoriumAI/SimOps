@@ -14,10 +14,49 @@ echo  _____ _           ___
 echo /  ___(_)         / _ \             
 echo \ `--. _ _ __ ___/ /_\ \_ __  _ __  
 echo  `--. \ ^| '_ ` _ \  _  ^| '_ \^| '_ \ 
-echo /\__/ / ^| ^| ^| ^| ^| ^| ^| ^| ^|_) ^| ^|_) ^|
+echo /\__/ / ^| ^| ^| ^| ^| ^| ^| ^|_) ^| ^|_) ^|
 echo \____/^|_^|_^| ^|_^| ^|_\_^| ^|_/ .__/^| .__/ 
 echo                         ^| ^|   ^| ^|    
 echo     OFFLINE INSTALLER   ^|_^|   ^|_^|    
+echo.
+echo ============================================================================
+echo.
+
+REM ============================================================================
+REM OPENFOAM PREREQUISITE CHECK
+REM ============================================================================
+echo ============================================================================
+echo                     PREREQUISITE: OpenFOAM Installation
+echo ============================================================================
+echo.
+echo SimOps requires OpenFOAM for CFD simulations. If you only need meshing and
+echo CalculiX thermal analysis, you can skip OpenFOAM.
+echo.
+echo  +------------------------------------------------------------------------+
+echo  ^|  REQUIRED VERSION: ESI OpenFOAM v2312 (from openfoam.com)             ^|
+echo  ^|                                                                        ^|
+echo  ^|  WARNING: DO NOT install OpenFOAM Foundation (cfd.direct) or other    ^|
+echo  ^|           versions. Schema formats differ and WILL cause errors!      ^|
+echo  +------------------------------------------------------------------------+
+echo.
+echo  INSTALLATION OPTIONS:
+echo.
+echo  [OPTION A - Docker (Recommended)]
+echo    Docker Desktop handles OpenFOAM automatically via the worker container.
+echo    No additional installation required if proceeding with this installer.
+echo.
+echo  [OPTION B - WSL2 (Windows)]
+echo    1. Enable WSL2:  wsl --install
+echo    2. Install Ubuntu from Microsoft Store
+echo    3. In Ubuntu terminal, run:
+echo       curl -s https://dl.openfoam.com/add-debian-repo.sh ^| sudo bash
+echo       sudo apt install openfoam2312-default
+echo       echo 'source /usr/lib/openfoam/openfoam2312/etc/bashrc' ^>^> ~/.bashrc
+echo.
+echo  [OPTION C - macOS (Docker)]
+echo    Install Docker Desktop for Mac, then this installer handles the rest.
+echo.
+echo  Download Link: https://www.openfoam.com/download/install-windows
 echo.
 echo ============================================================================
 echo.

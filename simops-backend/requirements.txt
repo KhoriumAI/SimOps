@@ -1,0 +1,7 @@
+flask
+flask-cors
+werkzeug
+numpy
+scipy
+reportlab>=4.0.0
+# Local imports from SimOps core will be used

@@ -136,7 +136,7 @@ with tab_submit:
         st.subheader("Input Files")
         
         uploaded_files = st.file_uploader(
-            "Upload CAD Geometry (.step, .stp, .iges)", 
+            "Upload Mesh Geometry (.msh)", 
             accept_multiple_files=True
         )
         
@@ -184,7 +184,7 @@ with tab_submit:
 
     # Queue Status - Minimalist
     st.divider()
-    pending_files = [f for f in os.listdir(INPUT_DIR) if f.endswith(('.step', '.stp')) and not f.startswith("USED_")]
+    pending_files = [f for f in os.listdir(INPUT_DIR) if f.endswith('.msh') and not f.startswith("USED_")]
     st.caption(f"Pending in Queue: {len(pending_files)}")
 
 

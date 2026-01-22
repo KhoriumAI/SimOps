@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import ISolver
 from .openfoam_parser import parse_boundary_file, verify_patches
+from .msh_utils import (
+    detect_msh_format,
+    convert_msh_format,
+    parse_gmshToFoam_log,
+    convert_via_fluent
+)
 
 from core.logging.sim_logger import SimLogger
 logger = SimLogger("CFDSolver")
@@ -43,16 +49,14 @@ class CFDSolver(ISolver):
         
         # 2. Setup Case Structure
         self._setup_case(case_dir, config)
-        
-        # 3. Copy/Convert Mesh
-        shutil.copy(mesh_file, case_dir / "mesh.msh")
-        
+
+        # 3. Robust Mesh Import Pipeline
         start_time = time.time()
-        
+
         try:
-             # 4. Run OpenFOAM Pipeline
-             # A. Convert Mesh
-             self._run_foam_cmd(case_dir, "gmshToFoam mesh.msh")
+             # A. Import Mesh with Format Detection & Auto-Conversion
+             logger.info("[Mesh Import] Starting robust mesh import pipeline...")
+             self._import_mesh_robust(mesh_file, case_dir)
              
              # Fix Boundary Types (e.g. frontAndBack -> empty)
              self._fix_boundary_types(case_dir)
@@ -870,6 +874,128 @@ boundaryField
             content += "    }\n"
         content += "}\n"
         path.write_text(content)
+
+    def _import_mesh_robust(self, mesh_file: Path, case_dir: Path):
+        """
+        Robust mesh import pipeline with format detection, conversion, and fallback.
+
+        This method handles arbitrary .msh files from external sources by:
+        1. Detecting MSH format version
+        2. Converting incompatible formats (MSH 4.x → 2.2)
+        3. Attempting gmshToFoam with detailed error parsing
+        4. Falling back to Fluent conversion route if needed
+
+        Args:
+            mesh_file: Source .msh file (external or generated)
+            case_dir: OpenFOAM case directory
+
+        Raises:
+            RuntimeError: If all conversion methods fail
+        """
+        logger.info(f"[Mesh Import] Importing {mesh_file.name}...")
+
+        # Step 1: Detect MSH format
+        format_info = detect_msh_format(mesh_file)
+
+        if not format_info["valid"]:
+            raise RuntimeError(f"Invalid .msh file: {format_info.get('error', 'Unknown error')}")
+
+        logger.info(f"[Mesh Import] Detected MSH {format_info['version']} ({format_info['format']})")
+
+        # Determine working mesh file
+        working_mesh = case_dir / "mesh.msh"
+
+        # Step 2: Check compatibility and convert if needed
+        if format_info.get("gmshToFoam_compatible") == False:
+            logger.warning(f"[Mesh Import] MSH {format_info['version']} is not optimal for gmshToFoam")
+            logger.info("[Mesh Import] Auto-converting to MSH 2.2 for compatibility...")
+
+            converted_mesh = case_dir / "mesh_converted.msh"
+            success, message = convert_msh_format(
+                mesh_file,
+                converted_mesh,
+                target_version=2.2,
+                use_wsl=self.use_wsl
+            )
+
+            if success:
+                logger.info(f"[Mesh Import] {message}")
+                shutil.copy(converted_mesh, working_mesh)
+                converted_mesh.unlink()  # Clean up temp file
+            else:
+                logger.warning(f"[Mesh Import] Format conversion failed: {message}")
+                logger.warning("[Mesh Import] Proceeding with original format...")
+                shutil.copy(mesh_file, working_mesh)
+        else:
+            # Format is compatible, use as-is
+            logger.info("[Mesh Import] Format is compatible with gmshToFoam")
+            shutil.copy(mesh_file, working_mesh)
+
+        # Step 3: Attempt gmshToFoam conversion
+        logger.info("[Mesh Import] Converting mesh with gmshToFoam...")
+
+        try:
+            self._run_foam_cmd(case_dir, "gmshToFoam mesh.msh")
+
+            # Check if conversion succeeded
+            poly_mesh = case_dir / "constant" / "polyMesh"
+            if not (poly_mesh / "points").exists():
+                raise RuntimeError("gmshToFoam completed but polyMesh not created")
+
+            # Parse log for warnings/errors
+            log_file = case_dir / "log.gmshToFoam"
+            if log_file.exists():
+                log_info = parse_gmshToFoam_log(log_file)
+
+                if log_info["warnings"]:
+                    for warning in log_info["warnings"]:
+                        logger.warning(f"[gmshToFoam] {warning}")
+
+                if log_info["num_cells"] > 0:
+                    logger.info(f"[Mesh Import] Successfully imported {log_info['num_cells']} cells")
+
+            logger.info("[Mesh Import] ✓ gmshToFoam conversion successful")
+
+        except subprocess.CalledProcessError as e:
+            # gmshToFoam failed - parse error and try fallback
+            logger.error("[Mesh Import] gmshToFoam conversion failed")
+
+            log_file = case_dir / "log.gmshToFoam"
+            if log_file.exists():
+                log_info = parse_gmshToFoam_log(log_file)
+                if log_info["errors"]:
+                    for error in log_info["errors"]:
+                        logger.error(f"[gmshToFoam] {error}")
+
+            # Step 4: Fallback to Fluent conversion route
+            logger.warning("[Mesh Import] Attempting Fluent fallback route...")
+
+            success, message = convert_via_fluent(
+                mesh_file,
+                case_dir,
+                use_wsl=self.use_wsl
+            )
+
+            if not success:
+                # Both methods failed - provide comprehensive error
+                error_msg = f"""
+Mesh import failed via all routes:
+1. gmshToFoam failed: {e}
+2. Fluent fallback failed: {message}
+
+Detected Format: MSH {format_info['version']} ({format_info['format']})
+
+Troubleshooting:
+- Ensure mesh file is valid (not corrupted)
+- Check that mesh contains 3D volume elements (not just surfaces)
+- Verify physical groups are properly defined in GMSH
+- Try exporting mesh as MSH 2.2 ASCII format
+
+Log file: {log_file}
+"""
+                raise RuntimeError(error_msg)
+
+            logger.info(f"[Mesh Import] ✓ Fluent fallback successful: {message}")
 
     def _check_wsl(self) -> bool:
         try:

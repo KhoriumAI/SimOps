@@ -1,0 +1,302 @@
+{
+  "total_tests": 3,
+  "tests_passed": 3,
+  "tests_failed": 0,
+  "success_rate": 100.0,
+  "total_execution_time": 0.0005600452423095703,
+  "test_results": [
+    {
+      "test_name": "simple_heatsink",
+      "success": true,
+      "stages_passed": [
+        "ai_generation",
+        "meshing",
+        "solving",
+        "results_parsing"
+      ],
+      "stage_results": [
+        {
+          "stage": "ai_generation",
+          "passed": true,
+          "execution_time": 0.00029778480529785156,
+          "error": null,
+          "metadata": {
+            "config": {
+              "job_name": "Simulation_simple_heatsink",
+              "cad_file": "test_data/simple_heatsink.step",
+              "materials": [
+                {
+                  "name": "Aluminum_6061_T6",
+                  "volume_name": null,
+                  "thermal_conductivity": null,
+                  "density": null,
+                  "specific_heat": null
+                }
+              ],
+              "boundary_conditions": [
+                {
+                  "type": "heat_source",
+                  "target": "Base_Surface",
+                  "value": 50.0,
+                  "ambient_temperature": null
+                },
+                {
+                  "type": "convection",
+                  "target": "Exterior",
+                  "value": 20.0,
+                  "ambient_temperature": 25.0
+                }
+              ],
+              "solver_settings": {
+                "transient": true,
+                "duration": 30.0,
+                "time_step": 1.0,
+                "iterations": 1000
+              },
+              "mesh_settings": {
+                "max_size_mm": 5.0,
+                "min_size_mm": 1.0,
+                "element_order": 2
+              }
+            }
+          }
+        },
+        {
+          "stage": "meshing",
+          "passed": true,
+          "execution_time": 1.2636184692382812e-05,
+          "error": null,
+          "metadata": {
+            "mesh_quality": 0.40546981322702524,
+            "num_elements": 4520,
+            "mesh_file": "mock_mesh.msh"
+          }
+        },
+        {
+          "stage": "solving",
+          "passed": true,
+          "execution_time": 4.5299530029296875e-06,
+          "error": null,
+          "metadata": {
+            "converged": true,
+            "iterations": 33,
+            "temperature_range": {
+              "min": 43.78116857985901,
+              "max": 87.88492051219488,
+              "avg": 65.83304454602694
+            }
+          }
+        },
+        {
+          "stage": "results_parsing",
+          "passed": true,
+          "execution_time": 3.5762786865234375e-06,
+          "error": null,
+          "metadata": {
+            "temperature_range": {
+              "min": 45.985061034313006,
+              "max": 83.91872512641926
+            },
+            "mesh_quality": 0.3631209856873464
+          }
+        }
+      ],
+      "total_execution_time": 0.0003185272216796875,
+      "errors": [],
+      "final_temperature_range": {
+        "min": 45.985061034313006,
+        "max": 83.91872512641926
+      },
+      "mesh_quality": 0.3631209856873464
+    },
+    {
+      "test_name": "pcb_assembly",
+      "success": true,
+      "stages_passed": [
+        "ai_generation",
+        "meshing",
+        "solving",
+        "results_parsing"
+      ],
+      "stage_results": [
+        {
+          "stage": "ai_generation",
+          "passed": true,
+          "execution_time": 7.843971252441406e-05,
+          "error": null,
+          "metadata": {
+            "config": {
+              "job_name": "Simulation_pcb_assembly",
+              "cad_file": "test_data/pcb_assembly.step",
+              "materials": [
+                {
+                  "name": "Aluminum_6061_T6",
+                  "volume_name": null,
+                  "thermal_conductivity": null,
+                  "density": null,
+                  "specific_heat": null
+                }
+              ],
+              "boundary_conditions": [],
+              "solver_settings": {
+                "transient": true,
+                "duration": 30.0,
+                "time_step": 1.0,
+                "iterations": 1000
+              },
+              "mesh_settings": {
+                "max_size_mm": 5.0,
+                "min_size_mm": 1.0,
+                "element_order": 2
+              }
+            }
+          }
+        },
+        {
+          "stage": "meshing",
+          "passed": true,
+          "execution_time": 9.298324584960938e-06,
+          "error": null,
+          "metadata": {
+            "mesh_quality": 0.6768199606425315,
+            "num_elements": 816,
+            "mesh_file": "mock_mesh.msh"
+          }
+        },
+        {
+          "stage": "solving",
+          "passed": true,
+          "execution_time": 3.337860107421875e-06,
+          "error": null,
+          "metadata": {
+            "converged": true,
+            "iterations": 58,
+            "temperature_range": {
+              "min": 27.105839105377193,
+              "max": 83.95999403588542,
+              "avg": 55.5329165706313
+            }
+          }
+        },
+        {
+          "stage": "results_parsing",
+          "passed": true,
+          "execution_time": 3.814697265625e-06,
+          "error": null,
+          "metadata": {
+            "temperature_range": {
+              "min": 39.97624825823106,
+              "max": 73.55038524709448
+            },
+            "mesh_quality": 0.3709417350135854
+          }
+        }
+      ],
+      "total_execution_time": 9.489059448242188e-05,
+      "errors": [],
+      "final_temperature_range": {
+        "min": 39.97624825823106,
+        "max": 73.55038524709448
+      },
+      "mesh_quality": 0.3709417350135854
+    },
+    {
+      "test_name": "dirty_geometry",
+      "success": true,
+      "stages_passed": [
+        "ai_generation",
+        "meshing",
+        "solving",
+        "results_parsing"
+      ],
+      "stage_results": [
+        {
+          "stage": "ai_generation",
+          "passed": true,
+          "execution_time": 0.00012612342834472656,
+          "error": null,
+          "metadata": {
+            "config": {
+              "job_name": "Simulation_simple_heatsink",
+              "cad_file": "test_data/simple_heatsink.step",
+              "materials": [
+                {
+                  "name": "Aluminum_6061_T6",
+                  "volume_name": null,
+                  "thermal_conductivity": null,
+                  "density": null,
+                  "specific_heat": null
+                }
+              ],
+              "boundary_conditions": [
+                {
+                  "type": "heat_source",
+                  "target": "Base_Surface",
+                  "value": 50.0,
+                  "ambient_temperature": null
+                }
+              ],
+              "solver_settings": {
+                "transient": true,
+                "duration": 30.0,
+                "time_step": 1.0,
+                "iterations": 1000
+              },
+              "mesh_settings": {
+                "max_size_mm": 5.0,
+                "min_size_mm": 1.0,
+                "element_order": 2
+              }
+            }
+          }
+        },
+        {
+          "stage": "meshing",
+          "passed": true,
+          "execution_time": 1.239776611328125e-05,
+          "error": null,
+          "metadata": {
+            "mesh_quality": 0.49827886442687847,
+            "num_elements": 4994,
+            "mesh_file": "mock_mesh.msh"
+          }
+        },
+        {
+          "stage": "solving",
+          "passed": true,
+          "execution_time": 4.291534423828125e-06,
+          "error": null,
+          "metadata": {
+            "converged": true,
+            "iterations": 93,
+            "temperature_range": {
+              "min": 56.13321476381054,
+              "max": 141.71295772097636,
+              "avg": 98.92308624239345
+            }
+          }
+        },
+        {
+          "stage": "results_parsing",
+          "passed": true,
+          "execution_time": 3.814697265625e-06,
+          "error": null,
+          "metadata": {
+            "temperature_range": {
+              "min": 58.85771938918515,
+              "max": 138.59472291685765
+            },
+            "mesh_quality": 0.497153511335003
+          }
+        }
+      ],
+      "total_execution_time": 0.00014662742614746094,
+      "errors": [],
+      "final_temperature_range": {
+        "min": 58.85771938918515,
+        "max": 138.59472291685765
+      },
+      "mesh_quality": 0.497153511335003
+    }
+  ]
+}

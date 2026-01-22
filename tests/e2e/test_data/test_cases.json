@@ -1,0 +1,55 @@
+[
+    {
+        "name": "simple_heatsink",
+        "prompt": "Simulate 50W heatsink with natural convection",
+        "cad_file": "test_data/simple_heatsink.step",
+        "description": "Basic heatsink test with heat source and convection boundary conditions",
+        "success_criteria": {
+            "min_temperature": 40.0,
+            "max_temperature": 90.0,
+            "min_mesh_quality": 0.3,
+            "max_execution_time": 300.0,
+            "allow_fallback_mesh": true
+        },
+        "expected_heat_source_watts": 50.0,
+        "expected_convection": true,
+        "expected_materials": [
+            "Aluminum"
+        ]
+    },
+    {
+        "name": "pcb_assembly",
+        "prompt": "Thermal analysis of PCB assembly with 3 components at 30W total power",
+        "cad_file": "test_data/pcb_assembly.step",
+        "description": "Multi-component thermal simulation test",
+        "success_criteria": {
+            "min_temperature": 25.0,
+            "max_temperature": 85.0,
+            "min_mesh_quality": 0.25,
+            "max_execution_time": 300.0,
+            "allow_fallback_mesh": true
+        },
+        "expected_heat_source_watts": 30.0,
+        "expected_convection": true,
+        "expected_materials": [
+            "Copper",
+            "Aluminum"
+        ]
+    },
+    {
+        "name": "dirty_geometry",
+        "prompt": "Heat this part to 100 degrees Celsius",
+        "cad_file": "test_data/simple_heatsink.step",
+        "description": "Robustness test - should handle simple request and complete successfully",
+        "success_criteria": {
+            "min_temperature": 50.0,
+            "max_temperature": 150.0,
+            "min_mesh_quality": 0.2,
+            "max_execution_time": 300.0,
+            "allow_fallback_mesh": true
+        },
+        "expected_heat_source_watts": null,
+        "expected_convection": false,
+        "expected_materials": null
+    }
+]

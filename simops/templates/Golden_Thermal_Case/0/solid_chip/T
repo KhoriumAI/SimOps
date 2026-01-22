@@ -1,0 +1,33 @@
+
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0/solid_chip";
+    object      T;
+}
+
+dimensions      [0 0 0 1 0 0 0];
+internalField   uniform 300;
+
+boundaryField
+{
+    chip_top
+    {
+        type            fixedValue;
+        value           uniform 350;
+    }
+    solid_chip_to_solid_heatsink
+    {
+        type            compressible::turbulentTemperatureCoupledBaffleMixed;
+        Tnbr            T;
+        kappaMethod     solidThermo;
+        value           uniform 300;
+        sampleMode      nearestPatchFace;
+    }
+    defaultFaces
+    {
+        type            zeroGradient;
+    }
+}

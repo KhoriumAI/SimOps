@@ -30,10 +30,21 @@ class ThermalVisualizer:
         mesh_file: Union[str, Path],
         job_name: str,
         temperature_field: str = 'temperature',
-        angles: List[str] = None
+        angles: List[str] = None,
+        colormap: str = 'inferno'
     ) -> List[str]:
         """
         Generate multi-angle snapshots of temperature field.
+
+        Args:
+            mesh_file: Path to mesh file with temperature data
+            job_name: Job name for file naming
+            temperature_field: Name of temperature field in mesh data
+            angles: List of view angles to generate
+            colormap: Matplotlib colormap name (default: 'inferno')
+
+        Returns:
+            List of paths to generated PNG images
         """
         if angles is None:
             angles = ['iso', 'top', 'side']
@@ -78,7 +89,7 @@ class ThermalVisualizer:
                 ax = fig.add_subplot(111, projection='3d')
                 
                 # Scatter plot with colormap
-                img = ax.scatter(x, y, z, c=temps, cmap='inferno', s=1, alpha=0.8)
+                img = ax.scatter(x, y, z, c=temps, cmap=colormap, s=1, alpha=0.8)
                 
                 # Colorbar
                 cbar = plt.colorbar(img, ax=ax, shrink=0.6)

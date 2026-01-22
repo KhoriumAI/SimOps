@@ -1,0 +1,41 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant/solid_heatsink";
+    object      thermophysicalProperties;
+}
+
+// OpenFOAM 13 compatible solid thermophysics
+thermoType
+{
+    type            heSolidThermo;
+    mixture         pureMixture;
+    transport       constIsoSolid;
+    thermo          eConst;
+    equationOfState rhoConst;
+    specie          specie;
+    energy          sensibleInternalEnergy;
+}
+
+mixture
+{
+    specie
+    {
+        molWeight   26.98;
+    }
+    transport
+    {
+        kappa   205; // Aluminum [W/m/K]
+    }
+    thermodynamics
+    {
+        Cv      900; // [J/kg/K]
+        Hf      0;
+    }
+    equationOfState
+    {
+        rho     2700; // Aluminum [kg/m^3]
+    }
+}
