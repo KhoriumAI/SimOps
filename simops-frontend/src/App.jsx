@@ -47,6 +47,10 @@ function App() {
     const [tolerance, setTolerance] = useState(1e-3)
     const [writeInterval, setWriteInterval] = useState(50)
     const [colormap, setColormap] = useState('jet')
+    const [selectedSolver, setSelectedSolver] = useState('builtin') // 'builtin' or 'openfoam'
+    const [useIterativeSolver, setUseIterativeSolver] = useState(false) // For built-in solver
+    const [applyConvection, setApplyConvection] = useState(false) // Enable convection BC
+    const [convectionFaces, setConvectionFaces] = useState(['x_min', 'x_max', 'y_min', 'y_max']) // Which faces to apply convection to
 
     // Force Dark Mode for Engineering Feel
     useEffect(() => {
@@ -295,15 +299,18 @@ function App() {
                 tolerance: tolerance,
                 write_interval: writeInterval,
                 colormap: colormap,
-                solver: openfoamAvailable ? 'openfoam' : 'builtin'  // Use OpenFOAM if available, otherwise builtin
+                solver: selectedSolver,  // Use user-selected solver
+                use_iterative_solver: useIterativeSolver,  // For built-in solver
+                apply_convection_bc: applyConvection,  // Enable convection BC
+                convection_faces: convectionFaces  // Which faces to apply convection to
             }
 
             // Explicitly tell user which solver is being used
-            const solverName = openfoamAvailable ? 'OpenFOAM' : 'Builtin (Python)'
+            const solverName = selectedSolver === 'openfoam' ? 'OpenFOAM' : 'Builtin (Python)'
             addLog(`Solver: ${solverName}`, 'info')
 
-            if (!openfoamAvailable) {
-                addLog("   (OpenFOAM not available - using fast Python solver)", 'info')
+            if (selectedSolver === 'openfoam' && !openfoamAvailable) {
+                addLog("   Warning: OpenFOAM selected but not available - this may fail", 'error')
             }
 
             addLog(`Starting simulation: Hot wall ${hotWallTemp}K, Ambient ${ambientTemp}K`, 'info')
@@ -589,6 +596,79 @@ function App() {
                             </div>
 
                             <div className="space-y-3 pl-2 border-l border-border ml-1.5">
+                                <div className="flex flex-col gap-1 mb-2">
+                                    <label className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium flex items-center gap-1.5">
+                                        Solver Engine
+                                        <div className="relative group/tip cursor-help">
+                                            <HelpCircle className="w-2.5 h-2.5 opacity-40 hover:opacity-80 transition-opacity" />
+                                            <div className="absolute left-full ml-2 top-0 px-2 py-1 bg-popover text-popover-foreground text-[10px] rounded border border-border shadow-xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-opacity whitespace-normal w-48 z-50">
+                                                Built-in: Fast Python solver (always available). OpenFOAM: Advanced CFD solver (requires WSL + OpenFOAM installation).
+                                            </div>
+                                        </div>
+                                    </label>
+                                    <div className="flex bg-muted/30 rounded p-0.5 border border-border">
+                                        <button
+                                            onClick={() => setSelectedSolver('builtin')}
+                                            className={`flex-1 py-1 text-[9px] uppercase font-bold rounded transition-all ${selectedSolver === 'builtin' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                        >
+                                            Built-in
+                                        </button>
+                                        <button
+                                            onClick={() => setSelectedSolver('openfoam')}
+                                            className={`flex-1 py-1 text-[9px] uppercase font-bold rounded transition-all ${selectedSolver === 'openfoam' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'} ${!openfoamAvailable ? 'opacity-50' : ''}`}
+                                            title={!openfoamAvailable ? 'OpenFOAM not detected - install WSL + OpenFOAM to enable' : 'Use OpenFOAM solver'}
+                                        >
+                                            OpenFOAM {!openfoamAvailable && '⚠'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Built-in Solver Options */}
+                                {selectedSolver === 'builtin' && (
+                                    <div className="flex flex-col gap-2 p-2 bg-muted/20 rounded border border-border">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={useIterativeSolver}
+                                                onChange={(e) => setUseIterativeSolver(e.target.checked)}
+                                                className="w-3 h-3 rounded border-border text-primary focus:ring-primary focus:ring-offset-0"
+                                            />
+                                            <span className="text-[10px] text-foreground">Use Iterative Solver (CG)</span>
+                                            <div className="relative group/tip cursor-help ml-auto">
+                                                <HelpCircle className="w-2.5 h-2.5 opacity-40 hover:opacity-80 transition-opacity" />
+                                                <div className="absolute left-full ml-2 top-0 px-2 py-1 bg-popover text-popover-foreground text-[10px] rounded border border-border shadow-xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-opacity whitespace-normal w-48 z-50">
+                                                    By default, built-in uses direct solver (exact). Enable this for large meshes to use Conjugate Gradient (iterative) solver instead.
+                                                </div>
+                                            </div>
+                                        </label>
+                                    </div>
+                                )}
+
+                                {/* Convection BC Options */}
+                                <div className="flex flex-col gap-2 p-2 bg-muted/20 rounded border border-border">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={applyConvection}
+                                            onChange={(e) => setApplyConvection(e.target.checked)}
+                                            className="w-3 h-3 rounded border-border text-primary focus:ring-primary focus:ring-offset-0"
+                                        />
+                                        <span className="text-[10px] text-foreground">Apply Convection BC (h={convection} W/m2K)</span>
+                                        <div className="relative group/tip cursor-help ml-auto">
+                                            <HelpCircle className="w-2.5 h-2.5 opacity-40 hover:opacity-80 transition-opacity" />
+                                            <div className="absolute left-full ml-2 top-0 px-2 py-1 bg-popover text-popover-foreground text-[10px] rounded border border-border shadow-xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-opacity whitespace-normal w-48 z-50">
+                                                Enable convection cooling on side faces. Higher h = better cooling. Currently only works with built-in solver.
+                                            </div>
+                                        </div>
+                                    </label>
+
+                                    {applyConvection && (
+                                        <div className="pl-5 text-[9px] text-muted-foreground">
+                                            Applies to: {convectionFaces.join(', ')}
+                                        </div>
+                                    )}
+                                </div>
+
                                 {simMode === 'transient' && (
                                     <>
                                         <SmartInput
@@ -641,22 +721,35 @@ function App() {
                                     step={10}
                                     min={1}
                                 />
-                                <SmartInput
-                                    label="Iterations"
-                                    tooltip="Max solver loops to reach convergence."
-                                    value={iterations}
-                                    onChange={setIterations}
-                                    step={100}
-                                    min={10}
-                                />
-                                <SmartInput
-                                    label="Tolerance"
-                                    tooltip="Numerical precision threshold for convergence."
-                                    value={tolerance}
-                                    onChange={setTolerance}
-                                    step={1e-7}
-                                    min={1e-12}
-                                />
+
+                                {/* Show Iterations/Tolerance for OpenFOAM or Built-in with iterative solver */}
+                                {(selectedSolver === 'openfoam' || (selectedSolver === 'builtin' && useIterativeSolver)) && (
+                                    <>
+                                        <SmartInput
+                                            label="Iterations"
+                                            tooltip={selectedSolver === 'openfoam' ? "Max solver loops to reach convergence." : "Max iterations for Conjugate Gradient solver."}
+                                            value={iterations}
+                                            onChange={setIterations}
+                                            step={100}
+                                            min={10}
+                                        />
+                                        <SmartInput
+                                            label="Tolerance"
+                                            tooltip="Numerical precision threshold for convergence."
+                                            value={tolerance}
+                                            onChange={setTolerance}
+                                            step={1e-7}
+                                            min={1e-12}
+                                        />
+                                    </>
+                                )}
+
+                                {/* Show info message when using direct solver */}
+                                {selectedSolver === 'builtin' && !useIterativeSolver && (
+                                    <div className="p-2 bg-green-500/10 border border-green-500/30 rounded text-[9px] text-green-400">
+                                        Using direct solver (exact solution, no iterations needed)
+                                    </div>
+                                )}
                             </div>
                         </section>
 

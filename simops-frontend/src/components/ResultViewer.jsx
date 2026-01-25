@@ -221,14 +221,15 @@ export default function ResultViewer({ meshData, filename, isLoading, loadingMes
 
             {/* Canvas */}
             <Canvas shadows dpr={[1, 2]} gl={{ preserveDrawingBuffer: true }}>
-                <PerspectiveCamera makeDefault position={[50, 50, 50]} fov={45} />
+                <PerspectiveCamera makeDefault position={[50, 50, 50]} fov={45} up={[0, 0, 1]} />
 
-                {/* Engineering Controls: Zero Damping for "Mechanical" feel */}
+                {/* Engineering Controls: Zero Damping for "Mechanical" feel, Z-up orientation */}
                 <OrbitControls
                     makeDefault
                     enableDamping={false}
                     rotateSpeed={0.8}
                     zoomSpeed={1.2}
+                    up={[0, 0, 1]}
                 />
 
                 {/* Lighting Environment */}
@@ -265,7 +266,12 @@ export default function ResultViewer({ meshData, filename, isLoading, loadingMes
                 {/* Visual Helpers - Grid removed per user request */}
                 {/* <GridBackground /> */}
                 <GizmoHelper alignment="bottom-right" margin={[80, 200]}>
-                    <GizmoViewport axisColors={['#ef4444', '#22c55e', '#3b82f6']} labelColor="white" />
+                    <GizmoViewport
+                        axisColors={['#ef4444', '#22c55e', '#3b82f6']}
+                        labelColor="white"
+                        axisHeadScale={0.75}
+                        labels={['X', 'Y', 'Z']}
+                    />
                 </GizmoHelper>
 
                 {/* Post Processing for "Polish" */}

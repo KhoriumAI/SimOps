@@ -7,7 +7,17 @@
       "Bash(python simops_pipeline.py:*)",
       "Bash(python -c \"from msh_utils import detect_msh_format; from pathlib import Path; result = detect_msh_format\\(Path\\(''../../cad_files/120mm_fan_asm.msh''\\)\\); print\\(f''Version: {result[\"\"version\"\"]}, Format: {result[\"\"format\"\"]}, Compatible: {result.get\\(\"\"gmshToFoam_compatible\"\", \"\"unknown\"\"\\)}''\\)\")",
       "Bash(python -c:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker-compose ps:*)",
+      "Bash(curl:*)",
+      "Bash(docker-compose stop:*)",
+      "Bash(docker-compose rm:*)",
+      "Bash(docker-compose build:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(docker-compose down:*)",
+      "Bash(docker image rm:*)"
     ]
   }
 }

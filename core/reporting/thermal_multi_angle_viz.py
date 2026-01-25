@@ -6,18 +6,31 @@ Generates professional thermal field visualizations from CalculiX/OpenFOAM VTU f
 with multiple camera angles for comprehensive thermal analysis.
 """
 
-import pyvista as pv
 import numpy as np
 import logging
 from pathlib import Path
 from typing import List, Optional
 
-from core.reporting.camera_utils import setup_camera, get_view_title, STANDARD_VIEWS
-
 logger = logging.getLogger(__name__)
 
-# Set rendering to headless for server environments
-pv.OFF_SCREEN = True
+# Try to import PyVista, fall back to matplotlib if unavailable
+PYVISTA_AVAILABLE = False
+FORCE_MATPLOTLIB = True  # Force matplotlib on Python 3.14+ due to PyVista incompatibility
+
+try:
+    import sys
+    if sys.version_info >= (3, 14):
+        FORCE_MATPLOTLIB = True
+        logger.info("Python 3.14+ detected - forcing matplotlib fallback")
+    else:
+        import pyvista as pv
+        from core.reporting.camera_utils import setup_camera, get_view_title, STANDARD_VIEWS
+        pv.OFF_SCREEN = True
+        PYVISTA_AVAILABLE = True
+        logger.info("PyVista available for 3D visualization")
+except (ImportError, AttributeError) as e:
+    logger.warning(f"PyVista unavailable ({e}), will use matplotlib fallback")
+    PYVISTA_AVAILABLE = False
 
 
 def generate_thermal_views(
@@ -46,15 +59,39 @@ def generate_thermal_views(
     """
     if views is None:
         views = ['isometric', 'top', 'front', 'section']
-    
+
+    # Use matplotlib fallback if PyVista unavailable or forced
+    if not PYVISTA_AVAILABLE or FORCE_MATPLOTLIB:
+        logger.info("Using matplotlib 3D fallback for visualization")
+        try:
+            from core.reporting.thermal_viz_matplotlib3d import generate_thermal_views_matplotlib
+            return generate_thermal_views_matplotlib(vtu_path, output_dir, job_name, views, colormap)
+        except Exception as e:
+            logger.error(f"Matplotlib fallback also failed: {e}")
+            return []
+
+    # Use PyVista for high-quality rendering
     try:
         # Read VTU file
         mesh = pv.read(vtu_path)
         logger.info(f"Loaded thermal mesh: {mesh.n_points} points, {mesh.n_cells} cells")
-        
+
         # Debug: List available arrays
         logger.info(f"Point data: {list(mesh.point_data.keys())}")
         logger.info(f"Cell data: {list(mesh.cell_data.keys())}")
+    except Exception as e:
+        # PyVista failed during read - fall back to matplotlib
+        logger.warning(f"PyVista mesh reading failed: {e}")
+        logger.info("Using matplotlib 3D fallback for visualization")
+        try:
+            from core.reporting.thermal_viz_matplotlib3d import generate_thermal_views_matplotlib
+            return generate_thermal_views_matplotlib(vtu_path, output_dir, job_name, views, colormap)
+        except Exception as e2:
+            logger.error(f"Matplotlib fallback also failed: {e2}")
+            return []
+
+    # Continue with PyVista rendering
+    try:
         
         # Find temperature field (try common naming conventions)
         temp_field = None
@@ -171,12 +208,26 @@ def generate_thermal_views(
                 # Save high-quality image
                 plotter.screenshot(str(output_path))
                 plotter.close()
-                
+
                 logger.info(f"Saved {view_name} view to {output_path}")
                 image_paths.append(str(output_path))
-                
+
             except Exception as e:
-                logger.error(f"Failed to generate {view_name} view: {e}")
+                logger.error(f"Failed to generate {view_name} view with PyVista: {e}")
+                # Try matplotlib fallback for this specific view
+                try:
+                    from core.reporting.thermal_viz_matplotlib3d import generate_matplotlib_3d_view
+                    logger.info(f"Attempting matplotlib fallback for {view_name} view...")
+                    result = generate_matplotlib_3d_view(
+                        str(vtu_path),
+                        str(output_path),
+                        view_name=view_name,
+                        colormap=colormap
+                    )
+                    if result:
+                        image_paths.append(str(output_path))
+                except Exception as e2:
+                    logger.error(f"Matplotlib fallback also failed for {view_name}: {e2}")
                 continue
         
         return image_paths

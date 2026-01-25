@@ -26,6 +26,7 @@ import sys
 import json
 import shutil
 import subprocess
+import platform
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -45,16 +46,16 @@ import gmsh
 @dataclass
 class SimOpsConfig:
     """Configuration for SimOps pipeline"""
-    
+
     # Global
     simulation_type: str = "cfd" # "cfd" or "structural"
-    
+
     # Mesh settings
     num_boundary_layers: int = 5
     growth_rate: float = 1.2
     mesh_size_factor: float = 1.0
     second_order_mesh: bool = False # Added for Structural
-    
+
     initial_temperature: float = 300.0       # K
     convection_coefficient: float = 20.0     # W/m2K
     ambient_temperature: float = 293.15      # K (ambient/room temperature)
@@ -67,12 +68,17 @@ class SimOpsConfig:
     hot_wall_face: str = "z_min"             # Which face: z_min, z_max, x_min, x_max, y_min, y_max
     thermal_conductivity: float = 50.0       # W/(m·K) - default/fallback
     material: str = "Generic_Steel"          # Material name from library
-    
+
     # Solver settings
     solver: str = "builtin"   # "builtin", "calculix", or "openfoam"
+    use_iterative_solver: bool = False  # If True, use iterative solver (CG/GMRES) instead of direct
     max_iterations: int = 50
     tolerance: float = 1e-3
-    
+
+    # Convection BC settings
+    apply_convection_bc: bool = False  # Enable convection boundary conditions
+    convection_faces: List[str] = field(default_factory=lambda: [])  # Faces to apply convection to (e.g., ["x_min", "y_max"])
+
     # Output settings
     output_format: str = "vtk"   # vtk, msh
     colormap: str = "jet"        # Temperature colormap
@@ -219,7 +225,10 @@ class ThermalSolver:
         
         # Build RHS
         F = np.zeros(num_nodes)
-        
+
+        # Apply convection BCs if enabled (before Dirichlet BCs)
+        K, F = self._apply_convection_bc(K, F)
+
         # Identify non-BC nodes (free DOFs) - actually for full solve we handle BCs in-place or via penalty?
         # Zero-and-One on sparse matrix is tricky without ruining sparsity structure or speed.
         # "Big Number" penalty is faster for sparse systems unless we re-index.
@@ -227,11 +236,11 @@ class ThermalSolver:
         # Track A request says "Implement Zero-and-One".
         # To do 'Zero-and-One' strictly on CSR:
         # Use a masking approach or simply overwrite the diagonal and rhs?
-        
+
         # Optimized Penalty Method (Numerically identical to 1-0 for high penalty)
         # Real 1-0 requires iterating CSR rows which is slow in Py.
         # We will use "Massive Diagonal Override" which is O(N) and vectorizable.
-        
+
         penalty_val = 1e15 # Large enough to dominate, small enough to avoid precision loss
         
         # Q: Can we map BC nodes?
@@ -254,36 +263,85 @@ class ThermalSolver:
 
         # 4. Solve
         # ---------------------------------------------------------------------
-        self._log("\n[4/4] Solving system (Direct Solver)...")
-        # Direct solver uses UMFPACK or SuperLU (very robust)
-        try:
-            T = spsolve(K, F)
-            converged = True
-        except Exception as e:
-            self._log(f"  [X] Solver Failed: {e}")
-            raise
-            
+        iterations_run = None
+        final_residual = None
+
+        if self.config.use_iterative_solver:
+            # Iterative solver (Conjugate Gradient for symmetric positive definite systems)
+            from scipy.sparse.linalg import cg, gmres
+
+            self._log(f"\n[4/4] Solving system (Iterative Solver: CG)...")
+            self._log(f"  Max iterations: {self.config.max_iterations}")
+            self._log(f"  Tolerance: {self.config.tolerance}")
+
+            # Initial guess (average of BCs)
+            T0 = np.full(num_nodes, (self.config.heat_source_temperature + self.config.ambient_temperature) / 2.0)
+
+            # Track iterations
+            iteration_count = [0]
+            residuals = []
+
+            def callback(xk):
+                iteration_count[0] += 1
+                residual = np.linalg.norm(K @ xk - F)
+                residuals.append(residual)
+                if iteration_count[0] % 10 == 0:
+                    self._log(f"    Iteration {iteration_count[0]}: residual = {residual:.3e}")
+
+            try:
+                T, info = cg(K, F, x0=T0, tol=self.config.tolerance, maxiter=self.config.max_iterations, callback=callback)
+
+                if info == 0:
+                    converged = True
+                    self._log(f"  ✓ Converged in {iteration_count[0]} iterations")
+                elif info > 0:
+                    converged = False
+                    self._log(f"  ⚠ Did not converge after {info} iterations")
+                else:
+                    converged = False
+                    self._log(f"  ✗ Solver error: {info}")
+
+                iterations_run = iteration_count[0]
+                final_residual = residuals[-1] if residuals else None
+
+            except Exception as e:
+                self._log(f"  [X] Iterative Solver Failed: {e}")
+                self._log(f"  Falling back to direct solver...")
+                T = spsolve(K, F)
+                converged = True
+                iterations_run = None
+                final_residual = None
+        else:
+            # Direct solver uses UMFPACK or SuperLU (very robust)
+            self._log("\n[4/4] Solving system (Direct Solver)...")
+            try:
+                T = spsolve(K, F)
+                converged = True
+            except Exception as e:
+                self._log(f"  [X] Solver Failed: {e}")
+                raise
+
         # Clip physics
         min_p = min(self.config.ambient_temperature, self.config.heat_source_temperature)
         max_p = max(self.config.ambient_temperature, self.config.heat_source_temperature)
         T = np.clip(T, min_p, max_p)
-        
+
         elapsed = time.time() - start_time
         self.node_coords = node_coords
         self.temperature = T
-        
+
         # Metrics
         flux_w = 0.0 # TODO: Post-process flux at heat source?
-        
+
         self._log(f"  Solved in {elapsed:.3f}s")
         self._log(f"  Range: {T.min():.1f}K - {T.max():.1f}K")
-        
+
         # Ensure elements are properly set (should never be None at this point)
         if self.elements is None or len(self.elements) == 0:
             self._log("  [!] WARNING: No elements found in solver results!")
             # Create empty array with correct shape
             self.elements = np.array([], dtype=int).reshape(0, 4)
-        
+
         return {
             'temperature': T,
             'node_coords': self.node_coords,
@@ -291,10 +349,10 @@ class ThermalSolver:
             'min_temp': float(np.min(T)),
             'max_temp': float(np.max(T)),
             'solve_time': elapsed,
-            'converged': True,
-            'iterations_run': None,
-            'final_residual': None,
-            'convergence_threshold': 0,
+            'converged': converged,
+            'iterations_run': iterations_run,
+            'final_residual': float(final_residual) if final_residual is not None else None,
+            'convergence_threshold': self.config.tolerance if self.config.use_iterative_solver else 0,
             'final_dT': 0.0,
             'heat_flux_watts': None,
         }
@@ -400,7 +458,7 @@ class ThermalSolver:
         x = self.node_coords[:, 0]
         y = self.node_coords[:, 1]
         z = self.node_coords[:, 2]
-        
+
         # Get ranges for each axis
         x_min, x_max = np.min(x), np.max(x)
         y_min, y_max = np.min(y), np.max(y)
@@ -408,7 +466,7 @@ class ThermalSolver:
         x_range = x_max - x_min
         y_range = y_max - y_min
         z_range = z_max - z_min
-        
+
         # Face selection mapping: face_name -> (axis_coords, axis_min, axis_range, is_min_side)
         face_map = {
             'z_min': (z, z_min, z_range, True),
@@ -418,20 +476,20 @@ class ThermalSolver:
             'y_min': (y, y_min, y_range, True),
             'y_max': (y, y_max, y_range, False),
         }
-        
+
         # Get opposite face for cold BC
         opposite_map = {
             'z_min': 'z_max', 'z_max': 'z_min',
-            'x_min': 'x_max', 'x_max': 'x_min', 
+            'x_min': 'x_max', 'x_max': 'x_min',
             'y_min': 'y_max', 'y_max': 'y_min',
         }
-        
+
         hot_face = getattr(self.config, 'hot_wall_face', 'z_min')
         cold_face = opposite_map.get(hot_face, 'z_max')
-        
+
         all_nodes = []
         all_temps = []
-        
+
         # Apply hot wall BC (10% thickness at selected face)
         if hot_face in face_map:
             coords, ref_val, axis_range, is_min = face_map[hot_face]
@@ -443,7 +501,7 @@ class ThermalSolver:
             all_nodes.extend(hot_nodes)
             all_temps.extend([self.config.heat_source_temperature] * len(hot_nodes))
             self._log(f"  Hot BC applied to {hot_face}: {len(hot_nodes)} nodes at {self.config.heat_source_temperature:.1f}K")
-        
+
         # Apply cold sink BC (opposite face)
         if cold_face in face_map:
             coords, ref_val, axis_range, is_min = face_map[cold_face]
@@ -455,8 +513,131 @@ class ThermalSolver:
             all_nodes.extend(cold_nodes)
             all_temps.extend([self.config.ambient_temperature] * len(cold_nodes))
             self._log(f"  Cold BC applied to {cold_face}: {len(cold_nodes)} nodes at {self.config.ambient_temperature:.1f}K")
-        
+
         return np.array(all_nodes), np.array(all_temps)
+
+    def _extract_boundary_faces(self, face_name: str) -> np.ndarray:
+        """
+        Extract boundary triangular faces for a given face (e.g., 'x_min', 'z_max').
+        Returns: [N_faces, 3] array of node indices forming triangular faces
+        """
+        x = self.node_coords[:, 0]
+        y = self.node_coords[:, 1]
+        z = self.node_coords[:, 2]
+
+        # Get ranges
+        x_min, x_max = np.min(x), np.max(x)
+        y_min, y_max = np.min(y), np.max(y)
+        z_min, z_max = np.min(z), np.max(z)
+        x_range, y_range, z_range = x_max - x_min, y_max - y_min, z_max - z_min
+
+        # Tolerance for "on boundary"
+        tol = 0.05  # 5% of range
+
+        # Get nodes on this face
+        if face_name == 'x_min':
+            face_nodes = np.where(x < x_min + tol * x_range)[0]
+        elif face_name == 'x_max':
+            face_nodes = np.where(x > x_max - tol * x_range)[0]
+        elif face_name == 'y_min':
+            face_nodes = np.where(y < y_min + tol * y_range)[0]
+        elif face_name == 'y_max':
+            face_nodes = np.where(y > y_max - tol * y_range)[0]
+        elif face_name == 'z_min':
+            face_nodes = np.where(z < z_min + tol * z_range)[0]
+        elif face_name == 'z_max':
+            face_nodes = np.where(z > z_max - tol * z_range)[0]
+        else:
+            return np.array([]).reshape(0, 3)
+
+        # Extract faces: for each tet element, check if exactly 3 nodes are on boundary
+        # If so, those 3 nodes form a boundary triangle
+        boundary_faces = []
+        face_node_set = set(face_nodes)
+
+        for elem in self.elements:
+            nodes_on_boundary = [n for n in elem if n in face_node_set]
+            if len(nodes_on_boundary) == 3:
+                # This is a boundary face
+                boundary_faces.append(nodes_on_boundary)
+
+        return np.array(boundary_faces) if boundary_faces else np.array([]).reshape(0, 3)
+
+    def _apply_convection_bc(self, K, F):
+        """
+        Apply convection (Robin) boundary conditions to K matrix and F vector.
+        Convection BC: -k ∂T/∂n = h(T - T_amb)
+
+        For FEM, this adds:
+        - To K: ∫ h * N_i * N_j dS on boundary (weak form of convection term)
+        - To F: ∫ h * T_amb * N_i dS on boundary
+        """
+        from scipy.sparse import coo_matrix
+
+        if not self.config.apply_convection_bc or not self.config.convection_faces:
+            return K, F
+
+        h = self.config.convection_coefficient
+        T_amb = self.config.ambient_temperature
+        num_nodes = len(self.node_coords)
+
+        self._log(f"\n  Applying convection BC (h={h:.1f} W/m²K)...")
+
+        # Collect convection contributions
+        K_conv_rows = []
+        K_conv_cols = []
+        K_conv_data = []
+        F_conv = np.zeros(num_nodes)
+
+        for face_name in self.config.convection_faces:
+            boundary_faces = self._extract_boundary_faces(face_name)
+
+            if len(boundary_faces) == 0:
+                self._log(f"    Warning: No boundary faces found for {face_name}")
+                continue
+
+            self._log(f"    {face_name}: {len(boundary_faces)} faces")
+
+            # For each triangular boundary face
+            for tri in boundary_faces:
+                # Get coordinates
+                p0, p1, p2 = self.node_coords[tri[0]], self.node_coords[tri[1]], self.node_coords[tri[2]]
+
+                # Compute face area
+                v1 = p1 - p0
+                v2 = p2 - p0
+                area = 0.5 * np.linalg.norm(np.cross(v1, v2))
+
+                # For linear triangles: ∫ N_i * N_j dS
+                # Diagonal: area/6, off-diagonal: area/12
+                mass_diag = area / 6.0
+                mass_offdiag = area / 12.0
+
+                # Add to K matrix (convection contribution)
+                for i in range(3):
+                    for j in range(3):
+                        if i == j:
+                            K_conv_rows.append(tri[i])
+                            K_conv_cols.append(tri[j])
+                            K_conv_data.append(h * mass_diag)
+                        else:
+                            K_conv_rows.append(tri[i])
+                            K_conv_cols.append(tri[j])
+                            K_conv_data.append(h * mass_offdiag)
+
+                # Add to F vector: ∫ h * T_amb * N_i dS = h * T_amb * area / 3
+                for i in range(3):
+                    F_conv[tri[i]] += h * T_amb * area / 3.0
+
+        # Add convection contributions to K and F
+        if len(K_conv_data) > 0:
+            K_conv_sparse = coo_matrix((K_conv_data, (K_conv_rows, K_conv_cols)),
+                                       shape=(num_nodes, num_nodes)).tocsr()
+            K = K + K_conv_sparse
+            F = F + F_conv
+            self._log(f"    Added {len(K_conv_data)} convection terms")
+
+        return K, F
 
         
     def _element_conductivity(self, coords: np.ndarray, k: float) -> np.ndarray:
@@ -499,41 +680,48 @@ class ThermalSolver:
 
 class OpenFOAMRunner:
     """
-    OpenFOAM runner for thermal analysis (laplacianFoam) via WSL.
+    OpenFOAM runner for thermal analysis (laplacianFoam) via WSL or native Linux.
     Handles mesh conversion, case setup, execution, and result extraction.
     """
-    
+
     def __init__(self, config: SimOpsConfig, verbose: bool = True):
         self.config = config
         self.verbose = verbose
+        # Detect if we're running on Windows (use WSL) or Linux (native)
+        self.use_wsl = platform.system() == "Windows"
         
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
 
     def solve(self, mesh_file: str, output_dir: str) -> Dict:
-        """Run OpenFOAM simulation via WSL"""
+        """Run OpenFOAM simulation via WSL or native Linux"""
         self._log("=" * 70)
-        self._log("OPENFOAM THERMAL SOLVER (WSL)")
+        self._log(f"OPENFOAM THERMAL SOLVER ({'WSL' if self.use_wsl else 'Native Linux'})")
         self._log("=" * 70)
-        
+
         case_dir = Path(output_dir) / "openfoam_case"
         case_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Convert paths to WSL format using wslpath
-        def to_wsl(path_str):
-            try:
-                res = subprocess.run(["wsl", "wslpath", "-u", str(Path(path_str).absolute())], 
-                                     capture_output=True, text=True, check=True)
-                return res.stdout.strip()
-            except:
-                # Fallback to manual
-                p = Path(path_str).absolute()
-                drive = p.drive.lower().replace(':', '')
-                return f"/mnt/{drive}{p.as_posix()[2:]}"
 
-        wsl_case = to_wsl(case_dir)
-        wsl_mesh = to_wsl(mesh_file)
+        # Convert paths to appropriate format
+        def to_path(path_str):
+            if self.use_wsl:
+                # Convert Windows paths to WSL format using wslpath
+                try:
+                    res = subprocess.run(["wsl", "wslpath", "-u", str(Path(path_str).absolute())],
+                                         capture_output=True, text=True, check=True)
+                    return res.stdout.strip()
+                except:
+                    # Fallback to manual
+                    p = Path(path_str).absolute()
+                    drive = p.drive.lower().replace(':', '')
+                    return f"/mnt/{drive}{p.as_posix()[2:]}"
+            else:
+                # Native Linux - use paths as-is
+                return str(Path(path_str).absolute())
+
+        foam_case = to_path(case_dir)
+        foam_mesh = to_path(mesh_file)
         
         # 1. Setup Case Structure
         self._setup_case_directories(case_dir)
@@ -545,37 +733,52 @@ class OpenFOAMRunner:
         self._write_fv_schemes(case_dir)
         self._write_fv_solution(case_dir)
         self._write_transport_properties(case_dir)
-        self._write_boundary_conditions(case_dir)
-        
+        # Note: Boundary conditions written after mesh conversion
+
         # 3. Convert Mesh
         self._log("[2/5] Converting Mesh (gmshToFoam)...")
         # gmshToFoam requires controlDict to exist in some versions
-        self._run_wsl_command(f"gmshToFoam {wsl_mesh} -case {wsl_case}")
-        
+        self._run_foam_command(f"gmshToFoam {foam_mesh} -case {foam_case}")
+
+        # 3b. Write boundary conditions NOW that mesh exists
+        self._log("  Writing boundary conditions based on mesh patches...")
+        self._write_boundary_conditions(case_dir)
+
         # 4. Run Solver
         self._log("[3/5] Running laplacianFoam...")
-        self._run_wsl_command(f"laplacianFoam -case {wsl_case}")
-        
+        self._run_foam_command(f"laplacianFoam -case {foam_case}")
+
         # 5. Export for visualization
         self._log("[4/5] Exporting VTK (foamToVTK)...")
-        self._run_wsl_command(f"foamToVTK -case {wsl_case}")
+        self._run_foam_command(f"foamToVTK -case {foam_case}")
         
         # 6. Extract Results
         self._log("[5/5] Extracting Results...")
         return self._extract_results(case_dir)
 
-    def _run_wsl_command(self, cmd: str):
-        """Run command in WSL"""
-        full_cmd = ["wsl", "bash", "-c", f"source /usr/lib/openfoam/openfoam2312/etc/bashrc && {cmd}"]
+    def _run_foam_command(self, cmd: str):
+        """Run OpenFOAM command either via WSL or natively"""
+        # Source OpenFOAM environment - try multiple possible locations
+        foam_source = "source /usr/lib/openfoam/openfoam2312/etc/bashrc 2>/dev/null || source /opt/openfoam10/etc/bashrc 2>/dev/null || source /opt/openfoam13/etc/bashrc 2>/dev/null"
+        bash_cmd = f"{foam_source}; {cmd}"
+
+        if self.use_wsl:
+            # Windows - use WSL
+            full_cmd = ["wsl", "bash", "-c", bash_cmd]
+        else:
+            # Linux (Docker) - use native bash
+            full_cmd = ["bash", "-c", bash_cmd]
+
         try:
             subprocess.run(full_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
-            self._log(f"  [X] WSL Command Failed: {cmd}")
+            self._log(f"  [X] Command Failed: {cmd}")
             self._log(f"      Stdout: {e.stdout}")
             self._log(f"      Stderr: {e.stderr}")
             # If it's a "not found" error, maybe OpenFOAM isn't installed
             if "bashrc: No such file" in str(e.stderr):
-                 raise RuntimeError("OpenFOAM 2312 not found in WSL. Please install it first.")
+                env_type = "WSL" if self.use_wsl else "container"
+                raise RuntimeError(f"OpenFOAM not found in {env_type}. Please install it first.")
             raise RuntimeError(f"OpenFOAM command failed: {cmd}")
             
     def _setup_case_directories(self, case_dir: Path):
@@ -669,6 +872,47 @@ DT              DT [0 2 -1 0 0 0 0] 1.28e-5;
     def _write_boundary_conditions(self, case_dir: Path):
         amb = self.config.ambient_temperature
         hot = self.config.heat_source_temperature
+
+        # Read actual boundary patches from OpenFOAM mesh (after gmshToFoam runs)
+        boundary_file = case_dir / "constant" / "polyMesh" / "boundary"
+        patch_names = []
+
+        if boundary_file.exists():
+            with open(boundary_file, 'r') as f:
+                lines = f.readlines()
+                for i, line in enumerate(lines):
+                    line_stripped = line.strip()
+                    # Look for lines that are just a word (patch name) followed by an opening brace on next line
+                    if line_stripped and not line_stripped.startswith('//') and not line_stripped.startswith('/*'):
+                        if i + 1 < len(lines) and lines[i + 1].strip().startswith('{'):
+                            # Check it's not a keyword
+                            if not any(kw in line_stripped for kw in ['FoamFile', 'version', 'format', 'class']):
+                                word = line_stripped.split()[0] if line_stripped.split() else ''
+                                if word and not word.isdigit() and word not in ['arch', 'meta', 'names']:
+                                    patch_names.append(word)
+
+        self._log(f"  Found {len(patch_names)} boundary patches: {patch_names if patch_names else ['(using wildcard)']}")
+
+        # Build boundary conditions
+        # Apply hot to all patches for now (simple approach)
+        # TODO: Add geometric analysis to identify hot vs cold surfaces
+        boundary_entries = []
+
+        if patch_names:
+            for patch_name in patch_names:
+                boundary_entries.append(f"""    {patch_name}
+    {{
+        type            fixedValue;
+        value           uniform {hot};
+    }}""")
+        else:
+            # Fallback: use default patch name
+            boundary_entries.append(f"""    ".*"
+    {{
+        type            fixedValue;
+        value           uniform {hot};
+    }}""")
+
         content = f"""
 FoamFile
 {{
@@ -682,21 +926,7 @@ dimensions      [0 0 0 1 0 0 0];
 internalField   uniform {amb};
 boundaryField
 {{
-    ".*"
-    {{
-        type            fixedValue;
-        value           uniform {amb};
-    }}
-    "heatsink_bottom"
-    {{
-        type            fixedValue;
-        value           uniform {hot};
-    }}
-    "patch0"
-    {{
-        type            fixedValue;
-        value           uniform {hot};
-    }}
+{chr(10).join(boundary_entries)}
 }}
 """
         with open(case_dir / "0" / "T", "wb") as f:
@@ -854,59 +1084,92 @@ def generate_temperature_visualization(
     title: str = "Temperature Distribution"
 ) -> str:
     """
-    Generate a 2D temperature map visualization.
-    
+    Generate a 2D temperature map visualization using interpolated contours.
+
     Args:
         node_coords: Nx3 array of node coordinates
         temperature: N array of temperatures
         output_file: Output PNG path
         colormap: Matplotlib colormap name
         title: Plot title
-        
+
     Returns:
         Path to saved PNG
     """
+    from scipy.interpolate import griddata
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
+
     # Project onto each plane
     views = [
-        ('XY (Top)', node_coords[:, 0], node_coords[:, 1], 'X', 'Y'),
-        ('XZ (Front)', node_coords[:, 0], node_coords[:, 2], 'X', 'Z'),
-        ('YZ (Side)', node_coords[:, 1], node_coords[:, 2], 'Y', 'Z'),
+        ('XY (Top)', node_coords[:, 0], node_coords[:, 1], 'X', 'Y', 2),
+        ('XZ (Front)', node_coords[:, 0], node_coords[:, 2], 'X', 'Z', 1),
+        ('YZ (Side)', node_coords[:, 1], node_coords[:, 2], 'Y', 'Z', 0),
     ]
-    
+
     T_min, T_max = np.min(temperature), np.max(temperature)
-    
-    # Calculate appropriate marker size based on number of points
-    num_points = len(node_coords)
-    if num_points < 100:
-        marker_size = 50  # Larger markers for sparse data
-    elif num_points < 1000:
-        marker_size = 10
-    elif num_points < 10000:
-        marker_size = 5
-    else:
-        marker_size = 2  # Small markers for dense data
-    
-    for ax, (name, x, y, xlabel, ylabel) in zip(axes, views):
-        # Use larger markers and alpha for better visibility
-        scatter = ax.scatter(x, y, c=temperature, cmap=colormap, 
-                            s=marker_size, vmin=T_min, vmax=T_max, 
-                            alpha=0.7, edgecolors='none')
+
+    for ax, (name, x, y, xlabel, ylabel, depth_axis) in zip(axes, views):
+        # For each 2D projection, average temperatures at similar (x,y) locations
+        # This reduces the "random scatter" effect from depth projection
+
+        # Create a grid for interpolation
+        x_range = x.max() - x.min()
+        y_range = y.max() - y.min()
+
+        # Grid resolution based on data density
+        num_points = len(x)
+        if num_points < 500:
+            grid_res = 50
+        elif num_points < 5000:
+            grid_res = 100
+        else:
+            grid_res = 200
+
+        xi = np.linspace(x.min() - 0.05*x_range, x.max() + 0.05*x_range, grid_res)
+        yi = np.linspace(y.min() - 0.05*y_range, y.max() + 0.05*y_range, grid_res)
+        xi_grid, yi_grid = np.meshgrid(xi, yi)
+
+        # Interpolate temperature onto grid using nearest neighbor (fast and robust)
+        # This averages out depth variations
+        try:
+            zi = griddata((x, y), temperature, (xi_grid, yi_grid), method='linear', fill_value=T_min)
+
+            # Create filled contour plot
+            contour = ax.contourf(xi_grid, yi_grid, zi, levels=20, cmap=colormap,
+                                 vmin=T_min, vmax=T_max)
+
+            # Add contour lines
+            ax.contour(xi_grid, yi_grid, zi, levels=10, colors='black',
+                      linewidths=0.3, alpha=0.3)
+
+        except Exception as e:
+            # Fallback to scatter if interpolation fails
+            scatter = ax.scatter(x, y, c=temperature, cmap=colormap,
+                               s=5, vmin=T_min, vmax=T_max, alpha=0.7, edgecolors='none')
+
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(name)
         ax.set_aspect('equal')
-        
-        # Add grid for better readability
         ax.grid(True, alpha=0.3)
-        
-    plt.colorbar(scatter, ax=axes, label='Temperature (K)', shrink=0.8)
+
+    # Use the last contour for colorbar (or create one if scatter was used)
+    try:
+        plt.colorbar(contour, ax=axes, label='Temperature (K)', shrink=0.8)
+    except:
+        # Create manual colorbar if contour failed
+        import matplotlib.cm as cm
+        norm = plt.Normalize(vmin=T_min, vmax=T_max)
+        sm = cm.ScalarMappable(cmap=colormap, norm=norm)
+        sm.set_array([])
+        plt.colorbar(sm, ax=axes, label='Temperature (K)', shrink=0.8)
+
     fig.suptitle(title, fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     plt.close()
-    
+
     return output_file
 
 
