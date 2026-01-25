@@ -838,7 +838,7 @@ function App() {
                             {simResults?.report_url && (
                                 <div className="text-blue-400 mt-2">
                                     {'   '} <a
-                                        href={`http://localhost:8000${simResults.report_url}`}
+                                        href={`${simResults.report_url}`}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="hover:underline underline-offset-4 decoration-blue-400/30"
