@@ -135,3 +135,32 @@ modal_cube_*.txt
 modal_final_run_*.txt
 modal_poc_output.txt
 modal_run_output.txt
+
+# Simulation Outputs
+simops_output/
+thermal_runs/
+thermal_runs_real/
+validation_results/
+verification_runs/
+simops_output/
+uploads/
+debug_output/
+*.case
+*.foam
+
+# Desktop App
+desktop-app/node_modules/
+desktop-app/src-tauri/target/
+desktop-app/src-tauri/binaries/
+
+# External Tools & Environments
+.simops/
+ExampleOF_Cases/
+_forge/
+output_sweep/
+verification_lab/demo_output/
+verification_lab/report_test_output/
+tests/
+debug_thermal_viz.py
+tools/debug_simulation_e2e.py
+
