@@ -32,21 +32,6 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
-  watcher:
-    image: ghcr.io/khoriumai/simops-watcher:latest
-    depends_on:
-      - redis
-    environment:
-      <<: *common-env
-      POLL_INTERVAL: 2
-    volumes:
-      - ./input:/input:ro
-      - ./output:/output
-      - ./logs:/logs
-    restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-
   worker:
     image: ghcr.io/khoriumai/simops-worker:latest
     depends_on:
@@ -55,8 +40,6 @@ services:
       <<: *common-env
       WORKER_TIMEOUT: 1800
     volumes:
-      - ./input:/input:ro
-      - ./output:/output
       - ./logs:/logs
     deploy:
       mode: replicated
@@ -90,7 +73,7 @@ services:
       <<: *common-env
       FLASK_ENV: production
     ports:
-      - "3000:3000"
+      - "3001:3000" # Changed to 3001 to avoid local dev conflicts
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

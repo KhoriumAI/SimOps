@@ -18,9 +18,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/4] Creating local directories...
-if not exist "input" mkdir input
-if not exist "output" mkdir output
+echo [1/4] Creating local logs directory...
 if not exist "logs" mkdir logs
 
 echo [2/4] Authenticating with GitHub Container Registry...
@@ -52,12 +50,11 @@ echo ===========================================================================
 echo Installation Complete!
 echo ===============================================================================
 echo.
-echo 1. View User UI at:     http://localhost:5173
-echo 2. Drop STEP files into: %CD%\input
-echo 3. Check Results in:     %CD%\output
+echo 1. Access SimOps UI at:  http://localhost:5173
 echo.
 echo [DEBUG/Technical]
-echo - View Job Dashboard:    http://localhost:9181
+echo - Backend API:           http://localhost:3001
+echo - Job Dashboard:         http://localhost:9181
 echo.
 echo The auto-updater (Watchtower) is running and will check for updates hourly.
 echo.
