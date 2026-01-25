@@ -1,0 +1,89 @@
+version: '3.8'
+
+# SimOps Online Deployment
+# Uses pre-built images from GHCR + Watchtower for auto-updates
+
+x-common-env: &common-env
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  # For online install, use relative paths created by install script
+  INPUT_DIR: /input
+  OUTPUT_DIR: /output
+  LOG_LEVEL: INFO
+  TZ: America/Los_Angeles
+
+services:
+  # =================================================================
+  # AUTO-UPDATER (Watchtower)
+  # =================================================================
+  watchtower:
+    image: containrrr/watchtower
+    container_name: simops_updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Check every hour, remove old images, include restarting containers
+    command: --interval 3600 --cleanup --include-restarting
+    restart: always
+
+  # =================================================================
+  # CORE SERVICES
+  # =================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: simops_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  watcher:
+    image: ghcr.io/khoriumai/simops-watcher:latest
+    container_name: simops_watcher
+    depends_on:
+      - redis
+    environment:
+      <<: *common-env
+      POLL_INTERVAL: 2
+    volumes:
+      - ./input:/input:ro
+      - ./output:/output
+      - ./logs:/logs
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  worker:
+    image: ghcr.io/khoriumai/simops-worker:latest
+    depends_on:
+      - redis
+    environment:
+      <<: *common-env
+      WORKER_TIMEOUT: 1800
+    volumes:
+      - ./input:/input:ro
+      - ./output:/output
+      - ./logs:/logs
+    deploy:
+      mode: replicated
+      replicas: 4
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  dashboard:
+    image: eoranged/rq-dashboard:latest
+    container_name: simops_dashboard
+    depends_on:
+      - redis
+    ports:
+      - "9181:9181"
+    environment:
+      RQ_DASHBOARD_REDIS_URL: redis://redis:6379
+    restart: unless-stopped
+
+volumes:
+  redis_data:
