@@ -1,0 +1,32 @@
+# SimOps API Server Dockerfile
+FROM python:3.11-slim-bullseye
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1-mesa-glx \
+    libglu1-mesa \
+    libxrender1 \
+    libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY backend/ ./backend/
+COPY core/ ./core/
+COPY strategies/ ./strategies/
+
+# Environment variables
+ENV FLASK_APP=backend/api_server.py
+ENV FLASK_ENV=production
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 3000
+
+# Start server (using gunicorn or flask for now)
+CMD ["python", "backend/api_server.py"]

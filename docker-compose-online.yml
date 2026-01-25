@@ -79,5 +79,31 @@ services:
       RQ_DASHBOARD_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
+  # =================================================================
+  # WEB UI & API (Custom User UI)
+  # =================================================================
+  api:
+    image: ghcr.io/khoriumai/simops-api:latest
+    depends_on:
+      - redis
+    environment:
+      <<: *common-env
+      FLASK_ENV: production
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  frontend:
+    image: ghcr.io/khoriumai/simops-frontend:latest
+    depends_on:
+      - api
+    ports:
+      - "5173:80" # Map host 5173 to container 80
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
 volumes:
   redis_data:

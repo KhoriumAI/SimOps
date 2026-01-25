@@ -52,9 +52,12 @@ echo ===========================================================================
 echo Installation Complete!
 echo ===============================================================================
 echo.
-echo 1. Drop STEP files into: %CD%\input
-echo 2. View Dashboard at:    http://localhost:9181
+echo 1. View User UI at:     http://localhost:5173
+echo 2. Drop STEP files into: %CD%\input
 echo 3. Check Results in:     %CD%\output
+echo.
+echo [DEBUG/Technical]
+echo - View Job Dashboard:    http://localhost:9181
 echo.
 echo The auto-updater (Watchtower) is running and will check for updates hourly.
 echo.

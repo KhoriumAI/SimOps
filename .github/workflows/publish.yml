@@ -37,6 +37,29 @@ jobs:
       # --- BUILD AND PUSH SERVICES ---
 
 
+      # Backend API Service
+      - name: Build and push API
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Frontend Web Service
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.frontend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Note: Merged repo structure has 'simops_worker.py' in root and 'Dockerfile.worker'
       - name: Build and push Worker
         uses: docker/build-push-action@v5
         with:
