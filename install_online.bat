@@ -48,55 +48,67 @@ echo - Frontend Port:  !FRONTEND_PORT!
 echo - API Port:       !API_PORT!
 echo - Dashboard Port: !DASHBOARD_PORT!
 
+echo.
 echo [2/5] Creating local logs directory...
 if not exist "logs" mkdir logs
 
-echo [3/5] Checking image status...
+echo.
+echo [3/5] Checking for updates...
 set NEED_PULL=0
 docker images -q ghcr.io/khoriumai/simops-frontend:latest >nul 2>&1
 if !errorlevel! neq 0 (
     echo - Fresh installation detected.
     set NEED_PULL=1
 ) else (
-    echo - Checking for updates on GitHub...
-    docker login ghcr.io >nul 2>&1
-    
-    REM Compare local vs remote digest using a quick PowerShell check
-    powershell -Command "$local = (docker images ghcr.io/khoriumai/simops-frontend:latest --format '{{.Digest}}'); $remote = (docker manifest inspect ghcr.io/khoriumai/simops-frontend:latest | ConvertFrom-Json).manifests[0].digest; if ($local -ne $remote) { exit 1 } else { exit 0 }" >nul 2>&1
+    echo - Comparing local version with GitHub...
+    REM Try to get remote digest. This might fail if not logged in or no internet.
+    powershell -Command "$local = (docker images ghcr.io/khoriumai/simops-frontend:latest --format '{{.Digest}}'); if (-not $local) { exit 0 }; try { $manifest = (docker manifest inspect ghcr.io/khoriumai/simops-frontend:latest | ConvertFrom-Json); if ($manifest.manifests) { $remote = $manifest.manifests[0].digest } else { $remote = $manifest.config.digest }; if ($remote -and $local -ne $remote) { exit 1 } else { exit 0 } } catch { exit 0 }" >nul 2>&1
     
     if !errorlevel! equ 1 (
-        echo - Update available!
-        set /p UPDATE_CHOICE="Download new version? (y/N): "
-        if /i "!UPDATE_CHOICE!" equ "y" set NEED_PULL=1
+        echo.
+        echo ****************************************
+        echo    UPDATE AVAILABLE ON GITHUB!
+        echo ****************************************
+        echo.
+        set /p UPDATE_CHOICE="Download latest version? (y/N): "
+        if /i "!UPDATE_CHOICE!"=="y" set NEED_PULL=1
     ) else (
         echo - System is up to date.
     )
 )
 
+echo.
 if !NEED_PULL! equ 1 (
-    echo.
-    echo [4/5] Pulling latest images...
+    echo [4/5] Pulling latest images from GitHub...
     docker-compose -f docker-compose-online.yml pull
+    if !errorlevel! neq 0 (
+        echo [WARNING] Failed to pull images. Will try to use local versions.
+        pause
+    )
 ) else (
-    echo [4/5] Skipping download (using local images).
+    echo [4/5] Using local images (up to date).
 )
 
 echo.
 echo [5/5] Starting SimOps services...
 docker-compose -f docker-compose-online.yml up -d
+if !errorlevel! neq 0 (
+    echo [ERROR] Failed to start services.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ===============================================================================
-echo Installation Complete! Opening SimOps...
+echo Installation Complete! opening SimOps...
 echo ===============================================================================
-echo.
-timeout /t 3 >nul
-start http://localhost:!FRONTEND_PORT!
 echo.
 echo - Workbench:     http://localhost:!FRONTEND_PORT!
 echo - API Server:    http://localhost:!API_PORT!
 echo.
 echo ===============================================================================
 echo.
-timeout /t 5
+timeout /t 3 >nul
+start http://localhost:!FRONTEND_PORT!
+pause
 exit /b 0
