@@ -16,17 +16,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
+# Copy code
 COPY backend/ ./backend/
 COPY core/ ./core/
 COPY strategies/ ./strategies/
+COPY simops_pipeline.py .
+COPY simops_worker.py .
+COPY result_dispatcher.py .
 
 # Environment variables
 ENV FLASK_APP=backend/api_server.py
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 3000
+EXPOSE 5000
 
-# Start server (using gunicorn or flask for now)
+# Start server
 CMD ["python", "backend/api_server.py"]
