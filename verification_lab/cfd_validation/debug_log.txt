@@ -1,0 +1,78 @@
+\n=== LOG START: 2025-12-28T19:39:49.154866 ===\n
+=== LOG START: 2025-12-28T19:39:49.154866 ===
+[INFO] Using explicit sidecar config: poiseuille_config.json
+[INFO] Found sidecar config: poiseuille_config.json
+[WARNING] Sidecar job_name='Poiseuille_Test' differs from file 'Cylinder'. Using filename.
+[STAGE] Initializing
+[METADATA] job_name=Cylinder
+[INFO]    [Config] Loaded from: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\poiseuille_config.json
+[DEBUG] Dispatch: Job=Cylinder, Config=C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\poiseuille_config.json, Type=cfd
+[INFO]    [Dispatch] Simulation Type: CFD
+[INFO] >>> DISPATCHING TO CFD PIPELINE <<<
+[Pre-Sim] Geometry validation: ISSUES FOUND (auto-repairable)
+[INFO] Pre-simulation checks passed:
+[Pre-Sim Checks] ALL PASSED
+⚠ Geometry has issues but auto-repair possible (4 issues)
+✓ Mesh file check skipped (placeholder)
+[STAGE] Meshing
+[METADATA] strategy=HighFi_Layered
+[INFO]   [Wind Tunnel] Enabled for external flow
+[INFO] [Meshing] Using CFD/Thermal Strategy
+[INFO]   [DEBUG] CFDMeshConfig: virtual_wind_tunnel=True
+[INFO] ======================================================================
+[INFO] CFD MESH STRATEGY - Boundary Layer Generation
+[INFO] ======================================================================
+[INFO] Input:  C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\Cylinder.step
+[INFO] Output: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\output\Cylinder_HighFi_Layered.msh
+[INFO] Layers: 5, Growth: 1.2
+[INFO] 
+[INFO] [1/5] Loading CAD geometry...
+[INFO] [2/5] Analyzing geometry...
+[INFO]   Diagonal: 150.00
+[INFO]   Min feature size (approx): 50.00
+[INFO]   Auto mesh size: 5.0000 to 15.0000
+[INFO]   Adaptive first layer: 0.600000
+[INFO] [Debug] Wind Tunnel Check: enabled=True, have_class=True, is_stl=False
+[INFO] [1.5/5] Generating Virtual Wind Tunnel Domain...
+  Object Dimensions: L=100.00, W=100.00, H=50.00
+  Enclosure Dimensions: 2350.00 x 900.00 x 475.00
+  [OK] Fluid domain created with 1 volumes
+    - Inlet: 1 face(s)
+    - Outlet: 1 face(s)
+    - Far Field: 4 face(s)
+    - Object (No-slip): 4 face(s)
+    - Fluid Domain: 2 volume(s)
+  Identified 10 boundary faces:
+[INFO]   [OK] Fluid domain created
+[INFO]   L_char for Reynolds: 100.0000101
+[INFO] [2.5/5] Skipping Golden Template Tags (Wind Tunnel handles boundaries)
+[INFO] [3/5] Configuring boundary layers...
+[INFO]   [Warning] Could not set surfaces for BL: Unknown option 'Surfaces' in field 1 of type 'BoundaryLayer'
+[INFO]   [OK] Gmsh BoundaryLayer field configured (Target thickness: 4.465)
+[INFO] [4/5] Setting mesh parameters...
+[INFO] [5/5] Generating 3D mesh...
+[INFO] Optimizing mesh (Netgen)...
+[INFO] Smoothing mesh (10 iterations)...
+[INFO] 
+[INFO] ======================================================================
+[INFO] MESH STATISTICS
+[INFO] ======================================================================
+[INFO]   Nodes:       344,529
+[INFO]   Tetrahedra:  1,897,400
+[INFO]   Prisms:      0
+[INFO]   Hexahedra:   0
+[INFO]   Physical Groups: {'BC_Inlet': 1, 'BC_Outlet': 2, 'BC_FarField': 3, 'BC_Wall_Object': 4, 'Fluid_Domain': 5}
+[INFO] 
+[INFO] Writing mesh to: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\output\Cylinder_HighFi_Layered.msh
+[INFO]   Wrote mesh metadata to: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test\output\mesh_metadata.json
+[INFO] [OK] CFD mesh generation complete!
+[INFO] ======================================================================
+[STAGE] Quality Control
+
+C:\Users\markm\AppData\Local\Programs\Python\Python311\Lib\site-packages\pyvista\core\filters\data_set.py:5650: PyVistaDeprecationWarning: This filter is deprecated. Use `cell_quality` instead. Note that this
+new filter does not include an array named ``'CellQuality'`
+  warnings.warn(msg, PyVistaDeprecationWarning)
+[ERROR] [MeshQC] ❌ Mesh too large: 2,002,318 cells > 2,000,000 limit (optimizer likely failed)
+[METADATA] qc_failure="Mesh too large: 2,002,318 cells > 2,000,000 limit (optimizer likely failed)"
+[ERROR] CFD Meshing failed: Mesh Quality Check Failed: Mesh too large: 2,002,318 cells > 2,000,000 limit (optimizer likely failed)
+\n=== LOG END: 2025-12-28T19:42:18.128901 ===\n

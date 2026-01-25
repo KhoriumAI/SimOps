@@ -18,9 +18,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+import re
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
 import platform
 import os
 from datetime import datetime
@@ -401,7 +402,7 @@ castellatedMeshControls
     {{
         {stl_filename}
         {{
-            level (2 3); // Refinement level (min max)
+            level (1 1); // Refinement level (min max) - Level 1 splits 2x -> Matches target cell size
         }}
     }}
 
@@ -552,66 +553,133 @@ SIMPLE
     (case_dir / "system" / "fvSolution").write_text(fv_solution)
 
 
-def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
-    """Run snappyHexMesh pipeline via WSL."""
-    case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
-    
-    # OPTIMIZED: Combined all OpenFOAM commands into ONE WSL call
-    # This saves ~10-15 seconds by avoiding multiple bashrc sourcing
-    # Pipeline: blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK
-    cmd_str = (
-        f'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null || true; ' # true allows continuing if source fails (e.g. wrapper in path)
-        f'cd "{case_dir_wsl}" && '
-        f'echo "[TIMING] Starting blockMesh..." && '
-        f'time (blockMesh > log.blockMesh 2>&1 || (echo "ERR: blockMesh failed"; cat log.blockMesh; exit 1)) && '
-        f'echo "[TIMING] Starting snappyHexMesh..." && '
-        f'time (snappyHexMesh -overwrite > log.snappy 2>&1 || (echo "ERR: snappyHexMesh failed"; cat log.snappy; exit 1)) && '
-        f'echo "[TIMING] Starting foamMeshToFluent..." && '
-        f'time (foamMeshToFluent > log.fluent 2>&1) && '
-        f'echo "[TIMING] Starting foamToVTK..." && '
-        f'time (foamToVTK > log.vtk 2>&1) && '
-        f'echo "[TIMING] Pipeline complete!"'
-    )
-    
-    if platform.system() == 'Windows':
-        cmd = ['wsl', 'bash', '-c', cmd_str]
-    else:
-        # Native Linux (AWS)
-        cmd = ['bash', '-c', cmd_str]
-    
-    if verbose:
-        print("[OpenFOAM] Running OPTIMIZED pipeline (single WSL call)...")
-        print("[OpenFOAM] blockMesh -> snappyHexMesh -> foamMeshToFluent -> foamToVTK")
-    
-    start_time = time.time()
+def run_env_cmd(case_dir_wsl: str, command: str, verbose: bool = True) -> bool:
+    """Run a command in the OpenFOAM WSL environment."""
+    source_cmd = 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null'
+    full_cmd = f'{source_cmd}; cd "{case_dir_wsl}" && {command}'
     
     try:
-        # Increase timeout for full pipeline (can be slow on complex meshes)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        # Run with explicit structure
+        proc = subprocess.run(
+            ['wsl', 'bash', '-c', full_cmd],
+            capture_output=True, text=True, timeout=900
+        )
         
-        elapsed = time.time() - start_time
-        
-        if result.returncode != 0:
-            print(f"[OpenFOAM] ERROR: Pipeline failed after {elapsed:.1f}s")
-            print(f"Stdout/Stderr capture:\n{result.stdout}\n{result.stderr}")
+        if proc.returncode != 0:
+            if verbose:
+                print(f"[OpenFOAM] ERROR: Command failed: {command}", flush=True)
+                print(f"Stdout:\n{proc.stdout}", flush=True)
+                print(f"Stderr:\n{proc.stderr}", flush=True)
             return False
         
         if verbose:
             # Print timing info from the output
-            print(f"[OpenFOAM] Pipeline completed in {elapsed:.1f}s total")
-            # Extract timing lines from output
-            for line in result.stdout.split('\n'):
-                if '[TIMING]' in line or 'real' in line:
-                    print(f"  {line.strip()}")
+            # print(f"[OpenFOAM] Pipeline completed in {elapsed:.1f}s total") # variable not available here, relying on stream for logs
+             pass
             
         return True
     except subprocess.TimeoutExpired:
-        elapsed = time.time() - start_time
-        print(f"[OpenFOAM] ERROR: Pipeline timed out after {elapsed:.1f}s")
+        if verbose:
+            print(f"[OpenFOAM] ERROR: Command timed out: {command}", flush=True)
         return False
     except Exception as e:
-        print(f"[OpenFOAM] ERROR: {e}")
+        if verbose:
+            print(f"[OpenFOAM] ERROR executing {command}: {e}", flush=True)
         return False
+
+def run_env_cmd_stream(case_dir_wsl: str, command: str, verbose: bool = True) -> bool:
+    """Run a command in the OpenFOAM WSL environment and stream output for progress tracking."""
+    source_cmd = 'source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null || source /opt/openfoam*/etc/bashrc 2>/dev/null'
+    full_cmd = f'{source_cmd}; cd "{case_dir_wsl}" && {command}'
+    
+    try:
+        if verbose:
+            print(f"[OpenFOAM] Executing (stream): {command}", flush=True)
+            
+        process = subprocess.Popen(
+            ['wsl', 'bash', '-c', full_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        points_to_snap = 0
+        last_pct = -5
+        
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Log to console so mesh_worker_subprocess captures it
+            print(line, flush=True)
+            
+            # Parse for snapping progress
+            # Pattern: "Number of points to snap: 12345"
+            if "Number of points to snap:" in line:
+                match = re.search(r'Number of points to snap:\s*(\d+)', line)
+                if match:
+                    points_to_snap = int(match.group(1))
+                    if verbose:
+                        print(f"[OpenFOAM] Found {points_to_snap} points to snap.", flush=True)
+            
+            # Pattern: "Points snapped: 1234"
+            elif "Points snapped:" in line and points_to_snap > 0:
+                match = re.search(r'Points snapped:\s*(\d+)', line)
+                if match:
+                    current = int(match.group(1))
+                    pct = int((current / points_to_snap) * 100)
+                    # Output in 5% increments or final
+                    if pct >= last_pct + 5 or current == points_to_snap:
+                        print(f"[OpenFOAM] Snapping progress: {pct}% ({current}/{points_to_snap} points)", flush=True)
+                        last_pct = pct
+        
+        process.wait()
+        return process.returncode == 0
+    except Exception as e:
+        if verbose:
+            print(f"[OpenFOAM] ERROR streaming {command}: {e}", flush=True)
+        return False
+
+def run_snappy_hex_mesh(case_dir: Path, verbose: bool = True) -> bool:
+    """Run snappyHexMesh pipeline via WSL."""
+    case_dir_wsl = str(case_dir).replace('\\', '/').replace('C:', '/mnt/c')
+    
+    if verbose:
+        print("[OpenFOAM] Starting snappyHexMesh pipeline...", flush=True)
+    
+    # 1. blockMesh
+    if verbose:
+        print("[OpenFOAM] Running blockMesh...", flush=True)
+    
+    # We redirect to log file but also check return code
+    cmd_block = 'blockMesh > log.blockMesh 2>&1'
+    if not run_env_cmd(case_dir_wsl, cmd_block, verbose):
+        # Print log if failed
+        log = case_dir / "log.blockMesh"
+        if log.exists() and verbose:
+            print(f"[OpenFOAM] blockMesh Log:\n{log.read_text()}", flush=True)
+        return False
+        
+    if verbose:
+        print("[OpenFOAM] blockMesh complete.", flush=True)
+        print("[OpenFOAM] Running snappyHexMesh (this may take minutes)...", flush=True)
+        
+    # 2. snappyHexMesh
+    # Instead of redirecting to file only, we use our streaming runner to get progress logs
+    cmd_snappy = 'snappyHexMesh -overwrite 2>&1 | tee log.snappy'
+    if not run_env_cmd_stream(case_dir_wsl, cmd_snappy, verbose):
+         # Print log if failed (though streaming already printed much of it)
+        log = case_dir / "log.snappy"
+        if log.exists() and verbose:
+             print(f"[OpenFOAM] snappyHexMesh Log (Last lines):\n{log.read_text().splitlines()[-20:]}", flush=True)
+        return False
+        
+    if verbose:
+        print("[OpenFOAM] snappyHexMesh complete.", flush=True)
+        
+    return True
 
 
 
@@ -835,10 +903,15 @@ def generate_openfoam_hex_mesh(
         enclosure_config: Optional enclosure configuration from EnclosureGenerator
     """
     if verbose:
+<<<<<<< HEAD
         print(f"[OpenFOAM] Generating hex mesh for: {stl_path}")
         print(f"[OpenFOAM] Target cell size: {cell_size} mm")
         if enclosure_config:
             print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}")
+=======
+        print(f"[OpenFOAM] Generating hex mesh for: {stl_path}", flush=True)
+        print(f"[OpenFOAM] Target cell size: {cell_size} mm", flush=True)
+>>>>>>> origin/main
     
     # 0. CHECK CLOUD COMPUTE
     # If configured to use Modal, bypass local WSL entirely

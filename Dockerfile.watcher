@@ -1,0 +1,41 @@
+# SimOps Watcher Dockerfile - Production Optimized
+# =================================================
+# Lightweight container for hot folder monitoring
+
+FROM python:3.10-slim-bullseye
+
+# Labels
+LABEL maintainer="SimOps Team"
+LABEL description="SimOps Hot Folder Watcher"
+LABEL version="1.0"
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash simops
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements-watcher.txt .
+RUN pip install --no-cache-dir -r requirements-watcher.txt \
+    && rm requirements-watcher.txt
+
+# Copy watcher code
+COPY --chown=simops:simops watcher.py .
+
+# Create directories
+RUN mkdir -p /input /output /logs \
+    && chown -R simops:simops /input /output /logs /app
+
+# Switch to non-root user
+USER simops
+
+# Environment
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import redis; r=redis.Redis(host='${REDIS_HOST:-redis}'); r.ping()" || exit 1
+
+# Run watcher
+CMD ["python", "-u", "watcher.py"]

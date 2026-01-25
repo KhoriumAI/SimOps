@@ -131,7 +131,9 @@ def generate_openfoam_hex_wrapper(cad_file: str, output_dir: str = None, quality
 
         
         # Step 2: Get cell size from quality params
-        cell_size = quality_params.get('max_element_size', 2.0) if quality_params else 2.0
+        cell_size = 2.0
+        if quality_params:
+            cell_size = float(quality_params.get('max_size_mm', quality_params.get('max_element_size', 2.0)))
         
         # Step 3: Determine output path
         mesh_folder = Path(__file__).parent / "generated_meshes"
@@ -2324,14 +2326,21 @@ if __name__ == "__main__":
     cad_file = args.cad_file
     output_dir = args.output_dir
     
-    # Load quality params
+    # Load quality params (backward compatible dict format)
     quality_params = {}
     if args.config_file and os.path.exists(args.config_file):
         try:
             with open(args.config_file, 'r') as f:
                 quality_params = json.load(f)
+            # AIRLOCK: Validate input through contract (non-breaking)
+            try:
+                request = MeshJobRequest.from_dict({'cad_file': cad_file, **quality_params})
+                print(f"[CONTRACT] Validated request: strategy={request.mesh_strategy}", flush=True)
+            except Exception as e:
+                print(f"[CONTRACT] Warning: Request validation failed: {e}", flush=True)
         except Exception as e:
-            print(json.dumps({'success': False, 'error': f'Failed to load config file: {e}'}))
+            response = MeshJobResponse.failure(f'Failed to load config file: {e}')
+            print(response.to_json())
             sys.exit(1)
     elif args.quality_params:
         try:
@@ -2342,6 +2351,7 @@ if __name__ == "__main__":
     # Generate mesh
     result = generate_mesh(cad_file, output_dir, quality_params)
 
+<<<<<<< HEAD
     # Output sanitized result as JSON to stdout
     # Create a copy to avoid modifying the original if it's used elsewhere
     sanitized_result = copy.deepcopy(result)
@@ -2354,3 +2364,12 @@ if __name__ == "__main__":
             
     # Print the clean, summary JSON
     print(json.dumps(sanitized_result), flush=True)
+=======
+    # AIRLOCK: Wrap result in contract type (non-breaking, still outputs same JSON)
+    try:
+        response = MeshJobResponse.from_dict(result)
+        print(response.to_json())
+    except Exception:
+        # Fallback to raw dict if contract parsing fails
+        print(json.dumps(result))
+>>>>>>> origin/main

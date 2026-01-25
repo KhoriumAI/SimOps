@@ -22,6 +22,7 @@ from .quality import MeshQualityAnalyzer
 from .config import Config, get_default_config
 from .ai_integration import AIRecommendationEngine, MeshRecommendation
 from khorium_skills.guardian.guardian import GeometryGuardian, GeometryStatus
+from .cad_cleaning import apply_cad_cleaning
 
 
 def _canary_worker(file_path, results_queue):
@@ -624,6 +625,11 @@ class BaseMeshGenerator(ABC):
             # Get geometry info and analyze features
             self._extract_geometry_info()
             self._analyze_geometry_features()
+
+            # CAD Cleaning Pathway (Airlocked)
+            # Detects sharp edges and applies size fields to prevent false curvature refinement
+            max_size = getattr(self.config.mesh_params, 'max_size_mm', None)
+            apply_cad_cleaning(self.config, max_size_mm=max_size, log_fn=self.log_message)
 
             # Apply geometry-aware mesh settings
             self._apply_geometry_aware_settings()
@@ -1343,8 +1349,16 @@ class BaseMeshGenerator(ABC):
     def analyze_current_mesh(self) -> Optional[Dict]:
         """Analyze current mesh quality using Gmsh's built-in metrics"""
         self.log_message("Analyzing mesh quality...")
+        start_time = time.time()
 
+<<<<<<< HEAD
         metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True, include_cfd_metrics=True)
+=======
+        metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True)
+        
+        duration = time.time() - start_time
+        self.log_message(f"[OK] Quality analysis completed in {duration:.3f}s")
+>>>>>>> origin/main
 
         if metrics:
             # Log basic statistics
@@ -1620,14 +1634,15 @@ class BaseMeshGenerator(ABC):
                 gmsh.model.setPhysicalName(3, p_tag, "INTERNAL_VOLUME")
             self.log_message(f"Created Physical Volume (Tag {p_tag})")
 
-        # 2. Physical Surfaces (The Boundaries)
+        # 2. Physical Surfaces - ONE GROUP PER CAD SURFACE
+        # This preserves original CAD face boundaries for accurate zone selection
         surfaces = gmsh.model.getEntities(2)
-        if surfaces:
-            p_tag = gmsh.model.addPhysicalGroup(2, [s[1] for s in surfaces])
+        for i, (dim, tag) in enumerate(surfaces):
+            p_tag = gmsh.model.addPhysicalGroup(2, [tag])
             if mode == "CFD":
-                gmsh.model.setPhysicalName(2, p_tag, "WALL_BOUNDARIES")
+                gmsh.model.setPhysicalName(2, p_tag, f"WALL_{tag}")
             else:  # FEA
-                gmsh.model.setPhysicalName(2, p_tag, "SURFACE_BOUNDARIES")
-            self.log_message(f"Created Physical Surface (Tag {p_tag})")
+                gmsh.model.setPhysicalName(2, p_tag, f"SURFACE_{tag}")
+            self.log_message(f"Created Physical Surface {tag} (Tag {p_tag})")
 
 

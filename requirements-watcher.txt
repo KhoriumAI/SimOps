@@ -1,0 +1,10 @@
+# SimOps Watcher Requirements
+# ============================
+# Dependencies for hot folder watcher
+
+# File system monitoring
+watchdog>=3.0.0
+
+# Redis Queue for job submission
+rq>=1.15.0
+redis>=5.0.0

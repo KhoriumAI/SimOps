@@ -1,0 +1,40 @@
+{
+  "job_name": "Poiseuille_Test_1766980042",
+  "physics": {
+    "simulation_type": "cfd",
+    "inlet_velocity": [
+      0,
+      0,
+      1.0
+    ],
+    "kinematic_viscosity": 1e-05,
+    "density": 1.0,
+    "virtual_wind_tunnel": false
+  },
+  "virtual_wind_tunnel": false,
+  "tagging_rules": [
+    {
+      "tag_name": "inlet",
+      "entity_type": "surface",
+      "selector": {
+        "type": "z_min",
+        "tolerance": 0.1
+      }
+    },
+    {
+      "tag_name": "outlet",
+      "entity_type": "surface",
+      "selector": {
+        "type": "z_max",
+        "tolerance": 0.1
+      }
+    },
+    {
+      "tag_name": "wall",
+      "entity_type": "surface",
+      "selector": {
+        "type": "all_remaining"
+      }
+    }
+  ]
+}

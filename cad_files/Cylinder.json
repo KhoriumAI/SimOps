@@ -1,0 +1,31 @@
+{
+    "version": "1.0",
+    "job_name": "Test_GCI_Verification",
+    "physics": {
+        "material": "Copper",
+        "heat_load_watts": 120.0
+    },
+    "meshing": {
+        "second_order": false,
+        "mesh_size_multiplier": 1.0
+    },
+    "tagging_rules": [
+        {
+            "tag_name": "BC_Inlet_Custom",
+            "entity_type": "surface",
+            "selector": {
+                "type": "z_max",
+                "tolerance": 0.1
+            }
+        },
+        {
+            "tag_name": "BC_Outlet_Custom",
+            "entity_type": "surface",
+            "selector": {
+                "type": "z_min",
+                "tolerance": 0.1
+            }
+        }
+    ],
+    "validate_mesh": true
+}

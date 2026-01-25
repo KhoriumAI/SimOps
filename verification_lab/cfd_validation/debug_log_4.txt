@@ -1,0 +1,102 @@
+\n=== LOG START: 2025-12-28T19:48:48.687962 ===\n
+=== LOG START: 2025-12-28T19:48:48.687962 ===
+[INFO] Using explicit sidecar config: poiseuille_config.json
+[INFO] Found sidecar config: poiseuille_config.json
+[WARNING] Sidecar job_name='Poiseuille_Test_1766980127' differs from file 'Cylinder'. Using filename.
+[STAGE] Initializing
+[METADATA] job_name=Cylinder
+[INFO]    [Config] Loaded from: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test_1766980127\poiseuille_config.json
+[DEBUG] Dispatch: Job=Cylinder, Config=C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test_1766980127\poiseuille_config.json, Type=cfd
+[INFO]    [Dispatch] Simulation Type: CFD
+[INFO] >>> DISPATCHING TO CFD PIPELINE <<<
+[Pre-Sim] Geometry validation: ISSUES FOUND (auto-repairable)
+[INFO] Pre-simulation checks passed:
+[Pre-Sim Checks] ALL PASSED
+⚠ Geometry has issues but auto-repair possible (4 issues)
+✓ Mesh file check skipped (placeholder)
+[STAGE] Meshing
+[METADATA] strategy=HighFi_Layered
+[INFO]   [Wind Tunnel] Disabled explicitly via config
+[INFO] [Meshing] Using CFD/Thermal Strategy
+[INFO]   [DEBUG] CFDMeshConfig: virtual_wind_tunnel=False
+[INFO] ======================================================================
+[INFO] CFD MESH STRATEGY - Boundary Layer Generation
+[INFO] ======================================================================
+[INFO] Input:  C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test_1766980127\Cylinder.step
+[INFO] Output: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test_1766980127\output\Cylinder_HighFi_Layered.msh
+[INFO] Layers: 5, Growth: 1.2
+[INFO] 
+[INFO] [1/5] Loading CAD geometry...
+[INFO] [2/5] Analyzing geometry...
+[INFO]   Diagonal: 150.00
+[INFO]   Min feature size (approx): 50.00
+[INFO]   Auto mesh size: 5.0000 to 15.0000
+[INFO]   Adaptive first layer: 0.600000
+[INFO]   [Tag] Assigned 'Material_Aluminum' to 1 volumes
+[INFO] [Debug] Wind Tunnel Check: enabled=False, have_class=True, is_stl=False
+[INFO] [1.5/5] Virtual Wind Tunnel SKIPPED (disabled or conditions not met)
+[INFO] [2.5/5] Applying Golden Template Tags...
+[INFO] [Tagging] Processing 3 custom rules...
+[INFO]   [Tag] Rule 'inlet': Assigned 3 surfaces
+[INFO]   [Tag] Rule 'outlet': Assigned 1 surfaces
+[INFO]   [Tag] Rule 'wall': No matching surfaces found
+[INFO]   [Tag] Assigned 'Fluid_Domain' to 1 volumes
+[INFO] [3/5] Configuring boundary layers...
+[INFO]   [Warning] Could not set surfaces for BL: Unknown option 'Surfaces' in field 1 of type 'BoundaryLayer'
+[INFO]   [OK] Gmsh BoundaryLayer field configured (Target thickness: 4.465)
+[INFO] [4/5] Setting mesh parameters...
+[INFO] [5/5] Generating 3D mesh...
+[INFO] Optimizing mesh (Netgen)...
+[INFO] Smoothing mesh (10 iterations)...
+[INFO] 
+[INFO] ======================================================================
+[INFO] MESH STATISTICS
+[INFO] ======================================================================
+[INFO]   Nodes:       286
+[INFO]   Tetrahedra:  949
+[INFO]   Prisms:      0
+[INFO]   Hexahedra:   0
+[INFO]   Physical Groups: {'inlet': 2, 'outlet': 3, 'Fluid_Domain': 4}
+[INFO] 
+[INFO] Writing mesh to: C:\Users\markm\Downloads\SimOps\tests\cfd_validation\temp\Poiseuille_Test_1766980127\output\Cylinder_HighFi_Layered.msh
+[INFO] [OK] CFD mesh generation complete!
+[INFO] ======================================================================
+[STAGE] Quality Control
+
+C:\Users\markm\AppData\Local\Programs\Python\Python311\Lib\site-packages\pyvista\core\filters\data_set.py:5650: PyVistaDeprecationWarning: This filter is deprecated. Use `cell_quality` instead. Note that this
+new filter does not include an array named ``'CellQuality'`
+  warnings.warn(msg, PyVistaDeprecationWarning)
+[INFO] [MeshQC] [OK] Passed
+[METADATA] qc_cells=1381
+[METADATA] qc_min_jacobian=0.21825593208335306
+[METADATA] inlet_velocity="[0.0, 0.0, 1.0] m/s"
+[METADATA] fluid=Aluminum
+[INFO] [VALIDATION] [Pre-Sim Checks] ALL PASSED
+✓ Mesh file exists: Cylinder_HighFi_Layered.msh
+bash: line 1: gmshToFoam: command not found
+[WARNING] CFD Solver failed: OpenFOAM failed: Command 'gmshToFoam mesh.msh' returned non-zero exit status 127.
+[WARNING] Proceeding with Mesh-Only visualization/report.
+✗ Solution validation failed (quality: 100.0%)
+[ERROR] Solution validation failed:
+Solution validation failed (quality: 100.0%):
+  ❌ [U, p] Missing required fields: ['U', 'p']
+     💡 Check solver configuration and ensure it writes all required fields
+
+[WARNING] Proceeding with visualization despite validation failures...
+[INFO] Generating High-Quality 3D Streamlines (Multi-Angle)...
+No velocity field found. Available: []
+[INFO] Generating Velocity Contour Slices (Cross-Sectional Heatmaps)...
+[ContourSlice] No velocity field found
+[INFO] Falling back to internal velocity visualization...
+No velocity field 'U' in VTK file
+[WARNING] Velocity visualization failed (or no data). Falling back to Mesh Viz.
+[INFO] ----------------------------------------
+[INFO]    RESULTS SUMMARY: Cylinder
+[INFO]    Converged: False
+[ERROR]    FAILURE: OpenFOAM failed: Command 'gmshToFoam mesh.msh' returned non-zero exit status 127.
+[INFO]    Solve Time: 0.00 s
+[INFO]    Reynolds:   N/A
+[INFO]    Mesh Cells: 0
+[INFO]    Turbulence: N/A (Solver Failed)
+[INFO] ----------------------------------------
+\n=== LOG END: 2025-12-28T19:48:53.388909 ===\n

@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QProgressBar, QGroupBox,
     QSplitter, QFileDialog, QFrame, QScrollArea, QGridLayout,
     QCheckBox, QSizePolicy, QSlider, QSpinBox, QComboBox, QDoubleSpinBox,
-    QListWidget, QListWidgetItem, QAbstractItemView
+    QListWidget, QListWidgetItem, QAbstractItemView, QLineEdit, QDialog
 )
 from qtrangeslider import QRangeSlider
 from PyQt5.QtCore import Qt, QTimer, QObject, QEvent
@@ -43,6 +43,17 @@ class NoScrollSlider(QSlider):
     def wheelEvent(self, event):
         event.ignore()
 
+class FullscreenConsole(QTextEdit):
+    """QTextEdit that handles double-click to toggle fullscreen"""
+    def __init__(self, parent=None, double_click_callback=None):
+        super().__init__(parent)
+        self.double_click_callback = double_click_callback
+
+    def mouseDoubleClickEvent(self, event):
+        if self.double_click_callback:
+            self.double_click_callback()
+        super().mouseDoubleClickEvent(event)
+
 # Paintbrush imports
 PAINTBRUSH_AVAILABLE = False
 try:
@@ -55,6 +66,9 @@ try:
     from paintbrush_widget import PaintbrushWidget
     from core.paintbrush_geometry import PaintbrushSelector
     from strategies.paintbrush_strategy import PaintbrushStrategy
+    from strategies.paintbrush_strategy import PaintbrushStrategy
+    from core.export_fluent_msh import export_fluent_msh
+    from core.ansys_export import export_to_ansys_cdb, export_and_open_ansys
     PAINTBRUSH_AVAILABLE = True
     print("[OK] Paintbrush feature loaded successfully")
 except ImportError as e:
@@ -1227,6 +1241,10 @@ class ModernMeshGenGUI(QMainWindow):
         self.viz_group.setVisible(False)
         layout.addWidget(self.viz_group)
 
+        # Zone Management Panel
+        self.zone_group = self.create_zone_panel()
+        layout.addWidget(self.zone_group)
+
         # Paintbrush refinement widget
         print(f"[DEBUG] Paintbrush available: {PAINTBRUSH_AVAILABLE}")
         print(f"[DEBUG] Paintbrush selector: {self.paintbrush_selector}")
@@ -1370,6 +1388,140 @@ class ModernMeshGenGUI(QMainWindow):
         except Exception as e:
             print(f"[Warning] Could not save settings: {e}")
 
+    def create_zone_panel(self):
+        """Create panel for Zone Management (Boundary Conditions)"""
+        group = QGroupBox("Zone Management")
+        group.setStyleSheet("""
+            QGroupBox {
+                font-weight: 600;
+                font-size: 12px;
+                color: #2c3e50;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+                background-color: #f8f9fa;
+            }
+        """)
+        layout = QVBoxLayout()
+        layout.setSpacing(8)
+
+        # Selection Count Label
+        self.selection_count_label = QLabel("Selected Faces: 0")
+        self.selection_count_label.setStyleSheet("font-weight: bold; color: #dc3545;")
+        layout.addWidget(self.selection_count_label)
+        
+        # Zone Name Input
+        name_layout = QHBoxLayout()
+        self.zone_name_input = QLineEdit()
+        self.zone_name_input.setPlaceholderText("Zone Name (e.g. Inlet)")
+        name_layout.addWidget(self.zone_name_input)
+        
+        # Zone Type Dropdown
+        self.zone_type_combo = QComboBox()
+        self.zone_type_combo.addItems(["inlet", "outlet", "wall", "symmetry", "interior"])
+        name_layout.addWidget(self.zone_type_combo)
+        layout.addLayout(name_layout)
+        
+        # Create Button
+        self.create_zone_btn = QPushButton("Create Zone")
+        self.create_zone_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0d6efd;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover { background-color: #0b5ed7; }
+        """)
+        self.create_zone_btn.clicked.connect(self.on_create_zone_clicked)
+        layout.addWidget(self.create_zone_btn)
+        
+        # Zone List
+        layout.addWidget(QLabel("Defined Zones:"))
+        self.zone_list_widget = QListWidget()
+        self.zone_list_widget.setFixedHeight(100)
+        self.zone_list_widget.itemClicked.connect(self.on_zone_list_clicked)
+        layout.addWidget(self.zone_list_widget)
+
+        # ANSYS Export Section
+        layout.addWidget(QLabel("ANSYS Export:"))
+        
+        # Export to CDB button
+        self.export_cdb_btn = QPushButton("Export to CDB")
+        self.export_cdb_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #198754;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover { background-color: #157347; }
+        """)
+        self.export_cdb_btn.setToolTip("Export mesh to ANSYS CDB format (via MAPDL)")
+        self.export_cdb_btn.clicked.connect(self.on_export_ansys_cdb)
+        layout.addWidget(self.export_cdb_btn)
+        
+        # Export & Open in ANSYS button
+        self.open_ansys_btn = QPushButton("Export && Open in ANSYS")
+        self.open_ansys_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6f42c1;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover { background-color: #5a34a4; }
+        """)
+        self.open_ansys_btn.setToolTip("Export mesh and open directly in ANSYS Workbench")
+        self.open_ansys_btn.clicked.connect(self.on_export_and_open_ansys)
+        layout.addWidget(self.open_ansys_btn)
+
+        group.setLayout(layout)
+        return group
+        
+    def on_selection_changed(self, count):
+        """Slot for selection change signal"""
+        if hasattr(self, 'selection_count_label'):
+            self.selection_count_label.setText(f"Selected Faces: {count}")
+        
+    def on_create_zone_clicked(self):
+        """Create zone from current selection"""
+        if not hasattr(self, 'zone_name_input'): return
+        
+        name = self.zone_name_input.text().strip()
+        if not name:
+            return
+            
+        ztype = self.zone_type_combo.currentText()
+        # Use ZoneManager to create zone
+        if hasattr(self.viewer, 'zone_manager'):
+            success = self.viewer.zone_manager.create_zone(name, ztype)
+            if success:
+                self.update_zone_list()
+                self.zone_name_input.clear()
+                # Clear selection visual
+                self.viewer.zone_manager.selected_faces.clear()
+                self.viewer.update_zone_visuals()
+                
+    def update_zone_list(self):
+        """Refresh zone list widget"""
+        if not hasattr(self, 'zone_list_widget'): return
+        
+        self.zone_list_widget.clear()
+        if hasattr(self.viewer, 'zone_manager'):
+            for name, zdata in self.viewer.zone_manager.zone_registry.items():
+                count = len(zdata['faces'])
+                item = QListWidgetItem(f"{name} ({zdata['type']}) - {count} faces")
+                self.zone_list_widget.addItem(item)
+                
+    def on_zone_list_clicked(self, item):
+        """Handle zone list click (maybe highlight zone?)"""
+        pass 
+
     def create_right_panel(self):
         panel = QWidget()
         self.right_panel_layout = QVBoxLayout(panel)
@@ -1409,7 +1561,7 @@ class ModernMeshGenGUI(QMainWindow):
         self.viewer.preview_ready_callback = self.on_cad_loaded
         self.viewer.log_requested.connect(self.add_log)
         self.viewer.progress_update.connect(self.on_cad_progress)
-
+        self.viewer.selection_changed.connect(self.on_selection_changed)
         self.right_panel_layout.addWidget(self.viewer, 2)
 
         # Console
@@ -1444,10 +1596,28 @@ class ModernMeshGenGUI(QMainWindow):
         """)
         copy_console_btn.clicked.connect(self.copy_console_to_clipboard)
         console_header_layout.addStretch()
+
+        self.fullscreen_btn = QPushButton("📺 Fullscreen")
+        self.fullscreen_btn.setMaximumWidth(120)
+        self.fullscreen_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0d6efd;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #0b5ed7; }
+        """)
+        self.fullscreen_btn.clicked.connect(self.toggle_console_fullscreen)
+        console_header_layout.addWidget(self.fullscreen_btn)
+        
         console_header_layout.addWidget(copy_console_btn)
         console_layout.addLayout(console_header_layout)
 
-        self.console = QTextEdit()
+        self.console = FullscreenConsole(double_click_callback=self.toggle_console_fullscreen)
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(200)
         self.console.setStyleSheet("""
@@ -1465,6 +1635,57 @@ class ModernMeshGenGUI(QMainWindow):
 
         self.right_panel_layout.addWidget(console_frame)
         return panel
+
+    def toggle_console_fullscreen(self):
+        """Toggle a large fullscreen-like dialog for the console"""
+        if hasattr(self, 'console_dialog') and self.console_dialog.isVisible():
+            self.console_dialog.close()
+            return
+
+        # Create dialog if it doesn't exist
+        if not hasattr(self, 'console_dialog'):
+            self.console_dialog = QDialog(self)
+            self.console_dialog.setWindowTitle("Khorium Console - Fullscreen View")
+            self.console_dialog.resize(1000, 700)
+            
+            layout = QVBoxLayout(self.console_dialog)
+            
+            # Header with Close button
+            header_layout = QHBoxLayout()
+            title = QLabel("Console Output")
+            title.setFont(QFont("Arial", 14, QFont.Bold))
+            header_layout.addWidget(title)
+            
+            header_layout.addStretch()
+            
+            close_btn = QPushButton("Close")
+            close_btn.setFixedWidth(100)
+            close_btn.setStyleSheet("""
+                QPushButton { background-color: #dc3545; color: white; border: none; padding: 8px; border-radius: 4px; font-weight: bold; }
+                QPushButton:hover { background-color: #bb2d3b; }
+            """)
+            close_btn.clicked.connect(self.console_dialog.close)
+            header_layout.addWidget(close_btn)
+            layout.addLayout(header_layout)
+            
+            # The large console view (clones current console)
+            self.large_console = QTextEdit()
+            self.large_console.setReadOnly(True)
+            self.large_console.setStyleSheet(self.console.styleSheet() + "font-size: 12px;") # Slightly larger font
+            layout.addWidget(self.large_console)
+            
+            # Sync existing content
+            self.large_console.setPlainText(self.console.toPlainText())
+            self.large_console.verticalScrollBar().setValue(
+                self.large_console.verticalScrollBar().maximum()
+            )
+
+        # Show the dialog
+        self.large_console.setPlainText(self.console.toPlainText())
+        self.large_console.moveCursor(self.large_console.textCursor().End)
+        self.console_dialog.show()
+        self.console_dialog.raise_()
+        self.console_dialog.activateWindow()
 
     # ===================================
     # SETTINGS PERSISTENCE
@@ -1991,6 +2212,7 @@ class ModernMeshGenGUI(QMainWindow):
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Select CAD or Mesh File", default_dir, filters
         )
+        )
 
         if filepath:
             # Kill running workers ONLY if it's a NEW file
@@ -2435,6 +2657,11 @@ class ModernMeshGenGUI(QMainWindow):
     def add_log(self, message: str):
         self.console.append(message)
         self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+        
+        # Sync with fullscreen view if active
+        if hasattr(self, 'large_console'):
+            self.large_console.append(message)
+            self.large_console.verticalScrollBar().setValue(self.large_console.verticalScrollBar().maximum())
 
     def copy_console_to_clipboard(self):
         """Copy all console text to clipboard"""
@@ -2749,7 +2976,9 @@ class ModernMeshGenGUI(QMainWindow):
                 
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat(f"100% - Complete! (Total: {time_str})")
-                self.add_log(f"[DEBUG] *** PROGRESS BAR SET TO 100% COMPLETE at {time.time():.3f} ***")
+                
+                elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
+                self.add_log(f"[DEBUG] *** PROGRESS BAR SET TO 100% COMPLETE at {time.time():.3f} (elapsed: {elapsed:.1f}s) ***")
             else:
                 self.master_bar.setValue(100)
                 self.master_bar.setFormat("100% - Complete!")
@@ -2834,9 +3063,14 @@ class ModernMeshGenGUI(QMainWindow):
                 else:
                     # Standard mesh loading
                     self.add_log(f"[DEBUG] Calling viewer.load_mesh_file...")
-                    self.add_log(f"[DEBUG] *** STARTING MESH LOAD at {time.time():.3f} ***")
+                    
+                    elapsed = time.time() - self.mesh_start_time if self.mesh_start_time else 0
+                    self.load_start_time = time.time()
+                    self.add_log(f"[DEBUG] *** STARTING MESH LOAD at {time.time():.3f} (Generation took: {elapsed:.1f}s) ***")
                     load_result = self.viewer.load_mesh_file(self.mesh_file, result)  # Pass result dict!
-                    self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} ***")
+                    
+                    load_duration = time.time() - self.load_start_time
+                    self.add_log(f"[DEBUG] *** FINISHED MESH LOAD at {time.time():.3f} (Load took: {load_duration:.3f}s) ***")
                     self.add_log(f"[DEBUG] load_mesh_file returned: {load_result}")
             
             # Check for hex testing component visualization
@@ -3092,11 +3326,303 @@ class ModernMeshGenGUI(QMainWindow):
                     self.viewer.vtk_widget.GetRenderWindow().Render()
                 self.add_log("Paintbrush mode disabled - Normal rotation mode")
 
+    def on_scene_click(self, x, y, shift=False, ctrl=False):
+        """Handle scene click from interactor (forward to viewer)"""
+        # Only allow selection if we have a mesh and zone manager
+        if hasattr(self.viewer, 'zone_manager') and hasattr(self.viewer, 'on_scene_click'):
+            self.viewer.on_scene_click(x, y, shift, ctrl)
+        elif self.cad_file and not self.mesh_file:
+             # Explain why clicking does nothing on CAD
+             self.add_log("[!] Please generate a mesh first to select zones.")
+
+    def on_scene_hover(self, x, y):
+        """Handle scene hover from interactor (forward to viewer)"""
+        # print(f"[GUI] on_scene_hover: {x}, {y}")
+        if hasattr(self.viewer, 'on_scene_hover'):
+            self.viewer.on_scene_hover(x, y)
+
     def on_brush_radius_changed(self, radius: float):
         """Handle brush radius change"""
         # Update brush cursor size if paintbrush is enabled
         if hasattr(self.viewer, 'interactor_style') and self.viewer.interactor_style.painting_mode:
             self.viewer.create_brush_cursor(radius)
+
+    def on_create_zone(self):
+        """Create a zone from current selection"""
+        if not hasattr(self.viewer, 'zone_manager'):
+            self.add_log("[!] Zone manager not initialized. Load a mesh first.")
+            return
+            
+        name = self.zone_name_input.text().strip()
+        if not name:
+            self.add_log("[!] Please enter a zone name")
+            return
+            
+        ztype = self.zone_type_combo.currentText()
+        
+        # Check selection
+        if not self.viewer.zone_manager.selected_faces:
+            self.add_log("[!] No faces selected. Click faces to select.")
+            return
+
+        # Update spill angle from UI
+        self.viewer.zone_manager.spill_angle_threshold = self.spill_angle_spin.value()
+        
+        # Create
+        if self.viewer.zone_manager.create_zone(name, ztype):
+            self.add_log(f"[OK] Zone '{name}' created ({ztype})")
+            self.update_zone_list_ui()
+            self.viewer.update_zone_visuals() # Clear selection visuals
+            self.zone_name_input.clear()
+        else:
+            self.add_log("[!] Failed to create zone")
+
+    def on_delete_zone(self):
+        """Delete selected zone from list"""
+        item = self.zone_list_widget.currentItem()
+        if not item:
+            return
+        
+        name = item.text().split(" [")[0] # Extract name
+        if hasattr(self.viewer, 'zone_manager'):
+            self.viewer.zone_manager.delete_zone(name)
+            self.update_zone_list_ui()
+            self.add_log(f"Zone '{name}' deleted")
+
+    def update_zone_list_ui(self):
+        """Refresh zone list widget"""
+        self.zone_list_widget.clear()
+        if not hasattr(self.viewer, 'zone_manager'):
+            return
+            
+        for name, data in self.viewer.zone_manager.zone_registry.items():
+            count = len(data.face_ids)
+            item = QListWidgetItem(f"{name} [{data.zone_type}] ({count} faces)")
+            # Set color square?
+            # item.setForeground(QColor(data.color...))
+            self.zone_list_widget.addItem(item)
+
+    def on_export_fluent_zones(self):
+        """Export mesh with defined zones"""
+        if not self.mesh_file:
+            self.add_log("[!] No mesh file to export")
+            return
+            
+        # Prompt for filename
+        from PyQt5.QtWidgets import QFileDialog
+        default_name = Path(self.mesh_file).with_suffix('.msh').name
+        path, _ = QFileDialog.getSaveFileName(self, "Export Fluent MSH", str(Path(self.mesh_file).parent / default_name), "Fluent Mesh (*.msh)")
+        if not path:
+            return
+            
+        if not path.endswith('.msh'):
+            path += '.msh'
+            
+        self.add_log(f"Exporting to {path}...")
+        
+        try:
+            # 1. Gather Mesh Data
+            # We need compact arrays expected by exporter.
+            # self.viewer.current_mesh_nodes is a dict {id: [x,y,z]}
+            # self.viewer.current_mesh_elements is list of dicts
+            
+            # The node IDs in mesh_loader might not be 0-N contiguous.
+            # But the export_fluent_msh expects points array where index corresponds to tet connectivity?
+            # Actually, `export_fluent_msh` takes `points` and `tets`.
+            # `tets` contains indices into `points`.
+            
+            # Need to reconstruct the clean data that matches what was loaded.
+            # Ideally, we should have cached the "clean" numpy arrays in the loader.
+            # Parsing MSH again is safest but slow.
+            # Or we assume `current_mesh_nodes` can be flattened.
+            
+            # Let's rely on `self.viewer.zone_manager` having `points`?
+            # No, ZoneManager only stored surface points.
+            
+            # We need the VOLUME mesh (tets) for export. ZoneManager only tracks surface faces.
+            # self.viewer.current_mesh_elements contains ALL elements (including tets).
+            
+            nodes_dict = self.viewer.current_mesh_nodes
+            elements = self.viewer.current_mesh_elements
+            
+            # Create node mapping: ID -> Index
+            node_id_to_idx = {nid: i for i, nid in enumerate(nodes_dict.keys())}
+            num_nodes = len(nodes_dict)
+            points = np.zeros((num_nodes, 3))
+            for nid, idx in node_id_to_idx.items():
+                points[idx] = nodes_dict[nid]
+            
+            # Extract Tets
+            tets_list = []
+            for elem in elements:
+                if elem['type'] == 'tetrahedron':
+                    raw_nodes = elem['nodes']
+                    # Map to 0-based column indices
+                    mapped = [node_id_to_idx[n] for n in raw_nodes]
+                    tets_list.append(mapped)
+                    
+            if not tets_list:
+                self.add_log("[!] No tetrahedra found in mesh. Cannot export MSH.")
+                return
+                
+            tets = np.array(tets_list)
+            
+            # 2. Build Zone Assignments Map
+            # Need Map: Tuple(sorted(nodes_indices)) -> zone_name
+            # Data source: viewer.zone_manager.zone_registry -> face_ids
+            # Need to map face_id -> node_indices
+            
+            zone_assignments = {}
+            zone_types = {}
+            
+            if hasattr(self.viewer, 'zone_manager'):
+                zm = self.viewer.zone_manager
+                
+                # Build Elements Lookup (ID -> Element Dict)
+                # Optimization: Build this once if slow
+                elem_lookup = {e['id']: e for e in elements if e['type'] in ('triangle', 'quadrilateral')}
+                
+                for zone_name, zone_data in zm.zone_registry.items():
+                    zone_types[zone_name] = zone_data.zone_type
+                    
+                    for fid in zone_data.face_ids:
+                        if fid in elem_lookup:
+                            raw_nodes = elem_lookup[fid]['nodes']
+                            mapped_nodes = tuple(sorted(node_id_to_idx[n] for n in raw_nodes))
+                            zone_assignments[mapped_nodes] = zone_name
+                            
+            # 3. Call Exporter
+            success = export_fluent_msh(
+                filename=path,
+                points=points,
+                tets=tets,
+                boundary_classifier=None, # Use default fallback for unassigned
+                boundary_zone_types=zone_types,
+                zone_assignments=zone_assignments,
+                verbose=True
+            )
+            
+            if success:
+                self.add_log(f"[OK] Export successful: {Path(path).name}")
+                self.add_log(f"      {len(zone_assignments)} faces assigned to {len(zone_types)} custom zones")
+            else:
+                self.add_log("[!] Export function returned False")
+
+        except Exception as e:
+            self.add_log(f"[!] Export error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.add_log(traceback.format_exc())
+
+    def on_export_ansys_cdb(self):
+        """Export mesh to ANSYS CDB format using MAPDL"""
+        if not self.mesh_file:
+            self.add_log("[!] No mesh file to export")
+            return
+        
+        from PyQt5.QtWidgets import QFileDialog
+        
+        default_name = Path(self.mesh_file).stem + ".cdb"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export ANSYS CDB", 
+            str(Path(self.mesh_file).parent / default_name),
+            "ANSYS CDB (*.cdb)"
+        )
+        
+        if not path:
+            return
+        
+        if not path.endswith('.cdb'):
+            path += '.cdb'
+        
+        output_dir = str(Path(path).parent)
+        output_name = Path(path).stem
+        
+        # Get custom zones from Zone Manager
+        custom_zones = {}
+        if hasattr(self.viewer, 'zone_manager') and self.viewer.zone_manager.zone_registry:
+            for name, zdata in self.viewer.zone_manager.zone_registry.items():
+                # zdata.face_ids are surface face IDs; for CDB we need node IDs
+                # For now, collect all node IDs from these faces
+                custom_zones[name] = list(zdata.face_ids)
+            if custom_zones:
+                self.add_log(f"[ANSYS] Including {len(custom_zones)} custom zones: {', '.join(custom_zones.keys())}")
+        
+        self.add_log(f"[ANSYS] Exporting to {Path(path).name}...")
+        self.add_log("[ANSYS] Running MAPDL to generate CDB (this may take a moment)...")
+        
+        try:
+            # Get element type from GUI
+            element_type = "tet4" if "Tet4" in self.element_order.currentText() else "tet10"
+            
+            cdb_path = export_to_ansys_cdb(
+                msh_file=self.mesh_file,
+                output_dir=output_dir,
+                output_name=output_name,
+                element_type=element_type,
+                custom_zones=custom_zones if custom_zones else None,
+                verbose=True
+            )
+            
+            if cdb_path:
+                self.add_log(f"[ANSYS] ✓ Export successful: {Path(cdb_path).name}")
+                size_kb = Path(cdb_path).stat().st_size / 1024
+                self.add_log(f"[ANSYS]   File size: {size_kb:.1f} KB")
+            else:
+                self.add_log("[ANSYS] ✗ Export failed - check console for details")
+                
+        except Exception as e:
+            self.add_log(f"[ANSYS] ✗ Export error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_export_and_open_ansys(self):
+        """Export mesh to CDB and open directly in ANSYS Workbench"""
+        if not self.mesh_file:
+            self.add_log("[!] No mesh file to export")
+            return
+        
+        from PyQt5.QtWidgets import QFileDialog
+        
+        default_name = Path(self.mesh_file).stem + ".cdb"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export & Open in ANSYS",
+            str(Path(self.mesh_file).parent / default_name),
+            "ANSYS CDB (*.cdb)"
+        )
+        
+        if not path:
+            return
+        
+        if not path.endswith('.cdb'):
+            path += '.cdb'
+        
+        output_dir = str(Path(path).parent)
+        output_name = Path(path).stem
+        
+        self.add_log(f"[ANSYS] Exporting {Path(path).name} and launching Workbench...")
+        
+        try:
+            element_type = "tet4" if "Tet4" in self.element_order.currentText() else "tet10"
+            
+            success = export_and_open_ansys(
+                msh_file=self.mesh_file,
+                output_dir=output_dir,
+                output_name=output_name,
+                element_type=element_type,
+                verbose=True
+            )
+            
+            if success:
+                self.add_log("[ANSYS] ✓ Export complete - Workbench is launching...")
+                self.add_log("[ANSYS]   The mesh will be imported into an External Model system")
+            else:
+                self.add_log("[ANSYS] ✗ Export or launch failed")
+                
+        except Exception as e:
+            self.add_log(f"[ANSYS] ✗ Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def on_refinement_changed(self, level: float):
         """Handle refinement level change"""

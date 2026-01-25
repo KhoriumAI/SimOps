@@ -1,275 +1,21 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
-import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport, Edges } from '@react-three/drei'
+import { OrbitControls, PerspectiveCamera, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
-import { Box, Loader2, MousePointer2, Tag, X, BarChart3, Scissors, Save, Lightbulb, Hexagon } from 'lucide-react'
-import { API_BASE } from '../config'
+import { Box, Scissors, Palette, Layers, Loader2, MousePointer2, Tag, X, BarChart3 } from 'lucide-react'
 import QualityHistogram from './QualityHistogram'
-import QualityReport from './QualityReport'
 
-/**
- * Compute smooth normals with angle-threshold-based splitting.
- * Adjacent faces share normals only if their angle difference < threshold.
- * This preserves chamfers/sharp edges while smoothing coarse tessellations.
- * 
- * @param {Float32Array} vertices - Flat vertex array (non-indexed, 9 floats per tri)
- * @param {number} angleThresholdDegrees - Faces with angle > this get split normals (default 30°)
- * @returns {Float32Array} - Smooth normals array matching vertex positions
- */
-function computeSmoothNormalsWithThreshold(vertices, angleThresholdDegrees = 30) {
-  const numTriangles = vertices.length / 9
-  if (numTriangles === 0) return new Float32Array(0)
-
-  const threshold = Math.cos((angleThresholdDegrees * Math.PI) / 180)
-
-  // Step 1: Compute face normals
-  const faceNormals = new Float32Array(numTriangles * 3)
-  const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3()
-  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), fn = new THREE.Vector3()
-
-  for (let i = 0; i < numTriangles; i++) {
-    const idx = i * 9
-    v1.set(vertices[idx], vertices[idx + 1], vertices[idx + 2])
-    v2.set(vertices[idx + 3], vertices[idx + 4], vertices[idx + 5])
-    v3.set(vertices[idx + 6], vertices[idx + 7], vertices[idx + 8])
-    e1.subVectors(v2, v1)
-    e2.subVectors(v3, v1)
-    fn.crossVectors(e1, e2).normalize()
-    faceNormals[i * 3] = fn.x
-    faceNormals[i * 3 + 1] = fn.y
-    faceNormals[i * 3 + 2] = fn.z
-  }
-
-  // Step 2: Build vertex -> face adjacency map
-  const vertexToFaces = new Map()
-  const precision = 5
-
-  for (let faceIdx = 0; faceIdx < numTriangles; faceIdx++) {
-    for (let v = 0; v < 3; v++) {
-      const idx = faceIdx * 9 + v * 3
-      const key = `${vertices[idx].toFixed(precision)},${vertices[idx + 1].toFixed(precision)},${vertices[idx + 2].toFixed(precision)}`
-      if (!vertexToFaces.has(key)) vertexToFaces.set(key, [])
-      vertexToFaces.get(key).push({ faceIdx, vertexIdx: v })
-    }
-  }
-
-  // Step 3: Compute smoothed normals with angle-based grouping
-  const smoothNormals = new Float32Array(vertices.length)
-  const tempNormal = new THREE.Vector3()
-  const baseFaceNormal = new THREE.Vector3()
-  const adjacentFaceNormal = new THREE.Vector3()
-
-  for (let faceIdx = 0; faceIdx < numTriangles; faceIdx++) {
-    baseFaceNormal.set(
-      faceNormals[faceIdx * 3],
-      faceNormals[faceIdx * 3 + 1],
-      faceNormals[faceIdx * 3 + 2]
-    )
-
-    for (let v = 0; v < 3; v++) {
-      const idx = faceIdx * 9 + v * 3
-      const key = `${vertices[idx].toFixed(precision)},${vertices[idx + 1].toFixed(precision)},${vertices[idx + 2].toFixed(precision)}`
-
-      tempNormal.set(0, 0, 0)
-      const adjacentFaces = vertexToFaces.get(key) || []
-
-      for (const { faceIdx: adjFaceIdx } of adjacentFaces) {
-        adjacentFaceNormal.set(
-          faceNormals[adjFaceIdx * 3],
-          faceNormals[adjFaceIdx * 3 + 1],
-          faceNormals[adjFaceIdx * 3 + 2]
-        )
-
-        // Only include if angle is below threshold
-        if (baseFaceNormal.dot(adjacentFaceNormal) >= threshold) {
-          tempNormal.add(adjacentFaceNormal)
-        }
-      }
-
-      // Fallback to face normal if no smooth neighbors
-      if (tempNormal.lengthSq() < 0.001) {
-        tempNormal.copy(baseFaceNormal)
-      }
-
-      tempNormal.normalize()
-      smoothNormals[idx] = tempNormal.x
-      smoothNormals[idx + 1] = tempNormal.y
-      smoothNormals[idx + 2] = tempNormal.z
-    }
-  }
-
-  return smoothNormals
-}
-
-function SliceMesh({ sliceData, clippingPlanes, renderOffset, activeAxis }) {
-
-
-  const geometry = useMemo(() => {
-    if (!sliceData || !sliceData.vertices || sliceData.vertices.length === 0) return null
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(sliceData.vertices, 3))
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(sliceData.colors, 3))
-    if (sliceData.indices && sliceData.indices.length > 0) {
-      geo.setIndex(sliceData.indices)
-    }
-    geo.computeVertexNormals()
-
-    // Apply centering offset to align with main mesh
-    if (renderOffset) {
-      geo.translate(renderOffset.x, renderOffset.y, renderOffset.z)
-    }
-
-    return geo
-  }, [sliceData, renderOffset])
-
-  // Filter out the plane that corresponds to the activeAxis
-  const filteredPlanes = useMemo(() => {
-    if (!clippingPlanes || !activeAxis) return clippingPlanes
-
-    return clippingPlanes.filter(plane => {
-      if (activeAxis === 'x' && Math.abs(plane.normal.x + 1) < 0.01) return false
-      if (activeAxis === 'y' && Math.abs(plane.normal.z + 1) < 0.01) return false
-      if (activeAxis === 'z' && Math.abs(plane.normal.y + 1) < 0.01) return false
-      return true
-    })
-  }, [clippingPlanes, activeAxis])
-
-  if (!geometry) return null
-
-  // Use MeshBasicMaterial to ignore lighting issues. 
-  // Disable depth testing to force it to show up (might look weird but verifies existence).
-  return (
-    <group>
-      {/* Main Slice Surface */}
-      <mesh geometry={geometry}>
-        <meshBasicMaterial
-          vertexColors={true}
-          side={THREE.DoubleSide}
-          transparent={false}
-          opacity={1.0}
-          clippingPlanes={filteredPlanes}
-          depthTest={true} // Keep depth test for correct volume sorting
-        />
-      </mesh>
-
-      {/* Debug Wireframe to make it super obvious */}
-      {/* 
-      <mesh geometry={geometry}>
-        <meshBasicMaterial 
-            color="red" 
-            wireframe={true} 
-            side={THREE.DoubleSide} 
-            clippingPlanes={filteredPlanes}
-        />
-      </mesh>
-      */}
-    </group>
-  )
-}
-
-function FloatingProgress({ progress, visible }) {
-  if (!visible) return null;
-
-  const steps = [
-    { key: 'strategy', label: 'Strategy' },
-    { key: '1d', label: '1D' },
-    { key: '2d', label: '2D' },
-    { key: '3d', label: '3D' },
-    { key: 'optimize', label: 'Optimize' },
-    { key: 'quality', label: 'Quality' }
-  ];
-
-  return (
-    <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none w-72">
-      <div className="bg-white/40 backdrop-blur-md border border-white/30 rounded-xl p-4 shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
-            <span className="font-semibold text-gray-800 text-sm">Generating Mesh</span>
-          </div>
-          <div className="text-[10px] font-mono bg-blue-500/10 text-blue-700 px-1.5 py-0.5 rounded border border-blue-500/20">
-            STRATEGY RACE
-          </div>
-        </div>
-
-        <div className="space-y-2.5">
-          {steps.map(({ key, label }) => (
-            <div key={key} className="space-y-1">
-              <div className="flex justify-between text-[10px] font-medium">
-                <span className="text-gray-700 uppercase tracking-tight">{label}</span>
-                <span className="text-blue-700 font-bold">{Math.round(progress[key] || 0)}%</span>
-              </div>
-              <div className="h-1.5 w-full bg-gray-200/50 rounded-full overflow-hidden border border-white/20">
-                <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-all duration-700 ease-out"
-                  style={{ width: `${progress[key] || 0}%` }}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-4 flex items-center gap-2">
-          <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-400/30 to-transparent" />
-          <span className="text-[9px] text-gray-500 font-medium">COMPUTING ON AWS</span>
-          <div className="flex-1 h-px bg-gradient-to-r from-transparent via-gray-400/30 to-transparent" />
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function AxesIndicator({ visible }) {
   if (!visible) return null
   return (
-    <GizmoHelper alignment="bottom-left" margin={[30, 30]}>
-      <GizmoViewport
-        axisColors={['#ff4444', '#44ff44', '#4444ff']}
-        labelColor="white"
-        scale={20}
-      />
+    <GizmoHelper alignment="bottom-left" margin={[80, 80]}>
+      <GizmoViewport axisColors={['#ff4444', '#44ff44', '#4444ff']} labelColor="white" />
     </GizmoHelper>
   )
 }
 
-function Lights({ dynamic }) {
-  const { camera } = useThree()
-  const lightRef = useRef()
-
-  useFrame(() => {
-    if (dynamic && lightRef.current) {
-      lightRef.current.position.copy(camera.position)
-    }
-  })
-
-  if (dynamic) {
-    return (
-      <>
-        <ambientLight intensity={0.4} />
-        {/* Headlight attached to camera - updates every frame via useFrame */}
-        <directionalLight
-          ref={lightRef}
-          position={[camera.position.x, camera.position.y, camera.position.z]}
-          intensity={1.2}
-          castShadow={false}
-        />
-        {/* Fill light */}
-        <directionalLight position={[-50, -50, -25]} intensity={0.2} />
-      </>
-    )
-  }
-
-  return (
-    <>
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[50, 50, 25]} intensity={0.6} />
-      <directionalLight position={[-50, -50, -25]} intensity={0.3} />
-      <hemisphereLight intensity={0.3} />
-    </>
-  )
-}
-
-function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces, boundaryZones, showEdges, edgeThreshold }) {
+function MeshObject({ meshData, clipping, showQuality, showWireframe, wireframeColor, wireframeOpacity, wireframeScale, meshColor, opacity, metalness, roughness, colorMode, gradientColors, onFaceSelect, selectionMode, selectedFaces }) {
   const meshRef = useRef()
   const { camera, gl, raycaster, pointer } = useThree()
 
@@ -278,9 +24,9 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     gl.localClippingEnabled = true
   }, [gl])
 
-  // Create geometry from flat arrays and calculate centering offset
-  const { geometry, renderOffset } = useMemo(() => {
-    if (!meshData || !meshData.vertices) return { geometry: null, renderOffset: null }
+  // Create geometry from flat arrays
+  const geometry = useMemo(() => {
+    if (!meshData || !meshData.vertices) return null
 
     const geo = new THREE.BufferGeometry()
 
@@ -289,35 +35,16 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
     // Colors (Float32Array) - if available (for quality mode)
-    const activeColors = (meshData.qualityColors && showQuality) ?
-      meshData.qualityColors[showQuality === true ? 'sicn' : showQuality] :
-      meshData.colors;
-
-    if (activeColors && activeColors.length > 0) {
-      const colors = new Float32Array(activeColors)
+    if (meshData.colors && meshData.colors.length > 0) {
+      const colors = new Float32Array(meshData.colors)
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     }
 
-    // Use smooth normals for preview meshes (preserves chamfers, smooths coarse tessellation)
-    // Use standard vertex normals for completed meshes (shows mesh structure)
-    if (meshData.isPreview) {
-      const smoothNormals = computeSmoothNormalsWithThreshold(meshData.vertices, 30)
-      geo.setAttribute('normal', new THREE.BufferAttribute(smoothNormals, 3))
-    } else {
-      geo.computeVertexNormals()
-    }
+    geo.computeVertexNormals()
     geo.computeBoundingBox()
 
-    // Position geometry so it sits ON the XY plane at z=0 
-    // and is centered on X and Y
-    const offset = new THREE.Vector3();
-    geo.boundingBox.getCenter(offset).negate();
-    offset.z = -geo.boundingBox.min.z;
-    geo.translate(offset.x, offset.y, offset.z);
-    geo.computeBoundingBox();
-
-    return { geometry: geo, renderOffset: offset }
-  }, [meshData, showQuality])
+    return geo
+  }, [meshData])
 
   // Create gradient colors based on height (Z position in original coords)
   const gradientGeometry = useMemo(() => {
@@ -367,27 +94,29 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
     geo.computeBoundingBox()
 
-    // No need to translate again, it already has geometry's positions
-
     return geo
   }, [geometry, gradientColors])
 
   // Auto-fit camera (accounting for Z-up to Y-up rotation)
   useEffect(() => {
     if (geometry && camera) {
+      const boundingBox = geometry.boundingBox
+      const center = new THREE.Vector3()
+      boundingBox.getCenter(center)
       const size = new THREE.Vector3()
-      geometry.boundingBox.getSize(size)
+      boundingBox.getSize(size)
       const maxDim = Math.max(size.x, size.y, size.z)
 
-      // The model is centered on XY, and its base is at world-Y=0 (after rotation).
-      // In Three.js world space (after MeshObject group rotation):
-      // Center of object is [0, size.z/2, 0] since original Z is now world Y.
-      const viewerCenter = new THREE.Vector3(0, size.z / 2, 0)
-
-      // Position camera at a good distance
-      const distance = maxDim * 1.5
-      camera.position.set(distance, distance * 0.8, distance)
-      camera.lookAt(viewerCenter)
+      // After rotation: original Z becomes Y, original Y becomes -Z
+      // Position camera closer for larger initial view
+      const distance = maxDim * 1.4
+      // Camera looks from front-right-top (isometric-like view)
+      camera.position.set(
+        center.x + distance * 0.8,
+        center.z + distance * 0.6,  // Original Z is now Y
+        -center.y + distance * 0.8  // Original Y is now -Z
+      )
+      camera.lookAt(center.x, center.z, -center.y)
       camera.updateProjectionMatrix()
     }
   }, [geometry, camera])
@@ -405,41 +134,27 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     const planes = []
 
     if (clipping.x) {
-      // X plane: Normal (-1, 0, 0) to cut from right (max -> min)
-      // World X matches Original X
-      const xPos = (center.x + size.x / 2) - (clipping.xValue / 100) * size.x
+      // X plane: Normal (-1, 0, 0) to cut from right
+      const xPos = center.x + (size.x / 2) * (clipping.xValue / 50)
       planes.push(new THREE.Plane(new THREE.Vector3(-1, 0, 0), xPos))
     }
     if (clipping.y) {
-      // Original Y is World Z in the view (due to -PI/2 X rotation)
-      // Normal (0, 0, -1) clips against Original Y
-      const yPos = (center.z + size.z / 2) - (clipping.yValue / 100) * size.z
-      planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), yPos))
+      // Y plane
+      const yPos = center.y + (size.y / 2) * (clipping.yValue / 50)
+      planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), yPos))
     }
     if (clipping.z) {
-      // Original Z is World Y in the view (due to -PI/2 X rotation)
-      // Normal (0, -1, 0) clips against Original Z
-      const zPos = (center.y + size.y / 2) - (clipping.zValue / 100) * size.y
-      planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), zPos))
+      // Z plane
+      const zPos = center.z + (size.z / 2) * (clipping.zValue / 50)
+      planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), zPos))
     }
 
     return planes
   }, [geometry, clipping])
 
-  // Track mousedown time to distinguish clicks from drags
-  const mouseDownTime = useRef(0)
-
-  const handlePointerDown = useCallback(() => {
-    mouseDownTime.current = Date.now()
-  }, [])
-
-  // Handle face click for selection - now works without selectionMode
+  // Handle face click for selection
   const handleClick = useCallback((event) => {
-    if (!meshRef.current || !onFaceSelect) return
-
-    // Ignore if this was a drag operation (click held for >200ms)
-    const clickDuration = Date.now() - mouseDownTime.current
-    if (clickDuration > 200) return
+    if (!selectionMode || !meshRef.current || !onFaceSelect) return
 
     event.stopPropagation()
 
@@ -449,15 +164,13 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
       const point = intersects[0].point
       const normal = intersects[0].face?.normal
 
-      // Default to flood fill (logical face selection)
-      const isFloodFill = !event.altKey
       onFaceSelect({
         faceIndex,
         point: { x: point.x, y: point.y, z: point.z },
         normal: normal ? { x: normal.x, y: normal.y, z: normal.z } : null,
-      }, isFloodFill)
+      })
     }
-  }, [onFaceSelect, raycaster])
+  }, [selectionMode, onFaceSelect, raycaster])
 
   // Create highlight geometry for selected faces
   const selectedFaceGeometry = useMemo(() => {
@@ -483,34 +196,6 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
     return geo
   }, [selectedFaces, geometry])
 
-  // Create geometries for saved boundary zones
-  const zoneGeometries = useMemo(() => {
-    if (!boundaryZones || Object.keys(boundaryZones).length === 0 || !geometry) return []
-
-    const geometries = []
-    const positions = geometry.attributes.position.array
-
-    Object.entries(boundaryZones).forEach(([name, indices]) => {
-      const highlightPositions = []
-      // indices is an array of face indices
-      indices.forEach(faceIndex => {
-        const idx = faceIndex * 9
-        if (idx + 8 < positions.length) {
-          for (let i = 0; i < 9; i++) highlightPositions.push(positions[idx + i])
-        }
-      })
-
-      if (highlightPositions.length > 0) {
-        const geo = new THREE.BufferGeometry()
-        geo.setAttribute('position', new THREE.Float32BufferAttribute(highlightPositions, 3))
-        geo.computeVertexNormals()
-        geometries.push({ name, geometry: geo })
-      }
-    })
-
-    return geometries
-  }, [boundaryZones, geometry])
-
   if (!geometry) return null
 
   // Determine which geometry and colors to use
@@ -527,40 +212,26 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
         geometry={activeGeometry}
         frustumCulled={true}
         onClick={handleClick}
-        onPointerDown={handlePointerDown}
       >
         <meshStandardMaterial
           vertexColors={useVertexColors || useGradient}
           color={useVertexColors || useGradient ? undefined : meshColor}
           side={THREE.DoubleSide}
-          flatShading={!meshData?.isPreview}
+          flatShading={true}
           clippingPlanes={clippingPlanes}
           clipShadows={true}
           roughness={roughness}
           metalness={metalness}
           opacity={opacity}
-          transparent={opacity < 1 || showQuality}
+          transparent={opacity < 1}
         />
       </mesh>
 
-      {/* Render persistent boundary zones */}
-      {zoneGeometries.map(zone => (
-        <mesh key={zone.name} geometry={zone.geometry}>
-          <meshBasicMaterial
-            color="#3b82f6" // Blue-500
-            side={THREE.DoubleSide}
-            transparent
-            opacity={0.5}
-            depthTest={false} // Overlay behavior
-          />
-        </mesh>
-      ))}
-
-      {/* Highlight selected faces (on top of zones) */}
+      {/* Highlight selected faces */}
       {selectedFaceGeometry && (
         <mesh geometry={selectedFaceGeometry}>
           <meshBasicMaterial
-            color="#22c55e" // Green-500
+            color="#00ff00"
             side={THREE.DoubleSide}
             transparent
             opacity={0.6}
@@ -579,112 +250,28 @@ function MeshObject({ meshData, sliceData, clipping, showQuality, showWireframe,
               opacity={wireframeOpacity}
               transparent={true}
               linewidth={1}
-              clippingPlanes={clippingPlanes}
             />
           </lineSegments>
         </group>
       )}
 
-      {/* Volumetric Quality Slice */}
-      {clipping.enabled && clipping.showQualitySlice && sliceData && (
-        <SliceMesh
-          sliceData={sliceData}
-          clippingPlanes={clippingPlanes}
-          renderOffset={renderOffset}
-          activeAxis={clipping.x ? 'x' : clipping.y ? 'y' : clipping.z ? 'z' : null}
-        />
-      )}
-
-      {/* Sharp Edges Overlay */}
-      {showEdges && (
-        <Edges
-          geometry={activeGeometry}
-          threshold={edgeThreshold}
-          color="#1a1a1a"
-          opacity={0.8}
-          transparent
-        />
+      {/* Cap for clipping (Simplified: just show backface with different color) */}
+      {clipping.enabled && (
+        <mesh geometry={activeGeometry}>
+          <meshBasicMaterial
+            color="#ff5555"
+            side={THREE.BackSide}
+            clippingPlanes={clippingPlanes}
+          />
+        </mesh>
       )}
     </group>
   )
 }
 
-// Component to track camera position and save it on change
-function CameraTracker({ onCameraChange, initialPosition, initialTarget }) {
-  const { camera, controls } = useThree()
-  const lastSaveTime = useRef(0)
-  const hasSetInitial = useRef(false)
-  
-  // Set initial camera position if provided
-  useEffect(() => {
-    if (hasSetInitial.current) return
-    if (initialPosition && camera) {
-      camera.position.set(initialPosition.x, initialPosition.y, initialPosition.z)
-      if (initialTarget && controls?.target) {
-        controls.target.set(initialTarget.x, initialTarget.y, initialTarget.z)
-      }
-      camera.updateProjectionMatrix()
-      hasSetInitial.current = true
-    }
-  }, [initialPosition, initialTarget, camera, controls])
-  
-  // Track camera changes with debounce
-  useFrame(() => {
-    if (!onCameraChange || !camera) return
-    
-    // Only save every 500ms to avoid excessive writes
-    const now = Date.now()
-    if (now - lastSaveTime.current < 500) return
-    
-    lastSaveTime.current = now
-    onCameraChange(
-      { x: camera.position.x, y: camera.position.y, z: camera.position.z },
-      controls?.target ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : null
-    )
-  })
-  
-  return null
-}
-
-export default function MeshViewer({
-  meshData,
-  projectId,
-  geometryInfo,
-  filename,
-  qualityMetrics,
-  status,
-  showHistogram,
-  setShowHistogram,
-  showAxes,
-  setShowAxes,
-  qualityMetric,
-  setQualityMetric,
-  colorMode,
-  setColorMode,
-  // Mesh progress from App
-  meshProgress,
-  loadingStartTime,
-  // Camera persistence
-  onCameraChange,
-  initialCameraPosition,
-  initialCameraTarget,
-}) {
-  // Derive wireframe visibility: ON for completed meshes, OFF for CAD preview
-  // Also allow for uploaded mesh files that aren't preview
-  const isCompletedOrMesh = status === 'completed' || (meshData && !meshData.isPreview && meshData.hasQualityData)
-  const showWireframe = meshData && !meshData.isPreview && isCompletedOrMesh
-  // Derive quality coloring: ON for completed meshes with quality data, OR for uploaded meshes with quality
-  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || (meshData?.qualityColors && Object.keys(meshData.qualityColors).length > 0) || meshData?.hasQualityData
-  const showQuality = hasQualityData && (status === 'completed' || meshData?.hasQualityData)
-
-  // Clear slice data when project changes to prevent ghosting
-  useEffect(() => {
-    setSliceData(null)
-  }, [projectId])
-
+export default function MeshViewer({ meshData, geometryInfo, filename, qualityMetrics, status, isLoading, loadingProgress, loadingMessage }) {
   const [clipping, setClipping] = useState({
     enabled: false,
-    showQualitySlice: true,
     x: false,
     y: false,
     z: false,
@@ -693,61 +280,12 @@ export default function MeshViewer({
     zValue: 0
   })
 
-  const [sliceData, setSliceData] = useState(null)
-  const [isSlicing, setIsSlicing] = useState(false)
-
-  // Fetch slice from backend when clipping changes
-  useEffect(() => {
-    if (!clipping.enabled || !clipping.showQualitySlice || !projectId || !meshData) {
-      setSliceData(null)
-      return
-    }
-
-    // Determine active axis
-    let activeAxis = null
-    let value = 0
-    if (clipping.x) { activeAxis = 'x'; value = clipping.xValue }
-    else if (clipping.y) { activeAxis = 'y'; value = clipping.yValue }
-    else if (clipping.z) { activeAxis = 'z'; value = clipping.zValue }
-
-    if (!activeAxis) {
-      setSliceData(null)
-      return
-    }
-
-    const timer = setTimeout(async () => {
-      setIsSlicing(true)
-      try {
-        const token = localStorage.getItem('token')
-        const response = await fetch(`${API_BASE}/projects/${projectId}/slice`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            axis: activeAxis,
-            offset: value
-          })
-        })
-
-        if (response.ok) {
-          const data = await response.json()
-          setSliceData(data.mesh)
-        }
-      } catch (err) {
-        console.error("Failed to fetch slice:", err)
-      } finally {
-        setIsSlicing(false)
-      }
-    }, 500) // Debounce 500ms
-
-    return () => clearTimeout(timer)
-  }, [clipping.enabled, clipping.showQualitySlice, clipping.x, clipping.y, clipping.z, clipping.xValue, clipping.yValue, clipping.zValue, projectId, meshData])
-
-  // States are now props from App.jsx or kept here for local UI
+  const [showQuality, setShowQuality] = useState(false)
   const [showControls, setShowControls] = useState(false)
   const [showPaintPanel, setShowPaintPanel] = useState(false)
+  const [showAxes, setShowAxes] = useState(true)
+  const [showWireframe, setShowWireframe] = useState(false)
+  const [showHistogram, setShowHistogram] = useState(false)
   const [showWireframePanel, setShowWireframePanel] = useState(false)
 
   // Wireframe options
@@ -757,225 +295,51 @@ export default function MeshViewer({
 
   // Paint/Color options
   const [meshColor, setMeshColor] = useState('#4a9eff')
-  // colorMode lifted to App.jsx
+  const [colorMode, setColorMode] = useState('solid') // 'solid', 'quality', 'gradient'
   const [opacity, setOpacity] = useState(1.0)
   const [metalness, setMetalness] = useState(0.1)
   const [roughness, setRoughness] = useState(0.5)
   const [gradientColors, setGradientColors] = useState({ start: '#4a9eff', end: '#ff6b6b' })
 
-  // Lighting & Visibility
-  const [dynamicLighting, setDynamicLighting] = useState(true)
-  const [showEdges, setShowEdges] = useState(false) // Default off until user enables
-  const [edgeThreshold, setEdgeThreshold] = useState(15)
-
-  // Face selection state (selectionMode removed - always enabled)
-  const selectionMode = true
+  // Face selection state
+  const [selectionMode, setSelectionMode] = useState(false)
   const [selectedFaces, setSelectedFaces] = useState([])
-  const [boundaryZones, setBoundaryZones] = useState({}) // { name: [indices] }
+  const [faceNames, setFaceNames] = useState({}) // { faceIndex: name }
   const [showFacePanel, setShowFacePanel] = useState(false)
   const [pendingFaceName, setPendingFaceName] = useState('')
-  const [isSavingZones, setIsSavingZones] = useState(false)
 
-
+  const hasQualityData = (meshData?.colors && meshData.colors.length > 0) || meshData?.hasQualityData
   const isCompleted = status === 'completed'
 
-  // Fetch zones on load
-  useEffect(() => {
-    if (projectId && isCompleted) {
-      const fetchZones = async () => {
-        try {
-          const token = localStorage.getItem('token')
-          const response = await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          })
-          if (response.ok) {
-            const data = await response.json()
-            setBoundaryZones(data)
-          }
-        } catch (err) {
-          console.error("Failed to fetch boundary zones:", err)
-        }
-      }
-      fetchZones()
-    }
-  }, [projectId, isCompleted])
-
-  // Build adjacency map for flood fill
-  const adjacency = useMemo(() => {
-    if (!meshData || !meshData.vertices || meshData.vertices.length === 0) return null
-
-    const startTime = performance.now()
-    const vertices = meshData.vertices
-    const numFaces = vertices.length / 9
-    const nodeToFaces = new Map()
-
-    // 1. Group faces by their vertices
-    for (let i = 0; i < numFaces; i++) {
-      for (let v = 0; v < 3; v++) {
-        const x = vertices[i * 9 + v * 3].toFixed(5)
-        const y = vertices[i * 9 + v * 3 + 1].toFixed(5)
-        const z = vertices[i * 9 + v * 3 + 2].toFixed(5)
-        const key = `${x},${y},${z}`
-
-        if (!nodeToFaces.has(key)) nodeToFaces.set(key, [])
-        nodeToFaces.get(key).push(i)
-      }
-    }
-
-    // 2. Identify neighbors (sharing at least 2 vertices = edge adjacency)
-    const neighbors = Array.from({ length: numFaces }, () => [])
-    const facePairCounts = new Map() // (i,j) -> count
-
-    for (const faces of nodeToFaces.values()) {
-      if (faces.length < 2) continue
-      for (let a = 0; a < faces.length; a++) {
-        for (let b = a + 1; b < faces.length; b++) {
-          const f1 = faces[a]
-          const f2 = faces[b]
-          const pairKey = f1 < f2 ? `${f1}_${f2}` : `${f2}_${f1}`
-          const count = (facePairCounts.get(pairKey) || 0) + 1
-          facePairCounts.set(pairKey, count)
-
-          if (count === 2) { // Shared an edge
-            neighbors[f1].push(f2)
-            neighbors[f2].push(f1)
-          }
-        }
-      }
-    }
-
-    console.log(`[FLOOD-FILL] Adjacency built in ${(performance.now() - startTime).toFixed(1)}ms. ${numFaces} faces.`)
-    return neighbors
-  }, [meshData])
-
-  // Flood fill algorithm
-  const performFloodFill = useCallback((startFaceIndex) => {
-    if (!adjacency || !meshData) return [startFaceIndex]
-
-    const visited = new Set()
-    const queue = [startFaceIndex]
-    visited.add(startFaceIndex)
-
-    // Check for entity tags (CAD faces)
-    const hasTags = meshData.entity_tags && meshData.entity_tags.length > 0
-    const targetEntity = hasTags ? meshData.entity_tags[startFaceIndex] : null
-
-    // For geometric flood fill (if no tags available for this face)
-    // Reuse vectors to avoid GC pressure in loop
-    const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3()
-    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
-    const n1 = new THREE.Vector3(), n2 = new THREE.Vector3()
-    const CREASE_THRESHOLD = 0.8 // Stop at angles > ~37 deg
-
-    const vertices = meshData.vertices
-    const getNormal = (idx, target) => {
-      const i = idx * 9
-      v1.set(vertices[i], vertices[i + 1], vertices[i + 2])
-      v2.set(vertices[i + 3], vertices[i + 4], vertices[i + 5])
-      v3.set(vertices[i + 6], vertices[i + 7], vertices[i + 8])
-      e1.subVectors(v2, v1)
-      e2.subVectors(v3, v1)
-      target.crossVectors(e1, e2).normalize()
-    }
-
-    let iterations = 0
-    while (queue.length > 0 && iterations < 50000) { // Safety limit
-      const current = queue.shift()
-      iterations++
-
-      // If doing geometric fill, compute current normal
-      if (!hasTags || targetEntity == null) {
-        getNormal(current, n1)
-      }
-
-      const neighbors = adjacency[current]
-      for (const next of neighbors) {
-        if (!visited.has(next)) {
-          let shouldAdd = false
-
-          if (hasTags && targetEntity != null) {
-            // Use Entity Tags if available
-            shouldAdd = (meshData.entity_tags[next] === targetEntity)
-          } else {
-            // Use Geometric Crease Angle
-            getNormal(next, n2)
-            if (n1.dot(n2) >= CREASE_THRESHOLD) {
-              shouldAdd = true
-            }
-          }
-
-          if (shouldAdd) {
-            visited.add(next)
-            queue.push(next)
-          }
-        }
-      }
-    }
-
-    return Array.from(visited)
-  }, [adjacency, meshData])
-
   // Handle face selection
-  const handleFaceSelect = useCallback((faceData, isFloodFill = false) => {
-    let indicesToSelect = [faceData.faceIndex]
-    if (isFloodFill) {
-      indicesToSelect = performFloodFill(faceData.faceIndex)
-    }
+  const handleFaceSelect = useCallback((faceData) => {
+    if (!selectionMode) return
 
     setSelectedFaces(prev => {
-      // For now, toggle the whole group
-      const firstIndex = faceData.faceIndex
-      const alreadySelected = prev.find(f => f.faceIndex === firstIndex)
-
-      if (alreadySelected) {
-        // Deselect the group (complex to find the exact group, just deselect everything for now or the overlap)
-        const toDeselectSet = new Set(indicesToSelect)
-        return prev.filter(f => !toDeselectSet.has(f.faceIndex))
+      const exists = prev.find(f => f.faceIndex === faceData.faceIndex)
+      if (exists) {
+        // Deselect if already selected
+        return prev.filter(f => f.faceIndex !== faceData.faceIndex)
       }
-
-      // Add new selections
-      const newSelections = indicesToSelect.map(idx => ({
-        faceIndex: idx,
-        // Optional: reconstruct position/normal if needed, or just use idx
-      }))
-
-      return [...prev, ...newSelections]
+      // Add new selection
+      return [...prev, faceData]
     })
     setShowFacePanel(true)
-  }, [performFloodFill])
+  }, [selectionMode])
 
-  // Save face name and sync to backend
-  const saveFaceName = useCallback(async () => {
+  // Save face name
+  const saveFaceName = useCallback(() => {
     if (selectedFaces.length > 0 && pendingFaceName.trim()) {
-      const name = pendingFaceName.trim()
-      const indices = selectedFaces.map(f => f.faceIndex)
-
-      const newZones = { ...boundaryZones }
-      newZones[name] = [...(newZones[name] || []), ...indices]
-
-      setBoundaryZones(newZones)
-      setIsSavingZones(true)
-
-      try {
-        const token = localStorage.getItem('token')
-        await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(newZones)
-        })
-      } catch (err) {
-        console.error("Failed to save boundary zones:", err)
-      } finally {
-        setIsSavingZones(false)
-        setPendingFaceName('')
-        setSelectedFaces([])
-        setShowFacePanel(false)
-      }
+      const newNames = { ...faceNames }
+      selectedFaces.forEach(face => {
+        newNames[face.faceIndex] = pendingFaceName.trim()
+      })
+      setFaceNames(newNames)
+      setPendingFaceName('')
+      setSelectedFaces([])
+      setShowFacePanel(false)
     }
-  }, [selectedFaces, pendingFaceName, boundaryZones, projectId])
+  }, [selectedFaces, pendingFaceName, faceNames])
 
   // Clear selection
   const clearSelection = useCallback(() => {
@@ -1006,107 +370,130 @@ export default function MeshViewer({
     { name: 'Steel', color: '#94a3b8' },
   ]
 
-  // Adaptive Grid Logic
-  const { gridSize, gridDivisions, gridCellSize } = useMemo(() => {
-    // Helper to calculate parameters
-    const calc = (maxDim) => {
-      if (!isFinite(maxDim) || maxDim <= 0) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
-
-      // Target grid to be somewhat larger than object
-      const targetSpan = maxDim * 2.5
-      // Approximate number of subdivisions (around 20 is good for visual context)
-      const targetStep = targetSpan / 20
-
-      // Find "nice" step size: 1, 2, 5, 10, 20...
-      const magnitude = Math.pow(10, Math.floor(Math.log10(targetStep)))
-      const normalized = targetStep / magnitude
-
-      let niceStep
-      if (normalized < 1.5) niceStep = 1 * magnitude
-      else if (normalized < 3.5) niceStep = 2 * magnitude
-      else if (normalized < 7.5) niceStep = 5 * magnitude
-      else niceStep = 10 * magnitude
-
-      // Calculate divisions
-      let div = Math.ceil(targetSpan / niceStep)
-      if (div % 2 !== 0) div += 1 // Ensure even number of divisions so 0 is center
-      if (div < 10) div = 10 // Minimum divisions
-
-      return { gridSize: div * niceStep, gridDivisions: div, gridCellSize: niceStep }
-    }
-
-    // 1. Try geometryInfo first (fastest)
-    if (geometryInfo && geometryInfo.bbox) {
-      const [x, y, z] = geometryInfo.bbox
-      // bbox is [x_len, y_len, z_len] usually in this app context, assume dimensions
-      return calc(Math.max(x, y, z))
-    }
-
-    // 2. Fallback to calculating from vertices
-    // If we have geometryInfo but no bbox, or just meshData
-    if (!meshData || !meshData.vertices || meshData.vertices.length === 0) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
-
-    const v = meshData.vertices
-    let minX = Infinity, minY = Infinity, minZ = Infinity
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
-
-    // Check all vertices for bounds
-    for (let i = 0; i < v.length; i += 3) {
-      const x = v[i], y = v[i + 1], z = v[i + 2]
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-    }
-
-    if (!isFinite(maxX)) return { gridSize: 200, gridDivisions: 20, gridCellSize: 10 }
-
-    return calc(Math.max(maxX - minX, maxY - minY, maxZ - minZ))
-  }, [meshData, geometryInfo])
-
   return (
-    <div className="w-full h-full relative bg-gradient-to-br from-gray-200 to-gray-300">
+    <div className="w-full h-full relative bg-gray-950 group">
+      {/* Loading Overlay - Centered (from remote changes) */}
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center z-50 bg-gray-900/60 backdrop-blur-sm">
+          <div className="bg-gray-800 rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
+            {/* Animated Spinner */}
+            <div className="relative w-16 h-16 mx-auto mb-4">
+              <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-full bg-blue-500/20"></div>
+              </div>
+            </div>
+
+            {/* Loading Message */}
+            <p className="text-white font-medium mb-3">
+              {loadingMessage || 'Loading...'}
+            </p>
+
+            {/* Progress Bar */}
+            {loadingProgress !== undefined && (
+              <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300 ease-out"
+                  style={{ width: `${loadingProgress}%` }}
+                />
+              </div>
+            )}
+            {loadingProgress !== undefined && (
+              <p className="text-gray-400 text-xs mt-2">{loadingProgress}% complete</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Empty State */}
-      {!meshData && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="text-center text-gray-500">
-            <Box className="w-16 h-16 mx-auto mb-3 opacity-30" />
-            <p className="text-sm">Open a CAD file to begin</p>
+      {!meshData && !isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center text-gray-500">
+          <div className="text-center">
+            <Box className="w-16 h-16 mx-auto mb-4 opacity-20" />
+            <p>No mesh loaded</p>
+            <p className="text-sm">Upload a CAD file and generate a mesh to view</p>
           </div>
         </div>
       )}
 
       {meshData && (
         <>
-          {/* Floating Action Buttons - Bottom Left */}
-          <div className="absolute top-2 left-2 z-20 flex gap-2">
+          {/* Compact Top Toolbar */}
+          <div className="absolute top-0 left-0 right-0 bg-gray-800/90 backdrop-blur px-3 py-1.5 z-20 flex items-center gap-4 text-xs text-gray-300">
+            {/* File info */}
+            <div className="flex items-center gap-2">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${meshData.isPreview ? 'bg-yellow-600' : 'bg-green-600'}`}>
+                {meshData.isPreview ? 'PREVIEW' : 'MESH'}
+              </span>
+              {filename && <span className="text-white font-medium">{filename}</span>}
+              <span className="text-gray-500">|</span>
+              <span>{meshData.numTriangles?.toLocaleString()} tris</span>
+            </div>
+
+            <div className="flex-1" />
+
+            {/* View toggles */}
+            <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+              <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} className="accent-blue-500 w-3 h-3" />
+              Axes
+            </label>
+            <div className="flex items-center gap-1">
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                <input type="checkbox" checked={showWireframe} onChange={(e) => setShowWireframe(e.target.checked)} className="accent-blue-500 w-3 h-3" />
+                Wireframe
+              </label>
+              {showWireframe && (
+                <button
+                  onClick={() => setShowWireframePanel(!showWireframePanel)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${showWireframePanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+                  title="Wireframe Settings"
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+            {hasQualityData && (
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                <input type="checkbox" checked={showQuality} onChange={(e) => { setShowQuality(e.target.checked); if (e.target.checked) setColorMode('quality'); else setColorMode('solid'); }} className="accent-blue-500 w-3 h-3" />
+                Quality
+              </label>
+            )}
+            <button
+              onClick={() => setShowHistogram(!showHistogram)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showHistogram ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              title="Quality Histogram"
+            >
+              <BarChart3 className="w-3 h-3" />
+              Hist
+            </button>
+            <button
+              onClick={() => { setSelectionMode(!selectionMode); if (selectionMode) clearSelection(); }}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${selectionMode ? 'bg-green-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+              title="Face Selection Mode"
+            >
+              <MousePointer2 className="w-3 h-3" />
+              Select
+            </button>
             <button
               onClick={() => setShowPaintPanel(!showPaintPanel)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showPaintPanel ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors flex items-center gap-1 ${showPaintPanel ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
             >
-              <div
-                className="w-2.5 h-2.5 rounded-full border border-white/20"
-                style={{ backgroundColor: meshColor }}
-              ></div>
+              <span
+                className="w-3 h-2 rounded-sm"
+                style={{
+                  background: colorMode === 'gradient'
+                    ? `linear-gradient(to right, ${gradientColors.start}, ${gradientColors.end})`
+                    : meshColor
+                }}
+              ></span>
               Paint
             </button>
             <button
-              onClick={() => {
-                if (!showControls) {
-                  // Opening panel - auto-enable with X axis at 50% (midplane)
-                  setShowControls(true)
-                  setClipping({ enabled: true, showQualitySlice: true, x: true, y: false, z: false, xValue: 50, yValue: 50, zValue: 50 })
-                } else {
-                  // Closing panel - disable clipping
-                  setShowControls(false)
-                  setClipping({ enabled: false, showQualitySlice: true, x: false, y: false, z: false, xValue: 50, yValue: 50, zValue: 50 })
-                }
-              }}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all shadow-lg flex items-center gap-1.5 ${showControls ? 'bg-blue-600 text-white' : 'bg-gray-800/90 text-gray-300 hover:bg-gray-700'}`}
+              onClick={() => setShowControls(!showControls)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors ${showControls ? 'bg-blue-600' : 'bg-gray-600 hover:bg-gray-500'}`}
             >
-              <Scissors className="w-3.5 h-3.5" />
-              Section View
+              Clip
             </button>
-
           </div>
 
           {/* Paint Panel */}
@@ -1119,7 +506,7 @@ export default function MeshViewer({
                 <label className="text-gray-400 text-[10px] uppercase">Color Mode</label>
                 <select
                   value={colorMode}
-                  onChange={(e) => setColorMode(e.target.value)}
+                  onChange={(e) => { setColorMode(e.target.value); setShowQuality(e.target.value === 'quality'); }}
                   className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
                 >
                   <option value="solid">Solid Color</option>
@@ -1258,60 +645,6 @@ export default function MeshViewer({
               >
                 Reset to Default
               </button>
-
-              <div className="mt-3 border-t border-gray-700 pt-3">
-                <div className="font-medium text-white mb-2 text-sm">💡 Lighting & Visibility</div>
-
-                {/* Dynamic Lighting Toggle */}
-                <div className="mb-2">
-                  <label className="flex items-center gap-2 cursor-pointer text-gray-300">
-                    <input
-                      type="checkbox"
-                      checked={dynamicLighting}
-                      onChange={(e) => setDynamicLighting(e.target.checked)}
-                      className="accent-blue-500 w-3 h-3"
-                    />
-                    <div className="flex items-center gap-1.5">
-                      <Lightbulb className={`w-3 h-3 ${dynamicLighting ? 'text-yellow-400 fill-yellow-400' : 'text-gray-500'}`} />
-                      Dynamic Lighting (Headlight)
-                    </div>
-                  </label>
-                  <p className="text-[9px] text-gray-500 ml-5 mt-0.5">Light follows camera to see all details</p>
-                </div>
-
-                {/* Sharp Edges Toggle */}
-                <div className="mb-2">
-                  <label className="flex items-center gap-2 cursor-pointer text-gray-300">
-                    <input
-                      type="checkbox"
-                      checked={showEdges}
-                      onChange={(e) => setShowEdges(e.target.checked)}
-                      className="accent-blue-500 w-3 h-3"
-                    />
-                    <div className="flex items-center gap-1.5">
-                      <Hexagon className={`w-3 h-3 ${showEdges ? 'text-blue-400' : 'text-gray-500'}`} />
-                      Show Sharp Edges
-                    </div>
-                  </label>
-                </div>
-
-                {/* Edge Threshold Slider */}
-                {showEdges && (
-                  <div className="ml-5 mb-2">
-                    <div className="flex justify-between text-[10px] mb-1">
-                      <label className="text-gray-400">Angle Threshold</label>
-                      <span>{edgeThreshold}°</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="1" max="90" step="1"
-                      value={edgeThreshold}
-                      onChange={(e) => setEdgeThreshold(parseInt(e.target.value))}
-                      className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
-                    />
-                  </div>
-                )}
-              </div>
             </div>
           )}
 
@@ -1387,54 +720,106 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* View Options & Quality Metrics - Top Right */}
-          {(!showPaintPanel && !showControls) && (
-            <div className="absolute top-10 right-3 flex flex-col gap-2 z-10 min-w-[180px]">
+          {/* Quality Metrics - Top Right (only show when mesh is completed) */}
+          {isCompleted && qualityMetrics && !showPaintPanel && (
+            <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur rounded p-2.5 z-10 text-[10px] text-gray-300 min-w-[180px]">
+              <div className="font-medium text-white mb-2 text-xs">Quality Metrics</div>
 
-              {/* Main Info Panel */}
-              <div className="bg-gray-900/90 backdrop-blur rounded p-2.5 text-[10px] text-gray-300 shadow-xl border border-gray-700">
-
-                {/* Header / Visualization Toggles */}
-                <div className="mb-2 pb-2 border-b border-gray-700 space-y-2">
-                  <div className="font-medium text-white text-xs flex items-center gap-2">
-                    <span>View Options</span>
+              {/* SICN */}
+              <div className="mb-2 pb-2 border-b border-gray-700">
+                <div className="text-[9px] text-gray-500 uppercase mb-1">SICN (Shape Quality)</div>
+                <div className="grid grid-cols-3 gap-1 text-center">
+                  <div>
+                    <div className="text-[8px] text-gray-500">Min</div>
+                    <div className={qualityMetrics.sicn_min < 0.1 ? 'text-red-400 font-medium' : 'text-green-400 font-medium'}>
+                      {qualityMetrics.sicn_min?.toFixed(3) || 'N/A'}
+                    </div>
                   </div>
-
-                  <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={showAxes}
-                      onChange={(e) => setShowAxes(e.target.checked)}
-                      className="accent-blue-500 w-3 h-3 cursor-pointer"
-                    />
-                    Show Axes
-                  </label>
-
-                  {/* Only show Histogram toggle if metrics are available (Mesh Completed or Uploaded with quality) */}
-                  {(isCompleted || hasQualityData) && qualityMetrics && (
-                    <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors">
-                      <input
-                        type="checkbox"
-                        checked={showHistogram}
-                        onChange={(e) => setShowHistogram(e.target.checked)}
-                        className="accent-blue-500 w-3 h-3 cursor-pointer"
-                      />
-                      Show Quality Histogram
-                    </label>
-                  )}
+                  <div>
+                    <div className="text-[8px] text-gray-500">Avg</div>
+                    <div className="text-blue-400 font-medium">{qualityMetrics.sicn_avg?.toFixed(3) || 'N/A'}</div>
+                  </div>
+                  <div>
+                    <div className="text-[8px] text-gray-500">Max</div>
+                    <div className="text-green-400 font-medium">{qualityMetrics.sicn_max?.toFixed(3) || 'N/A'}</div>
+                  </div>
                 </div>
-
-                {/* Quality Metrics Content (When mesh is completed or has quality data) */}
-                {(isCompleted || hasQualityData) && qualityMetrics ? (
-                  <QualityReport metrics={qualityMetrics} />
-
-                ) : (
-                  /* Placeholder or info when no metrics available (e.g. CAD preview or processing) */
-                  <div className="text-[9px] text-gray-500 italic text-center py-1">
-                    {status === 'processing' ? 'Generating mesh...' : 'No mesh metrics available'}
-                  </div>
-                )}
               </div>
+
+              {/* Gamma */}
+              {(qualityMetrics.gamma_min !== undefined || qualityMetrics.gamma_avg !== undefined) && (
+                <div className="mb-2 pb-2 border-b border-gray-700">
+                  <div className="text-[9px] text-gray-500 uppercase mb-1">Gamma (Radius Ratio)</div>
+                  <div className="grid grid-cols-3 gap-1 text-center">
+                    <div>
+                      <div className="text-[8px] text-gray-500">Min</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_min?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Avg</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_avg?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Max</div>
+                      <div className="text-yellow-400 font-medium">{qualityMetrics.gamma_max?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Skewness */}
+              {(qualityMetrics.skewness_min !== undefined || qualityMetrics.skewness_avg !== undefined) && (
+                <div className="mb-2 pb-2 border-b border-gray-700">
+                  <div className="text-[9px] text-gray-500 uppercase mb-1">Skewness</div>
+                  <div className="grid grid-cols-3 gap-1 text-center">
+                    <div>
+                      <div className="text-[8px] text-gray-500">Min</div>
+                      <div className="text-purple-400 font-medium">{qualityMetrics.skewness_min?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Avg</div>
+                      <div className="text-purple-400 font-medium">{qualityMetrics.skewness_avg?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Max</div>
+                      <div className="text-purple-400 font-medium">{qualityMetrics.skewness_max?.toFixed(3) || 'N/A'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Aspect Ratio */}
+              {(qualityMetrics.aspect_ratio_min !== undefined || qualityMetrics.aspect_ratio_avg !== undefined) && (
+                <div className="mb-2 pb-2 border-b border-gray-700">
+                  <div className="text-[9px] text-gray-500 uppercase mb-1">Aspect Ratio</div>
+                  <div className="grid grid-cols-3 gap-1 text-center">
+                    <div>
+                      <div className="text-[8px] text-gray-500">Min</div>
+                      <div className="text-cyan-400 font-medium">{qualityMetrics.aspect_ratio_min?.toFixed(2) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Avg</div>
+                      <div className="text-cyan-400 font-medium">{qualityMetrics.aspect_ratio_avg?.toFixed(2) || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] text-gray-500">Max</div>
+                      <div className="text-cyan-400 font-medium">{qualityMetrics.aspect_ratio_max?.toFixed(2) || 'N/A'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Element Count */}
+              <div className="flex justify-between">
+                <span className="text-gray-400">Elements:</span>
+                <span className="font-medium">{qualityMetrics.total_elements?.toLocaleString() || qualityMetrics.element_count?.toLocaleString() || 'N/A'}</span>
+              </div>
+              {qualityMetrics.poor_elements > 0 && (
+                <div className="flex justify-between text-yellow-400 mt-0.5">
+                  <span>Poor (&lt;0.1):</span>
+                  <span>{qualityMetrics.poor_elements} ({((qualityMetrics.poor_elements / qualityMetrics.total_elements) * 100).toFixed(1)}%)</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -1483,11 +868,10 @@ export default function MeshViewer({
               <div className="flex gap-2">
                 <button
                   onClick={saveFaceName}
-                  disabled={!pendingFaceName.trim() || isSavingZones}
-                  className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-[11px] font-medium transition-colors flex items-center justify-center gap-1"
+                  disabled={!pendingFaceName.trim()}
+                  className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-[11px] font-medium transition-colors"
                 >
-                  {isSavingZones ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                  Save Zone
+                  Save Name
                 </button>
                 <button
                   onClick={clearSelection}
@@ -1499,65 +883,24 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* Named Faces List (Boundary Zones) */}
-          {Object.keys(boundaryZones).length > 0 && !showFacePanel && (
+          {/* Named Faces List */}
+          {Object.keys(faceNames).length > 0 && !showFacePanel && (
             <div className="absolute bottom-3 right-3 bg-gray-900/95 backdrop-blur rounded-lg p-2 z-10 text-xs text-gray-300 max-w-48 shadow-xl border border-gray-700">
               <div className="flex items-center gap-1.5 mb-1.5 text-[10px] text-gray-400">
                 <Tag className="w-3 h-3" />
-                <span>Boundary Zones ({Object.keys(boundaryZones).length})</span>
+                <span>Named Faces ({Object.keys(faceNames).length})</span>
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
-                {Object.entries(boundaryZones).map(([name, indices]) => (
-                  <div
-                    key={name}
-                    className="flex items-center justify-between bg-gray-800 rounded px-2 py-1 cursor-pointer hover:bg-gray-700 transition-colors group"
-                    onClick={() => {
-                      // Recall selection
-                      const newSelection = indices.map(idx => ({ faceIndex: idx }))
-                      setSelectedFaces(newSelection)
-                      setPendingFaceName(name)
-                      setShowFacePanel(true)
-                    }}
-                  >
-                    <div className="flex flex-col overflow-hidden max-w-[100px]">
-                      <span className="text-white truncate" title={name}>{name}</span>
-                      <span className="text-[9px] text-gray-500">{indices.length} faces</span>
-                    </div>
+                {Object.entries(faceNames).map(([faceIndex, name]) => (
+                  <div key={faceIndex} className="flex items-center justify-between bg-gray-800 rounded px-2 py-1">
+                    <span className="text-white truncate">{name}</span>
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation() // Prevent selecting when deleting
-                        if (!window.confirm(`Delete zone "${name}"?`)) return
-
-                        const newZones = { ...boundaryZones }
-                        delete newZones[name]
-                        setBoundaryZones(newZones)
-
-                        // Also clear from active selection if currently viewing it
-                        if (pendingFaceName === name) {
-                          setPendingFaceName('')
-                          setShowFacePanel(false)
-                          setSelectedFaces([])
-                        }
-
-                        // ... fetch call
-                        const deleteZone = async () => {
-                          try {
-                            const token = localStorage.getItem('token')
-                            await fetch(`${API_BASE}/projects/${projectId}/boundary-zones`, {
-                              method: 'POST',
-                              headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${token}`
-                              },
-                              body: JSON.stringify(newZones)
-                            })
-                          } catch (err) {
-                            console.error("Failed to delete zone:", err)
-                          }
-                        }
-                        deleteZone()
+                      onClick={() => {
+                        const newNames = { ...faceNames }
+                        delete newNames[faceIndex]
+                        setFaceNames(newNames)
                       }}
-                      className="text-gray-500 hover:text-red-400 ml-2 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      className="text-gray-500 hover:text-red-400 ml-2"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -1567,15 +910,13 @@ export default function MeshViewer({
             </div>
           )}
 
-          {/* Grid Size Indicator */}
-          {meshData && (
-            <div className="absolute bottom-1 right-2 z-0 text-[10px] text-gray-500 font-mono pointer-events-none select-none opacity-70">
-              Grid: {gridCellSize >= 1 ? gridCellSize : gridCellSize.toFixed(2)} mm
+          {/* Selection Mode Indicator */}
+          {selectionMode && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-full text-xs font-medium flex items-center gap-2 shadow-lg z-10">
+              <MousePointer2 className="w-4 h-4" />
+              Click on mesh to select faces
             </div>
           )}
-
-          {/* Selection Mode Indicator */}
-
 
           <Canvas
             gl={{
@@ -1585,38 +926,28 @@ export default function MeshViewer({
             }}
             dpr={[1, 1.5]} // Limit pixel ratio for performance
             performance={{ min: 0.5 }} // Adaptive performance
-            className="w-full h-full"
+            className="!pt-8"
           >
-            <PerspectiveCamera 
-              makeDefault 
-              position={initialCameraPosition ? [initialCameraPosition.x, initialCameraPosition.y, initialCameraPosition.z] : [100, 100, 100]} 
-              fov={45} 
-              near={0.1} 
-              far={10000} 
-            />
+            <PerspectiveCamera makeDefault position={[100, 100, 100]} fov={45} near={0.1} far={10000} />
             <OrbitControls
-              enableDamping={false}
-              dampingFactor={0}
+              enableDamping
+              dampingFactor={0.1}
               rotateSpeed={0.8}
               panSpeed={0.8}
-              zoomSpeed={2.4}
+              zoomSpeed={1.2}
+              enabled={!selectionMode}
               makeDefault
             />
-            
-            {/* Camera position tracker for session persistence */}
-            <CameraTracker 
-              onCameraChange={onCameraChange}
-              initialPosition={initialCameraPosition}
-              initialTarget={initialCameraTarget}
-            />
 
-            <Lights dynamic={dynamicLighting} />
+            <ambientLight intensity={0.7} />
+            <directionalLight position={[50, 50, 25]} intensity={0.6} />
+            <directionalLight position={[-50, -50, -25]} intensity={0.3} />
+            <hemisphereLight intensity={0.3} />
 
             <MeshObject
               meshData={meshData}
-              sliceData={sliceData}
               clipping={clipping}
-              showQuality={showQuality ? qualityMetric : false}
+              showQuality={showQuality}
               showWireframe={showWireframe}
               wireframeColor={wireframeColor}
               wireframeOpacity={wireframeOpacity}
@@ -1630,62 +961,56 @@ export default function MeshViewer({
               onFaceSelect={handleFaceSelect}
               selectionMode={selectionMode}
               selectedFaces={selectedFaces}
-              boundaryZones={boundaryZones}
-              showEdges={showEdges}
-              edgeThreshold={edgeThreshold}
             />
 
-            <gridHelper args={[gridSize, gridDivisions, '#aaaaaa', '#dddddd']} />
+            <gridHelper args={[200, 20, '#aaaaaa', '#dddddd']} />
             <AxesIndicator visible={showAxes} />
           </Canvas>
 
-          {/* Section View Controls Panel */}
+          {/* Clipping Controls Panel */}
           {showControls && (
             <div className="absolute top-10 right-3 bg-gray-900/90 backdrop-blur p-3 rounded z-10 text-xs text-gray-300 w-48">
-              <div className="font-medium text-white mb-2">Section View</div>
-
-              <div className="mb-3 pb-2 border-b border-gray-800">
-                <label className="flex items-center gap-2 cursor-pointer text-blue-400 font-medium">
-                  <input
-                    type="checkbox"
-                    checked={clipping.showQualitySlice}
-                    onChange={(e) => setClipping({ ...clipping, showQualitySlice: e.target.checked })}
-                    className="accent-blue-500 w-3 h-3"
-                  />
-                  View Quality Slice
-                </label>
-                {isSlicing && <span className="text-[9px] text-gray-500 italic block mt-1 animate-pulse">Computing section...</span>}
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-medium text-white">Clipping</span>
+                <input
+                  type="checkbox"
+                  checked={clipping.enabled}
+                  onChange={(e) => setClipping({ ...clipping, enabled: e.target.checked })}
+                  className="accent-blue-500 w-3 h-3"
+                />
               </div>
 
-              <div className="space-y-2">
-                {[
-                  { axis: 'x', label: 'X', color: 'red' },
-                  { axis: 'y', label: 'Y', color: 'green' },
-                  { axis: 'z', label: 'Z', color: 'blue' }
-                ].map(({ axis, label }) => (
-                  <div key={axis} className="space-y-0.5">
-                    <div className="flex justify-between">
-                      <label className="flex items-center gap-1">
-                        <input
-                          type="checkbox"
-                          checked={clipping[axis]}
-                          onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
-                          className="accent-blue-500 w-3 h-3"
-                        />
-                        {label}
-                      </label>
-                      <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
+              {clipping.enabled && (
+                <div className="space-y-2">
+                  {[
+                    { axis: 'x', label: 'X', color: 'red' },
+                    { axis: 'y', label: 'Y', color: 'green' },
+                    { axis: 'z', label: 'Z', color: 'blue' }
+                  ].map(({ axis, label }) => (
+                    <div key={axis} className="space-y-0.5">
+                      <div className="flex justify-between">
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={clipping[axis]}
+                            onChange={(e) => setClipping({ ...clipping, [axis]: e.target.checked })}
+                            className="accent-blue-500 w-3 h-3"
+                          />
+                          {label}
+                        </label>
+                        <span className="text-gray-500">{clipping[`${axis}Value`]}%</span>
+                      </div>
+                      <input
+                        type="range" min="-50" max="50"
+                        value={clipping[`${axis}Value`]}
+                        onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
+                        disabled={!clipping[axis]}
+                        className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
+                      />
                     </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={clipping[`${axis}Value`]}
-                      onChange={(e) => setClipping({ ...clipping, [`${axis}Value`]: parseInt(e.target.value) })}
-                      disabled={!clipping[axis]}
-                      className="w-full h-1 bg-gray-700 rounded appearance-none cursor-pointer accent-blue-500"
-                    />
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </>

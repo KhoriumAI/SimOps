@@ -227,6 +227,7 @@ def export_fluent_msh(
     tets: np.ndarray,
     boundary_classifier: Optional[Callable[[np.ndarray], str]] = None,
     boundary_zone_types: Optional[Dict[str, str]] = None,
+    zone_assignments: Optional[Dict[Tuple[int, ...], str]] = None,
     cell_zone_name: str = "fluid",
     user_zones: Optional[Dict[str, List[int]]] = None,
     boundary_lookup: Optional[Dict[tuple, str]] = None,
@@ -241,6 +242,8 @@ def export_fluent_msh(
         tets: (M, 4) array of tetrahedral connectivity (0-indexed)
         boundary_classifier: Function that takes face centroid (3,) and returns zone name string
         boundary_zone_types: Dict mapping zone name -> boundary type (e.g., "inlet" -> "velocity-inlet")
+        boundary_zone_types: Dict mapping zone name -> boundary type (e.g., "inlet" -> "velocity-inlet")
+        zone_assignments: Optional[Dict[Tuple[int, ...], str]] = None,
         cell_zone_name: Name for the cell zone (default: "fluid")
         user_zones: Dict mapping zone name -> list of face indices (0-indexed based on boundary extraction)
         boundary_lookup: Dict mapping sorted face node tuple -> zone name (Exact matching)
@@ -288,7 +291,6 @@ def export_fluent_msh(
     
     # Group boundary faces by zone
     zone_faces = {}
-    
     # Pre-map user zones for faster lookup
     face_idx_to_zone = {}
     if user_zones:
@@ -299,11 +301,16 @@ def export_fluent_msh(
     for i, (nodes, owner_cell, key) in enumerate(boundary_faces_raw):
         zone_name = None
         
-        # 1. Exact lookup (Highest Priority)
-        if boundary_lookup:
+        # 0. Explicit assignment (Origin feature)
+        sorted_nodes = tuple(sorted(nodes))
+        if zone_assignments and sorted_nodes in zone_assignments:
+            zone_name = zone_assignments[sorted_nodes]
+
+        # 1. Exact lookup (Highest Priority - HEAD feature)
+        if zone_name is None and boundary_lookup:
             zone_name = boundary_lookup.get(key)
             
-        # 2. User zones (Index based)
+        # 2. User zones (Index based - HEAD feature)
         if zone_name is None:
             zone_name = face_idx_to_zone.get(i)
         

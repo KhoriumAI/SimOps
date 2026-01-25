@@ -1,0 +1,12 @@
+{
+  "job_name": "Poiseuille_Test_1766979966",
+  "physics": {
+    "simulation_type": "cfd",
+    "inlet_velocity": 1.0,
+    "kinematic_viscosity": 1e-05,
+    "density": 1.0,
+    "virtual_wind_tunnel": false
+  },
+  "virtual_wind_tunnel": false,
+  "tagging_rules": []
+}

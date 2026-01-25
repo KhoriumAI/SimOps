@@ -17,6 +17,15 @@ from pathlib import Path
 from multiprocessing import cpu_count
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
+# API Contract for type-safe communication
+try:
+    # Import from project root
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from core.api_contract import MeshJobRequest, MeshJobResponse, JobStatus
+    CONTRACT_AVAILABLE = True
+except ImportError:
+    CONTRACT_AVAILABLE = False
+
 
 class WorkerSignals(QObject):
     """Signals for mesh worker thread"""
@@ -37,6 +46,12 @@ class MeshWorker:
         self.is_running = False
         self.phase_max = {}  # Track max value reached for each phase
         self.temp_config_file = None
+        
+        # Geometry counters for progress tracking
+        self.total_curves = 1
+        self.total_surfaces = 1
+        self.current_curves = 0
+        self.current_surfaces = 0
 
     def start(self, cad_file: str, quality_params: dict = None):
         if self.is_running:
@@ -44,6 +59,8 @@ class MeshWorker:
 
         self.is_running = True
         self.phase_max = {}
+        self.current_curves = 0
+        self.current_surfaces = 0
         self.thread = threading.Thread(target=self._run, args=(cad_file, quality_params), daemon=True)
         self.thread.start()
 
@@ -69,39 +86,101 @@ class MeshWorker:
 
         # Parse gmsh Info lines
         if "Info" in line:
+            # Geometry setup
+            if "Geometry:" in line:
+                # [17:31:52] Geometry: 1 volumes, 102 surfaces, 256 curves
+                curves_match = re.search(r'(\d+) curves', line)
+                surfaces_match = re.search(r'(\d+) surfaces', line)
+                if curves_match:
+                    self.total_curves = max(1, int(curves_match.group(1)))
+                if surfaces_match:
+                    self.total_surfaces = max(1, int(surfaces_match.group(1)))
+
             # 1D Meshing
             if "Meshing 1D" in line:
-                self._emit_progress("1d", 10)
-            elif "Meshing curve" in line and "order 2" not in line:
-                match = re.search(r'\[\s*(\d+)%\]', line)
-                if match:
-                    pct = int(match.group(1))
-                    self._emit_progress("1d", 10 + int(pct * 0.9))
+                self._emit_progress("1d", 1)
+                self.current_curves = 0
+            elif "Meshing curve" in line:
+                self.current_curves += 1
+                # Emit 5% increments as checkpoints
+                step_size = max(1, self.total_curves // 20)
+                if self.current_curves % step_size == 0 or self.current_curves == self.total_curves:
+                    pct = int((self.current_curves / self.total_curves) * 100)
+                    self._emit_progress("1d", pct)
             elif "Done meshing 1D" in line:
                 self._complete_phase("1d")
 
             # 2D Meshing
             elif "Meshing 2D" in line:
-                self._emit_progress("2d", 10)
-            elif "Meshing surface" in line and "order 2" not in line:
-                match = re.search(r'\[\s*(\d+)%\]', line)
-                if match:
-                    pct = int(match.group(1))
-                    self._emit_progress("2d", 10 + int(pct * 0.9))
+                self._emit_progress("2d", 1)
+                self.current_surfaces = 0
+            elif "Meshing surface" in line:
+                self.current_surfaces += 1
+                # Emit 5% increments as checkpoints
+                step_size = max(1, self.total_surfaces // 20)
+                if self.current_surfaces % step_size == 0 or self.current_surfaces == self.total_surfaces:
+                    pct = int((self.current_surfaces / self.total_surfaces) * 100)
+                    self._emit_progress("2d", pct)
             elif "Done meshing 2D" in line:
                 self._complete_phase("2d")
 
             # 3D Meshing
             elif "Meshing 3D" in line:
-                self._emit_progress("3d", 10)
-            elif "Tetrahedrizing" in line:
-                self._emit_progress("3d", 30)
+                self._emit_progress("3d", 5)
+            elif "Point insertion" in line or "Tetrahedrizing" in line or "Swapping" in line:
+                # HXT / Delaunay progress logs: [ 10%]  12345 elements
+                # Or sometimes: Info    : Point insertion... [  0%]
+                match = re.search(r'\[\s*(\d+)%\]', line)
+                if match:
+                    pct = int(match.group(1))
+                    # Scale to 70% of 3D phase
+                    self._emit_progress("3d", 5 + int(pct * 0.7))
+                else:
+                    # Counter suggestion: if we see an element count, log it
+                    # Info    : Point insertion... 123456 elements
+                    elem_match = re.search(r'(\d+)\s+elements', line)
+                    if elem_match:
+                        count = int(elem_match.group(1))
+                        if count > 1000: # Only log significant numbers
+                            self.signals.log.emit(f"[3D] Refining: {count:,} elements...")
             elif "Reconstructing mesh" in line:
-                self._emit_progress("3d", 50)
+                self._emit_progress("3d", 80)
             elif "3D refinement" in line:
-                self._emit_progress("3d", 70)
+                self._emit_progress("3d", 90)
             elif "Done meshing 3D" in line:
                 self._complete_phase("3d")
+
+            # Quality Analysis
+            elif "[Quality]" in line:
+                # [Quality] SICN progress: 50% (523,456 / 1,046,912 tets)
+                match = re.search(r'progress: (\d+)%', line)
+                if match:
+                    pct = int(match.group(1))
+                    self._emit_progress("qual", pct)
+                
+                # Metric context to log
+                if "SICN" in line:
+                    self.signals.log.emit("[Quality] Calculating SICN (Signed Inverse Condition Number)...")
+                elif "Gamma" in line:
+                    self.signals.log.emit("[Quality] Calculating Gamma (Inscribed/Circumscribed ratio)...")
+                elif "Angle" in line:
+                    self.signals.log.emit("[Quality] Calculating Dihedral Angles...")
+
+            # Polyhedral Conversion Progress
+            elif "[Polyhedral]" in line:
+                # [Polyhedral] Conversion progress: 45% (450/1000 nodes processed)
+                match = re.search(r'progress: (\d+)%', line)
+                if match:
+                    pct = int(match.group(1))
+                    self._emit_progress("3d", pct) # Polyhedral uses 3D bar
+
+            # OpenFOAM Snapping Progress
+            elif "[OpenFOAM]" in line:
+                # [OpenFOAM] Snapping progress: 55% (5500/10000 points)
+                match = re.search(r'Snapping progress: (\d+)%', line)
+                if match:
+                    pct = int(match.group(1))
+                    self._emit_progress("3d", pct)
 
             # Optimization (Gmsh)
             elif "Optimizing mesh..." in line and "Netgen" not in line:
@@ -110,6 +189,7 @@ class MeshWorker:
                 self._emit_progress("opt", 60)
             elif "No ill-shaped tets" in line:
                 self._emit_progress("opt", 90)
+                self._emit_progress("qual", 95) # Also hint at qual starting
             elif "Done optimizing mesh" in line and "Netgen" not in line:
                 self._complete_phase("opt")
 

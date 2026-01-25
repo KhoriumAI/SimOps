@@ -1,6 +1,13 @@
-# MeshPackageLean
+# SimOps - Thermal Analysis Appliance
 
-Advanced 3D mesh generation toolkit with intelligent strategy selection and quality optimization.
+A Docker-based thermal simulation service. Drop a STEP file in, get temperature results out.
+
+## What It Does
+
+SimOps is a comprehensive thermal simulation appliance that works in two modes:
+
+1.  **GUI Application**: Interactive mesh generation, visualization, and cloud strategy testing.
+2.  **Docker Service**: Watch-folder automation for volume processing.
 
 ## Features
 
@@ -12,11 +19,12 @@ Advanced 3D mesh generation toolkit with intelligent strategy selection and qual
 - **Paintbrush Refinement**: Selectively refine specific regions
 - **Multiple Algorithms**: Tetrahedral, hexahedral, hybrid meshing strategies
 - **HPC Profiling**: Detailed compute latency and sub-process timing logs for Threadripper/EPYC systems
+- **Docker Automation**: Watches a folder, auto-meshes, runs thermal analysis, and outputs reports.
 
 ## Installation
 
 ```bash
-# Create conda environment
+# Create conda environment (for GUI/Local)
 conda create -n meshing python=3.11
 conda activate meshing
 
@@ -32,9 +40,10 @@ cd apps/desktop/gui_app
 python main.py
 ```
 
-### Command Line
+### Docker Service (Watch Folder)
 ```bash
-python scripts/run_mesher.py path/to/model.step
+docker-compose up -d
+# Drop a STEP file into ./input/
 ```
 
 ### Local Cloud Development
@@ -67,121 +76,141 @@ The script consolidates all devops checks from `CONTRIBUTING.md`, `DEPLOYMENT.md
 ## Requirements
 
 - Python 3.11+
-- gmsh
-- PyQt5
-- VTK
-- pyvista
-- numpy
+- gmsh, PyQt5, VTK, pyvista, numpy
+- Docker Desktop (Windows/Mac) or Docker Engine (Linux)
+- 4GB RAM minimum
+
+## Quick Start
+
+```bash
+# Start the appliance
+docker-compose up -d
+
+# Drop a STEP file into the input folder
+cp model.step ./input/
+
+# Results appear in ./output/ within 1-5 minutes
+```
+
+Monitor jobs at http://localhost:9181
+
+## Output Files
+
+For input `model.step`, you get:
+
+- `model_HighFi_CFD.msh` - Generated mesh
+- `model_temperature.png` - Temperature visualization
+- `model_thermal.vtk` - VTK file for ParaView
+- `model_report.pdf` - PDF summary
+- `model_result.json` - Metadata
+
+## Docker Commands
+
+Start:
+```bash
+docker-compose up -d
+```
+
+Stop:
+```bash
+docker-compose down
+```
+
+Rebuild after code changes:
+```bash
+docker-compose up -d --build
+```
+
+View logs:
+```bash
+docker-compose logs -f worker
+docker-compose logs -f watcher
+```
+
+Check status:
+```bash
+docker-compose ps
+```
+
+Restart a service:
+```bash
+docker-compose restart watcher
+docker-compose restart worker
+```
+
+Scale workers:
+```bash
+docker-compose up -d --scale worker=8
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` and edit as needed.
+
+Key settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| POLL_INTERVAL | 2 | Folder check interval (seconds) |
+| WORKER_TTL | 600 | Job timeout (seconds) |
+
+## Running Without Docker
+
+```bash
+pip install -r requirements-worker.txt
+python simops_worker.py model.step -o ./output
+```
+
+## Troubleshooting
+
+**File not detected**: Delete the file, wait 5 seconds, copy it back. Or restart the watcher:
+```bash
+docker-compose restart watcher
+```
+
+**No containers running**: 
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+**Dashboard stuck on loading**:
+```bash
+docker-compose restart dashboard
+```
+>>>>>>> origin/main
 
 ## Project Structure
 
+```
+### Source Code (MeshPackageLean)
 ```
 MeshPackageLean/
 ├── apps/
 │   ├── desktop/     # PyQt5 GUI application
 │   ├── web/         # Web app entry point
-│   └── cli/         # Command-line tools (mesh_worker_subprocess.py)
-├── backend/         # Flask API Server (api_server.py, models.py, storage.py)
-├── core/            # Core meshing engine (mesh_generator.py, quality.py)
+│   └── cli/         # Command-line tools
+├── backend/         # Flask API Server
+├── core/            # Core meshing engine
 ├── strategies/      # Meshing strategy implementations
-├── converters/      # Mesh format converters (Ansys Fluent, etc.)
-├── scripts/
-│   ├── debug/       # Utility and debug scripts (check_db.py, etc.)
-│   ├── infra/       # Deployment and infrastructure tools (deploy.ps1)
-│   └── ...          # Other run scripts (run_mesher.py, run_local_modal.py)
-├── config/
-│   └── aws/         # AWS CloudFront and service configurations
-├── metadata/
-│   └── deployment/  # Deployment logs and metadata
-├── samples/         # Sample CAD/mesh files for testing
-├── docs/            # Documentation and ADRs
-├── tools/           # Testing and visualization utilities
-└── web-frontend/    # React/Vite Web Interface
+└── converters/      # Mesh format converters
 ```
 
-## Authors
-
-Mesh generation toolkit for research and engineering applications.
-
-## How to Code
-
-To maintain project consistency and knowledge retention, please follow these guidelines:
-
-### 1. Document Major Decisions (ADRs)
-When making architectural or mathematical decisions, create a new record in `docs/adr/` using the following template:
-
-```markdown
-# [Short Title, e.g., Implementation of Roe Solver / Switch to Voronoi Dual]
-*Status:* [Proposed | Accepted | Deprecated]
-*Date:* YYYY-MM-DD
-*Tags:* [e.g., #numerics, #geometry, #optimization, #flux-scheme]
-
-## 1. Context & Problem Statement
-The mathematical or architectural constraint driving this decision.
-
-* *The Constraint:* [e.g., The current central difference scheme creates spurious oscillations at shock waves (Gibbs phenomenon).]
-* *The Goal:* [e.g., We need a Total Variation Diminishing (TVD) scheme to handle discontinuities.]
-
-## 2. Technical Decision
-The specific algorithm or library adopted.
-
-* *Mechanism:* [e.g., Implementing a MUSCL reconstruction with a Minmod limiter.]
-* *Dependencies:* [e.g., Requires calculating gradient vectors at cell centers.]
-
-## 3. Mathematical & Physical Implications
-Crucial for validity.
-
-* *Conservation:* [e.g., Strictly conservative? Yes/No.]
-* *Stability:* [e.g., Reduces max stable CFL from 1.0 to 0.8.]
-* *Geometric Constraints:* [e.g., Requires mesh orthogonality > 0.7 or gradients become inaccurate.]
-
-## 4. Performance Trade-offs
-* *Compute Cost:* [e.g., Increases flux calculation time by 2x due to reconstruction step.]
-* *Memory Cost:* [e.g., Needs to store gradient tensors for every cell.]
-
-## 5. Verification Plan
-* *Sanity Check:* [e.g., Sod Shock Tube benchmark.]
-* *Regression:* [e.g., Compare residuals against the previous version on the standard nozzle test case.]
+### Docker Services (SimOps)
+```
+simops/
+├── docker-compose.yml      # Orchestration
+├── watcher.py              # Folder monitoring
+├── simops_worker.py        # Simulation engine
+├── input/                  # Watch folder
+└── output/                 # Results
 ```
 
-### 2. Generalize and Share Skills
-When solving a problem that could apply broadly, contribute to the `khorium_skills/toolbox/`:
-- Add a comment at the top explaining the generalized utility.
-- Reference existing skills when stuck.
+## Services (Docker Mode)
 
-### 3. Folder Documentation
-Always include a `README.md` inside any new folder to document its purpose.
-
-### 4. Continuous Reference
-Reference the `docs/adr/` folder frequently to understand past decisions and maintain alignment with the project's evolution.
-
-### 5. Git Commit Guidelines
-
-To maintain a clean and searchable history, commit titles must follow this structure: `<type>/<description>` (which results in `<short-hash> - <type>/<description>` in logs).
-
-**Format:**
-`<type>/<short_description_in_snake_case_or_kebab_case>`
-
-**Standard Types:**
-- `feat/`: New feature or functionality
-- `fix/`: Bug fix
-- `debug/`: Debugging changes or temporary logging
-- `refactor/`: Code changes that neither fix a bug nor add a feature
-- `docs/`: Documentation updates
-- `chore/`: Maintenance tasks (dependencies, build configs, etc.)
-- `test/`: Adding or updating tests
-- `perf/`: Performance improvements
-- `style/`: Changes that do not affect the meaning of the code (white-space, formatting, etc.)
-
-**Examples:**
-- `fc995d2a - fix3/requirements-txt`
-- `d5155b72 - fix3/requirements-txt`
-- `e1ebdcb1 - fix/login_Crash`
-- `58aacdc5 - fix/WAF_update`
-- `0e733b26 - fix/mesh_size_hardcoded`
-- `a1b2c3d4 - feat/add_hexa_mesher`
-- `e5f6g7h8 - debug/trace_vtk_errors`
-
-### 6. Update Changelog
-
-When adding a new feature, documenting a bug fix, or making an architectural change, you must update `CHANGELOG.md`. Ensure your entry is standardized with the current format (categorized by **Added**, **Changed**, **Fixed**, etc.) and properly dated.
+| Service | Port | Purpose |
+|---------|------|---------|
+| redis | 6379 | Job queue |
+| watcher | - | Monitors input folder |
+| worker (x4) | - | Runs simulations |
+| dashboard | 9181 | Web UI for job status |

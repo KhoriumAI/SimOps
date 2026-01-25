@@ -47,17 +47,22 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
         return
 
     def left_button_press(self, obj, event):
-        print(f"[DEBUG] Left button press - Paint mode: {self.painting_mode}, Parent: {self.parent is not None}")
+        # Store start position for click detection
+        self.start_x, self.start_y = self.GetInteractor().GetEventPosition()
+        self.is_click_candidate = True
+        
+        # print(f"[DEBUG] Left press at {self.start_x}, {self.start_y}")
+
         if self.painting_mode and self.parent:
             # Start painting - consume event to prevent rotation
-            print("[DEBUG] Starting paint operation")
+            # print("[DEBUG] Starting paint operation")
             self.is_painting = True
             self.paint_at_cursor()
             # Abort event to prevent further processing
             self.GetInteractor().SetAbortFlag(1)
         else:
             # Normal rotate
-            print("[DEBUG] Normal rotation mode")
+            # print("[DEBUG] Normal rotation mode")
             self.OnLeftButtonDown()
 
     def left_button_release(self, obj, event):
@@ -66,7 +71,30 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
             # Abort event
             self.GetInteractor().SetAbortFlag(1)
         else:
+            # Check for click (vs drag)
+            end_x, end_y = self.GetInteractor().GetEventPosition()
+            dx = abs(end_x - self.start_x)
+            dy = abs(end_y - self.start_y)
+            
+            # If moved less than 3 pixels, consider it a click
+            if self.is_click_candidate and dx < 3 and dy < 3:
+                # print(f"[DEBUG] Click detected at {end_x}, {end_y}")
+                self.on_click(end_x, end_y)
+            
             self.OnLeftButtonUp()
+            
+    def on_click(self, x, y):
+        """Handle click event (selection)"""
+        if self.parent:
+            # Check for modifiers
+            shift = self.GetInteractor().GetShiftKey()
+            ctrl = self.GetInteractor().GetControlKey()
+            
+            # Double click is handled separately by VTK usually, 
+            # but we can implement basic selection here
+            
+            if hasattr(self.parent, 'on_scene_click'):
+                self.parent.on_scene_click(x, y, shift=shift, ctrl=ctrl)
 
     def mouse_move(self, obj, event):
         if self.painting_mode and self.is_painting and self.parent:
@@ -82,7 +110,22 @@ class CustomInteractorStyle(vtk.vtkInteractorStyleTrackballCamera):
             # Abort event to prevent rotation while in paint mode
             self.GetInteractor().SetAbortFlag(1)
         else:
-            # Normal rotation mode
+            # Normal mode - support hover highlighting
+            # self.is_click_candidate = False # If moved significantly, it's not a click
+            # Actually, standard OnMouseMove handles rotation, so if we are here, we might be dragging
+            
+            # Check if we are dragging (button down)
+            # VTK Interactor doesn't easily tell us button state in MouseMove without tracking
+            # But OnLeftButtonDown sets interaction state.
+            
+            if self.parent and hasattr(self.parent, 'on_scene_hover'):
+                # Pass hover event (only if not rotating?)
+                # We can check interactors state, but simpler:
+                # just pass it. The viewer can decide to ignore if rotating.
+                x, y = self.GetInteractor().GetEventPosition()
+                # print(f"[INT] Mouse Move: {x}, {y}")
+                self.parent.on_scene_hover(x, y)
+                
             self.OnMouseMove()
 
     def paint_at_cursor(self):
