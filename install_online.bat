@@ -51,42 +51,46 @@ echo - Dashboard Port: %DASHBOARD_PORT%
 echo [2/5] Creating local logs directory...
 if not exist "logs" mkdir logs
 
-echo [3/5] Authenticating with GitHub Container Registry...
-echo.
-echo You need to log in to download the private SimOps images.
-echo Username: Your GitHub Username
-echo Password: Your Personal Access Token (PAT) with 'read:packages' scope.
-echo.
-docker login ghcr.io
+echo [3/5] Checking image status...
+set NEED_PULL=1
+docker images -q ghcr.io/khoriumai/simops-frontend:latest >nul 2>&1
+if %errorlevel% equ 0 (
+    echo - Images found locally.
+    set /p UPDATE_CHOICE="Check for updates? (y/N): "
+    if /i "%UPDATE_CHOICE%" neq "y" set NEED_PULL=0
+)
 
-if %errorlevel% neq 0 (
-    echo [ERROR] Login failed. You cannot pull images without authentication.
-    pause
-    exit /b 1
+if %NEED_PULL% equ 1 (
+    echo.
+    echo [4/5] Authenticating and pulling latest images...
+    echo Username: Your GitHub Username
+    echo Password: Your Personal Access Token (PAT)
+    docker login ghcr.io
+    if %errorlevel% neq 0 (
+        echo [ERROR] Login failed.
+        pause
+        exit /b 1
+    )
+    docker-compose -f docker-compose-online.yml pull
+) else (
+    echo [4/5] Skipping download (using local images).
 )
 
 echo.
-echo [4/5] Pulling latest images...
-docker-compose -f docker-compose-online.yml pull
-
-echo.
 echo [5/5] Starting SimOps services...
-REM Clean up any previous instance in this folder to avoid conflicts
-docker-compose -f docker-compose-online.yml down --remove-orphans >nul 2>&1
 docker-compose -f docker-compose-online.yml up -d
 
 echo.
 echo ===============================================================================
-echo Installation Complete!
+echo Installation Complete! Opening SimOps...
 echo ===============================================================================
 echo.
-echo 1. Access SimOps UI at:  http://localhost:%FRONTEND_PORT%
+timeout /t 3 >nul
+start http://localhost:%FRONTEND_PORT%
 echo.
-echo [DEBUG/Technical]
-echo - Backend API:           http://localhost:%API_PORT%
-echo - Job Dashboard:         http://localhost:%DASHBOARD_PORT%
+echo - Job Dashboard: http://localhost:%DASHBOARD_PORT%
 echo.
-echo The auto-updater (Watchtower) is running and will check for updates hourly.
+echo The auto-updater (Watchtower) is running in the background.
 echo.
-pause
+timeout /t 5
 exit /b 0
