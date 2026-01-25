@@ -57,7 +57,7 @@ services:
     depends_on:
       - redis
     ports:
-      - "9181:9181"
+      - "${DASHBOARD_PORT:-9181}:9181"
     environment:
       RQ_DASHBOARD_REDIS_URL: redis://redis:6379
     restart: unless-stopped
@@ -73,7 +73,7 @@ services:
       <<: *common-env
       FLASK_ENV: production
     ports:
-      - "3001:3000" # Changed to 3001 to avoid local dev conflicts
+      - "${API_PORT:-3001}:3000"
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -83,7 +83,7 @@ services:
     depends_on:
       - api
     ports:
-      - "5173:80" # Map host 5173 to container 80
+      - "${FRONTEND_PORT:-5173}:80"
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
