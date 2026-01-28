@@ -979,15 +979,15 @@ def register_routes(app):
             if file_ext == '.msh':
                 if meshio is not None:
                     vtk_temp = os.path.join(temp_dir, f"{project_id}_preview.vtk")
-                    mesh = meshio.read(temp_path)
-                    mesh.write(vtk_temp, file_format="vtk")
+                    from headless_solver import msh_to_preview_vtk
+                    msh_to_preview_vtk(temp_path, vtk_temp)
                     preview_path = storage.save_local_file(
                         local_path=vtk_temp,
                         filename=f"{project_id}_preview.vtk",
                         user_email=user.email,
                         file_type='uploads'
                     )
-                    print(f"[VENDOR UPLOAD] .msh -> meshio VTK (no gmsh): {preview_path}")
+                    print(f"[VENDOR UPLOAD] .msh -> meshio VTK (single-block preview): {preview_path}")
                 else:
                     stl_error = "meshio not installed; cannot generate .msh preview (install meshio)"
             else:
