@@ -212,6 +212,7 @@ function App() {
 
         addLog(`Uploading ${selectedFile.name}...`, 'info')
         setIsProcessing(true)
+        setPreviewUrl(null)
 
         try {
             const formData = new FormData()
@@ -242,8 +243,9 @@ function App() {
                 }
 
                 const isMsh = selectedFile.name.toLowerCase().endsWith('.msh')
-                if (data.url && !isMsh) {
-                    setPreviewUrl(data.url)
+                const viewableUrl = data.preview_url || (isMsh ? null : data.url)
+                if (viewableUrl) {
+                    setPreviewUrl(viewableUrl)
                     addLog(`Loaded mesh: ${data.saved_as}`, 'success')
                 } else if (isMsh) {
                     addLog(`Upload complete: ${data.saved_as} (no 3D preview for .msh)`, 'info')

@@ -976,32 +976,44 @@ def register_routes(app):
         preview_path = None
         stl_error = None
         try:
-            from compute_backend import get_compute_provider
-            mode = app.config.get('COMPUTE_MODE', 'LOCAL')
-            if app.config.get('USE_MODAL_COMPUTE', False):
-                mode = 'CLOUD'
-            provider = get_compute_provider(mode)
-            preview_input = temp_path
-            if mode == 'CLOUD' and filepath.startswith('s3://'):
-                preview_input = filepath
-            elif mode == 'CLOUD':
-                provider = get_compute_provider('LOCAL')
-            result = provider.generate_preview(preview_input)
-            if result.get('success') or result.get('status') == 'success':
-                if result.get('preview_path'):
-                    preview_path = result.get('preview_path')
-                elif "vertices" in result:
-                    preview_temp = os.path.join(temp_dir, f"{project_id}_preview.json")
-                    with open(preview_temp, 'w') as f:
-                        json.dump(result, f)
-                    preview_path = storage.save_local_file(
-                        local_path=preview_temp,
-                        filename=f"{project_id}_preview.json",
-                        user_email=user.email,
-                        file_type='uploads'
-                    )
+            if file_ext == '.msh' and meshio is not None:
+                vtk_temp = os.path.join(temp_dir, f"{project_id}_preview.vtk")
+                mesh = meshio.read(temp_path)
+                mesh.write(vtk_temp, file_format="vtk")
+                preview_path = storage.save_local_file(
+                    local_path=vtk_temp,
+                    filename=f"{project_id}_preview.vtk",
+                    user_email=user.email,
+                    file_type='uploads'
+                )
+                print(f"[VENDOR UPLOAD] MSH -> VTK preview: {preview_path}")
             else:
-                stl_error = str(result.get('error') or result.get('message') or 'Unknown')
+                from compute_backend import get_compute_provider
+                mode = app.config.get('COMPUTE_MODE', 'LOCAL')
+                if app.config.get('USE_MODAL_COMPUTE', False):
+                    mode = 'CLOUD'
+                provider = get_compute_provider(mode)
+                preview_input = temp_path
+                if mode == 'CLOUD' and filepath.startswith('s3://'):
+                    preview_input = filepath
+                elif mode == 'CLOUD':
+                    provider = get_compute_provider('LOCAL')
+                result = provider.generate_preview(preview_input)
+                if result.get('success') or result.get('status') == 'success':
+                    if result.get('preview_path'):
+                        preview_path = result.get('preview_path')
+                    elif "vertices" in result:
+                        preview_temp = os.path.join(temp_dir, f"{project_id}_preview.json")
+                        with open(preview_temp, 'w') as f:
+                            json.dump(result, f)
+                        preview_path = storage.save_local_file(
+                            local_path=preview_temp,
+                            filename=f"{project_id}_preview.json",
+                            user_email=user.email,
+                            file_type='uploads'
+                        )
+                else:
+                    stl_error = str(result.get('error') or result.get('message') or 'Unknown')
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1063,7 +1075,7 @@ def register_routes(app):
 
     @app.route('/api/vendor/projects/<project_id>/preview', methods=['GET'])
     def vendor_project_preview(project_id: str):
-        """Serve preview JSON for vendor projects. No JWT."""
+        """Serve preview for vendor projects: .vtk file (viewable) or JSON. No JWT."""
         user = User.query.filter_by(email="vendor@simops.local").first()
         if not user:
             return jsonify({"error": "Not found"}), 404
@@ -1071,6 +1083,9 @@ def register_routes(app):
         if not project or project.user_id != user.id or not project.preview_path:
             return jsonify({"error": "Not found"}), 404
         try:
+            path = Path(project.preview_path)
+            if path.suffix.lower() == '.vtk' and path.exists():
+                return send_file(str(path), as_attachment=False, download_name=f"{project_id}_preview.vtk")
             preview_bytes = get_storage().get_file(project.preview_path)
             data = json.loads(preview_bytes)
             return jsonify(data)
