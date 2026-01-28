@@ -201,6 +201,21 @@ def main(api_url: str | None = None) -> int:
         return 1
     log(f"VTK URL: {vtk_url}")
 
+    report_url = results.get("report_url")
+    if report_url:
+        full_report = f"{url}{report_url}" if report_url.startswith("/") else report_url
+        try:
+            r = requests.get(full_report, timeout=10)
+            r.raise_for_status()
+            if "<!DOCTYPE html>" not in r.text and "<html" not in r.text:
+                log("Report response does not look like HTML")
+            else:
+                log("Report fetch OK (report opens in new tab)")
+        except Exception as e:
+            log(f"Report fetch warn: {e}")
+    else:
+        log("No report_url (optional)")
+
     # 5. Fetch VTK (viewer would load this)
     full_vtk = f"{url}{vtk_url}" if vtk_url.startswith("/") else vtk_url
     try:

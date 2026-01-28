@@ -1115,16 +1115,43 @@ def register_routes(app):
                     return str(path)
         return None
 
+    def _write_sim_report(path: Path, out: dict, mesh_name: str, config: dict) -> None:
+        t_min = out.get("min_temp", 0)
+        t_max = out.get("max_temp", 0)
+        n = out.get("num_elements", 0)
+        hot = config.get("heat_source_temperature", 373.15)
+        amb = config.get("ambient_temperature", 293.15)
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>SimOps Thermal Report</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem}}
+h1{{font-size:1.25rem}} table{{border-collapse:collapse;width:100%}}
+th,td{{text-align:left;padding:0.4rem;border-bottom:1px solid #eee}}
+th{{color:#666}}</style></head><body>
+<h1>SimOps Thermal Report</h1>
+<p><strong>Mesh:</strong> {mesh_name}</p>
+<table>
+<tr><th>Min temperature</th><td>{t_min - 273.15:.1f} °C</td></tr>
+<tr><th>Max temperature</th><td>{t_max - 273.15:.1f} °C</td></tr>
+<tr><th>Elements</th><td>{n:,}</td></tr>
+<tr><th>Heat source</th><td>{hot - 273.15:.1f} °C</td></tr>
+<tr><th>Ambient</th><td>{amb - 273.15:.1f} °C</td></tr>
+</table>
+</body></html>"""
+        path.write_text(html, encoding="utf-8")
+
     def _run_sim_task(job_id: str, msh_path: str, config: dict, output_dir: Path):
         try:
             from headless_solver import run_headless_solve
             out = run_headless_solve(msh_path, str(output_dir), config)
             vtk_path = out.get("vtk_path")
+            report_path = Path(output_dir) / f"{job_id}_report.html"
+            _write_sim_report(report_path, out, Path(msh_path).name, config)
             with _sim_jobs_lock:
                 _sim_jobs[job_id] = {
                     "status": "success",
                     "results": {
                         "vtk_url": f"/api/job/{job_id}/vtk",
+                        "report_url": f"/api/job/{job_id}/report",
                         "min_temp": out["min_temp"],
                         "max_temp": out["max_temp"],
                         "max_temperature_C": out["max_temp"] - 273.15,
@@ -1134,13 +1161,14 @@ def register_routes(app):
                         "iterations_run": getattr(out, "iterations", None),
                     },
                     "vtk_path": vtk_path,
+                    "report_path": str(report_path),
                     "error": None,
                 }
         except Exception as e:
             import traceback
             traceback.print_exc()
             with _sim_jobs_lock:
-                _sim_jobs[job_id] = {"status": "failed", "results": None, "error": str(e), "vtk_path": None}
+                _sim_jobs[job_id] = {"status": "failed", "results": None, "error": str(e), "vtk_path": None, "report_path": None}
 
     @app.route('/api/simulate', methods=['POST'])
     def api_simulate():
@@ -1190,6 +1218,18 @@ def register_routes(app):
         if not vtk_path or not Path(vtk_path).exists():
             return jsonify({"error": "vtk not found"}), 404
         return send_file(vtk_path, as_attachment=False, download_name=f"{job_id}.vtk")
+
+    @app.route('/api/job/<job_id>/report', methods=['GET'])
+    def api_job_report(job_id: str):
+        """Serve HTML report for SimOps (opens in new tab / download)."""
+        with _sim_jobs_lock:
+            job = _sim_jobs.get(job_id)
+        if not job or job["status"] != "success":
+            return jsonify({"error": "job not found or not ready"}), 404
+        report_path = job.get("report_path")
+        if not report_path or not Path(report_path).exists():
+            return jsonify({"error": "report not found"}), 404
+        return send_file(report_path, as_attachment=False, download_name=f"SimOps_Report_{job_id}.html", mimetype="text/html")
 
     @app.route('/api/cancel', methods=['POST'])
     def api_cancel():
