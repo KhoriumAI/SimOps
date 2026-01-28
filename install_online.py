@@ -348,70 +348,75 @@ def check_ghcr_auth() -> bool:
     return r.returncode == 0
 
 
-def check_backend_ready(api_port: int, frontend_port: int, max_attempts: int = 60) -> bool:
-    """Check if backend API is ready via both direct and frontend proxy. Returns True when ready."""
+def check_backend_ready(api_port: int, frontend_port: int, max_attempts: int = 90) -> tuple[bool, str]:
+    """Check if backend API is ready via direct and frontend proxy.
+    Returns (ready: bool, failure_detail: str).
+    """
     import urllib.request
     import urllib.error
-    
-    # Check backend directly
+
     backend_url = f"http://localhost:{api_port}/api/health"
-    # Check backend via frontend proxy (how the browser accesses it)
     proxy_url = f"http://localhost:{frontend_port}/api/health"
-    # Check frontend is serving content
     frontend_url = f"http://localhost:{frontend_port}/"
-    
+
     backend_ready = False
     proxy_ready = False
     frontend_serving = False
-    
+    last_progress = 0
+
     for i in range(max_attempts):
-        # Check frontend is serving HTML
+        # Check frontend serving
         if not frontend_serving:
             try:
-                with urllib.request.urlopen(frontend_url, timeout=2) as response:
-                    if response.status == 200:
-                        content = response.read(100).decode('utf-8', errors='ignore')
-                        if '<html' in content.lower() or '<!doctype' in content.lower():
+                with urllib.request.urlopen(frontend_url, timeout=2) as resp:
+                    if resp.status == 200:
+                        raw = resp.read(200)
+                        content = raw.decode("utf-8", errors="ignore").lower()
+                        if "<html" in content or "<!doctype" in content or len(raw) > 50:
                             frontend_serving = True
-                            log_debug(f"Frontend serving content (attempt {i+1})")
             except (urllib.error.URLError, OSError):
                 pass
-        
+
         # Check direct backend
         if not backend_ready:
             try:
-                with urllib.request.urlopen(backend_url, timeout=2) as response:
-                    if response.status == 200:
+                with urllib.request.urlopen(backend_url, timeout=2) as resp:
+                    if resp.status == 200:
                         backend_ready = True
-                        log_debug(f"Backend direct check passed (attempt {i+1})")
             except (urllib.error.URLError, OSError):
                 pass
-        
-        # Check via frontend proxy (how browser accesses it)
+
+        # Check via frontend proxy
         if not proxy_ready:
             try:
-                with urllib.request.urlopen(proxy_url, timeout=2) as response:
-                    if response.status == 200:
+                with urllib.request.urlopen(proxy_url, timeout=2) as resp:
+                    if resp.status == 200:
                         proxy_ready = True
-                        log_debug(f"Backend proxy check passed (attempt {i+1})")
             except (urllib.error.URLError, OSError):
                 pass
-        
-        # All must be ready
+
         if backend_ready and proxy_ready and frontend_serving:
-            return True
-        
+            return True, ""
+
+        # Progress every 5 seconds
+        elapsed = i + 1
+        if elapsed >= last_progress + 5:
+            last_progress = elapsed
+            msg = f"  … waiting ({elapsed}s)"
+            log(msg)
+            log_debug(f"Readiness: frontend={frontend_serving} backend={backend_ready} proxy={proxy_ready}")
+
         if i < max_attempts - 1:
             _sleep(1)
-    
-    # Log what failed for debugging
+
+    parts = []
     if not frontend_serving:
-        log_debug("Readiness check: frontend not serving HTML")
+        parts.append("frontend not serving")
     if not backend_ready:
-        log_debug("Readiness check: direct API /api/health failed")
+        parts.append("API /api/health direct failed")
     if not proxy_ready:
-        log_debug("Readiness check: /api/health via frontend proxy failed")
-    return False
+        parts.append("API /api/health via proxy failed")
+    return False, "; ".join(parts)
 
 
 def main() -> int:
@@ -538,14 +543,24 @@ def main() -> int:
 
     # Wait for backend to be ready (both direct and via frontend proxy) before opening browser
     log("Waiting for backend API and frontend to be ready...")
-    if check_backend_ready(api_port, actual_port):
+    ready, detail = check_backend_ready(api_port, actual_port)
+    if ready:
         log_info("Backend and frontend are ready.")
-        # Give frontend JavaScript time to complete its own readiness check in the browser
         log("Giving frontend JavaScript time to initialize...")
         _sleep(5)
     else:
-        log("Services not fully ready yet, but continuing...")
-        log("If the UI shows 'backend not ready': re-run, choose Y to pull images, then try again.")
+        log_err("Services did not become ready.")
+        log(f"  {detail}")
+        log("")
+        log("--- Recent API container logs ---")
+        _dump_compose_logs(compose, "api", 60)
+        log("--- Recent Redis container logs ---")
+        _dump_compose_logs(compose, "redis", 20)
+        log("---")
+        log("Fix the above errors, re-run the installer, and choose Y to pull images if needed.")
+        log("")
+        _pause()
+        return 1
     log("")
 
     # Done — use actual port from Docker, not our pre-up guess
@@ -568,6 +583,26 @@ def main() -> int:
     log("If you see MeshGen: re-run and choose to pull images, or try Ctrl+Shift+R.")
     _pause()
     return 0
+
+
+def _dump_compose_logs(compose: list[str], service: str, tail: int) -> None:
+    """Append recent compose logs for a service to log + console."""
+    try:
+        r = subprocess.run(
+            compose + ["-f", str(COMPOSE_FILE), "logs", "--tail", str(tail), service],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        if not out.strip():
+            log(f"  (no logs)")
+            return
+        for line in out.strip().splitlines():
+            log(f"  {line}")
+    except Exception as e:
+        log(f"  (could not get logs: {e})")
 
 
 def _sleep(secs: int) -> None:

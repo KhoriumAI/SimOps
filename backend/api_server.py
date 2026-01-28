@@ -10,9 +10,10 @@ from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from flask_socketio import SocketIO
 from pathlib import Path
 import json
-import sys
 import os
+import secrets
 import subprocess
+import sys
 import uuid
 from datetime import datetime
 from threading import Thread, Lock
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import get_config
 from models import db, User, Project, MeshResult, TokenBlocklist, ActivityLog, DownloadRecord, Feedback
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash
 from routes.auth import auth_bp, check_if_token_revoked
 from routes.batch import batch_bp
 from routes.webhooks import webhook_bp, init_socketio, register_socketio_handlers
@@ -698,6 +700,32 @@ def register_routes(app):
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
+    def _get_upload_file():
+        """Get uploaded file from either 'file' or 'files' (SimOps). Returns (file, None) or (None, error_response)."""
+        f = request.files.get('file')
+        if not f and request.files.getlist('files'):
+            f = request.files.getlist('files')[0]
+        if not f or (hasattr(f, 'filename') and f.filename == ''):
+            return None, (jsonify({"error": "No file provided"}), 400)
+        return f, None
+
+    def _ensure_vendor_user():
+        """Get or create vendor@simops.local for SimOps/vendor uploads. Returns user."""
+        vendor_email = "vendor@simops.local"
+        user = User.query.filter_by(email=vendor_email).first()
+        if user:
+            return user
+        from routes.auth import hash_password
+        user = User(
+            email=vendor_email,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            name="Vendor",
+            role="user",
+        )
+        db.session.add(user)
+        db.session.commit()
+        return user
+
     @app.route('/api/upload', methods=['POST'])
     @jwt_required()
     def upload_cad_file():
@@ -715,10 +743,10 @@ def register_routes(app):
         if not user:
             return jsonify({"error": "User not found"}), 404
 
-        if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+        file, err = _get_upload_file()
+        if err:
+            return err[0], err[1]
 
-        file = request.files['file']
         if file.filename == '':
             return jsonify({"error": "No file selected"}), 400
 
@@ -768,7 +796,7 @@ def register_routes(app):
             return jsonify({"error": "Failed to save file"}), 500
 
         preview_path = None
-        preview_path = None
+        stl_error = None
         try:
             # 5. Generate the preview
             # Refactored to use ComputeProvider
@@ -821,13 +849,16 @@ def register_routes(app):
                         )
                         print(f"[PREVIEW] Preview uploaded: {preview_path}")
             else:
-                 print(f"[PREVIEW ERROR] Preview generation failed: {result.get('error') or result.get('message')}")
+                 msg = result.get('error') or result.get('message') or 'Unknown'
+                 print(f"[PREVIEW ERROR] Preview generation failed: {msg}")
+                 stl_error = str(msg)
 
         except Exception as e:
             print(f"[PREVIEW ERROR] Failed to generate/upload preview: {e}")
             import traceback
             traceback.print_exc()
             preview_path = None
+            stl_error = str(e)
 
         # Cleanup local temp files
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -889,6 +920,162 @@ def register_routes(app):
             "status": "uploaded",
             "preview_ready": preview_path is not None
         })
+
+    @app.route('/api/vendor/upload', methods=['POST'])
+    def vendor_upload():
+        """
+        SimOps/vendor upload: no JWT. Accepts 'file' or 'files'.
+        Returns saved_as, url, preview_url, stl_generation_error for frontend compatibility.
+        """
+        file, err = _get_upload_file()
+        if err:
+            return err[0], err[1]
+        try:
+            user = _ensure_vendor_user()
+        except Exception as e:
+            print(f"[VENDOR UPLOAD] ensure vendor user: {e}")
+            return jsonify({"error": "Failed to initialize vendor user"}), 500
+
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext not in app.config['ALLOWED_EXTENSIONS']:
+            return jsonify({"error": "Invalid file type"}), 400
+
+        project_id = str(uuid.uuid4())
+        original_filename = file.filename
+        filename = secure_filename(file.filename) or f"file{file_ext}"
+        storage_filename = f"{project_id}_{filename}"
+
+        file.seek(0, 2)
+        file_size = file.tell()
+        file.seek(0)
+        import hashlib
+        file_content = file.read()
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        file.seek(0)
+
+        storage = get_storage()
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, filename)
+        with open(temp_path, 'wb') as f:
+            f.write(file_content)
+
+        try:
+            filepath = storage.save_local_file(
+                local_path=temp_path,
+                filename=storage_filename,
+                user_email=user.email,
+                file_type='uploads'
+            )
+            print(f"[VENDOR UPLOAD] File saved to: {filepath}")
+        except Exception as e:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"[VENDOR UPLOAD] Save failed: {e}")
+            return jsonify({"error": "Failed to save file"}), 500
+
+        preview_path = None
+        stl_error = None
+        try:
+            from compute_backend import get_compute_provider
+            mode = app.config.get('COMPUTE_MODE', 'LOCAL')
+            if app.config.get('USE_MODAL_COMPUTE', False):
+                mode = 'CLOUD'
+            provider = get_compute_provider(mode)
+            preview_input = temp_path
+            if mode == 'CLOUD' and filepath.startswith('s3://'):
+                preview_input = filepath
+            elif mode == 'CLOUD':
+                provider = get_compute_provider('LOCAL')
+            result = provider.generate_preview(preview_input)
+            if result.get('success') or result.get('status') == 'success':
+                if result.get('preview_path'):
+                    preview_path = result.get('preview_path')
+                elif "vertices" in result:
+                    preview_temp = os.path.join(temp_dir, f"{project_id}_preview.json")
+                    with open(preview_temp, 'w') as f:
+                        json.dump(result, f)
+                    preview_path = storage.save_local_file(
+                        local_path=preview_temp,
+                        filename=f"{project_id}_preview.json",
+                        user_email=user.email,
+                        file_type='uploads'
+                    )
+            else:
+                stl_error = str(result.get('error') or result.get('message') or 'Unknown')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            stl_error = str(e)
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        project = Project(
+            id=project_id,
+            user_id=user.id,
+            filename=filename,
+            original_filename=original_filename,
+            filepath=filepath,
+            preview_path=preview_path,
+            file_size=file_size,
+            file_hash=file_hash,
+            mime_type=file.content_type,
+            status='uploaded'
+        )
+        user.storage_used = (user.storage_used or 0) + file_size
+        try:
+            db.session.add(project)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            try:
+                storage.delete_file(filepath)
+                if preview_path:
+                    storage.delete_file(preview_path)
+            except Exception:
+                pass
+            return jsonify({"error": "Failed to create project"}), 500
+
+        url = f"/api/vendor/projects/{project_id}/file"
+        preview_url = f"/api/vendor/projects/{project_id}/preview" if preview_path else None
+        return jsonify({
+            "saved_as": storage_filename,
+            "url": url,
+            "preview_url": preview_url,
+            "stl_generation_error": stl_error,
+            "project_id": project_id,
+            "filename": filename,
+            "status": "uploaded",
+        })
+
+    @app.route('/api/vendor/projects/<project_id>/file', methods=['GET'])
+    def vendor_project_file(project_id: str):
+        """Serve uploaded CAD file for vendor projects. No JWT."""
+        user = User.query.filter_by(email="vendor@simops.local").first()
+        if not user:
+            return jsonify({"error": "Not found"}), 404
+        project = Project.query.get(project_id)
+        if not project or project.user_id != user.id:
+            return jsonify({"error": "Not found"}), 404
+        path = Path(project.filepath)
+        if not path.exists():
+            return jsonify({"error": "File not found"}), 404
+        return send_file(path, as_attachment=False, download_name=project.original_filename or project.filename)
+
+    @app.route('/api/vendor/projects/<project_id>/preview', methods=['GET'])
+    def vendor_project_preview(project_id: str):
+        """Serve preview JSON for vendor projects. No JWT."""
+        user = User.query.filter_by(email="vendor@simops.local").first()
+        if not user:
+            return jsonify({"error": "Not found"}), 404
+        project = Project.query.get(project_id)
+        if not project or project.user_id != user.id or not project.preview_path:
+            return jsonify({"error": "Not found"}), 404
+        try:
+            preview_bytes = get_storage().get_file(project.preview_path)
+            data = json.loads(preview_bytes)
+            return jsonify(data)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     @app.route('/api/projects/<project_id>/generate', methods=['POST'])
     @jwt_required()

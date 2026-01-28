@@ -208,51 +208,55 @@ function App() {
             throw new Error("Backend not ready yet. Please wait.")
         }
         setFile(selectedFile)
-        if (selectedFile) {
-            addLog(`Uploading ${selectedFile.name}...`, 'info')
-            setIsProcessing(true)
+        if (!selectedFile) return
 
+        addLog(`Uploading ${selectedFile.name}...`, 'info')
+        setIsProcessing(true)
+
+        try {
             const formData = new FormData()
             formData.append('files', selectedFile)
 
-            const res = await fetch('/api/upload', {
+            const res = await fetch('/api/vendor/upload', {
                 method: 'POST',
                 body: formData
             })
 
+            const data = await res.json().catch(() => ({}))
+
             if (!res.ok) {
-                setIsProcessing(false)
-                throw new Error(`Upload failed: ${res.statusText}`)
+                const msg = data.error || res.statusText || 'Upload failed'
+                addLog(`Upload failed: ${msg}`, 'error')
+                return
             }
 
-            const data = await res.json()
             if (data.error) {
-                setIsProcessing(false)
-                throw new Error(data.error)
+                addLog(`Upload failed: ${data.error}`, 'error')
+                return
             }
 
             if (data.saved_as) {
                 setUploadedFilename(data.saved_as)
-
-                // Log any STL generation errors for debugging
                 if (data.stl_generation_error) {
                     addLog(`Warning: Preview generation failed: ${data.stl_generation_error}`, 'error')
                 }
 
-                // Set preview URL (prioritize the generated preview over the raw file)
-                if (data.preview_url) {
-                    setPreviewUrl(`${data.preview_url}`)
+                const isMsh = selectedFile.name.toLowerCase().endsWith('.msh')
+                if (data.url && !isMsh) {
+                    setPreviewUrl(data.url)
                     addLog(`Loaded mesh: ${data.saved_as}`, 'success')
-                } else if (data.url && selectedFile.name.toLowerCase().endsWith('.msh')) {
-                    // Only use raw URL if it's already a viewable mesh format
-                    setPreviewUrl(`${data.url}`)
-                    addLog(`Loaded mesh: ${data.saved_as}`, 'success')
+                } else if (isMsh) {
+                    addLog(`Upload complete: ${data.saved_as} (no 3D preview for .msh)`, 'info')
                 } else {
                     addLog(`Upload complete: ${data.saved_as} (no preview available)`, 'info')
                 }
-
-                setIsProcessing(false)
+            } else {
+                addLog(`Upload complete but no saved_as in response.`, 'info')
             }
+        } catch (e) {
+            addLog(`Upload error: ${e.message || String(e)}`, 'error')
+        } finally {
+            setIsProcessing(false)
         }
     }
 

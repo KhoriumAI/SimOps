@@ -1,6 +1,18 @@
 # SimOps Online Installation Stack
+# Redis starts first and must be healthy. API starts after Redis, frontend after API.
 services:
-  # The API Service
+  redis:
+    image: redis:alpine
+    container_name: simops-redis-container
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - simops-net
+
   api:
     image: ghcr.io/khoriumai/simops-api:latest
     container_name: simops-api-container
@@ -10,26 +22,27 @@ services:
       - FLASK_ENV=production
       - REDIS_URL=redis://redis:6379/0
       - IS_DOCKER_CONTAINER=true
+      - USE_S3=false
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     networks:
       - simops-net
 
-  # The Frontend Service (Nginx serving React)
   frontend:
     image: ghcr.io/khoriumai/simops-frontend:latest
     container_name: simops-frontend-container
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     depends_on:
-      - api
-    networks:
-      - simops-net
-
-  # Redis for job management
-  redis:
-    image: redis:alpine
-    container_name: simops-redis-container
+      api:
+        condition: service_healthy
     networks:
       - simops-net
 
