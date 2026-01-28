@@ -59,10 +59,13 @@ class ErrorBoundary extends React.Component {
  */
 
 function EngineeringMesh({ url, wireframe, opacity, useMatcap }) {
-    // Determine loader based on extension or path (e.g. /api/job/.../vtk has no .vtk suffix)
+    // Determine loader: .stl vs .vtk (or API paths that serve VTK)
     const isStl = url?.toLowerCase().endsWith('.stl')
     const isVtk = url?.toLowerCase().endsWith('.vtk') || url?.toLowerCase().endsWith('.vtu') ||
-        (typeof url === 'string' && (url.endsWith('/vtk') || url.includes('/vtk')))
+        (typeof url === 'string' && (
+            url.endsWith('/vtk') || url.includes('/vtk') ||
+            (url.includes('/api/vendor/projects/') && url.endsWith('/preview'))
+        ))
     const isMsh = url?.toLowerCase().endsWith('.msh')
 
     // Safety Check: If not a supported mesh format, don't attempt to load
