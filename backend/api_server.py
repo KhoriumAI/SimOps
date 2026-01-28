@@ -976,17 +976,20 @@ def register_routes(app):
         preview_path = None
         stl_error = None
         try:
-            if file_ext == '.msh' and meshio is not None:
-                vtk_temp = os.path.join(temp_dir, f"{project_id}_preview.vtk")
-                mesh = meshio.read(temp_path)
-                mesh.write(vtk_temp, file_format="vtk")
-                preview_path = storage.save_local_file(
-                    local_path=vtk_temp,
-                    filename=f"{project_id}_preview.vtk",
-                    user_email=user.email,
-                    file_type='uploads'
-                )
-                print(f"[VENDOR UPLOAD] MSH -> VTK preview: {preview_path}")
+            if file_ext == '.msh':
+                if meshio is not None:
+                    vtk_temp = os.path.join(temp_dir, f"{project_id}_preview.vtk")
+                    mesh = meshio.read(temp_path)
+                    mesh.write(vtk_temp, file_format="vtk")
+                    preview_path = storage.save_local_file(
+                        local_path=vtk_temp,
+                        filename=f"{project_id}_preview.vtk",
+                        user_email=user.email,
+                        file_type='uploads'
+                    )
+                    print(f"[VENDOR UPLOAD] MSH -> VTK preview: {preview_path}")
+                else:
+                    stl_error = "meshio not installed; cannot generate .msh preview (install meshio)"
             else:
                 from compute_backend import get_compute_provider
                 mode = app.config.get('COMPUTE_MODE', 'LOCAL')
@@ -1091,6 +1094,106 @@ def register_routes(app):
             return jsonify(data)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    # ----- SimOps /api/simulate + /api/job (vendor thermal solve) -----
+    _sim_jobs = {}
+    _sim_jobs_lock = Lock()
+
+    def _resolve_vendor_msh_path(saved_as: str):
+        """Resolve saved_as (e.g. uuid_Loft_mesh.msh) to local file path. Vendor projects only."""
+        vendor = User.query.filter_by(email="vendor@simops.local").first()
+        if not vendor:
+            return None
+        for p in Project.query.filter_by(user_id=vendor.id).order_by(Project.created_at.desc()).limit(500):
+            if not p.filepath:
+                continue
+            base = Path(p.filepath).name
+            if base == saved_as or p.filepath.endswith(saved_as):
+                path = Path(p.filepath)
+                if path.exists():
+                    return str(path)
+        return None
+
+    def _run_sim_task(job_id: str, msh_path: str, config: dict, output_dir: Path):
+        try:
+            from headless_solver import run_headless_solve
+            out = run_headless_solve(msh_path, str(output_dir), config)
+            vtk_path = out.get("vtk_path")
+            with _sim_jobs_lock:
+                _sim_jobs[job_id] = {
+                    "status": "success",
+                    "results": {
+                        "vtk_url": f"/api/job/{job_id}/vtk",
+                        "min_temp": out["min_temp"],
+                        "max_temp": out["max_temp"],
+                        "max_temperature_C": out["max_temp"] - 273.15,
+                        "min_temperature_C": out["min_temp"] - 273.15,
+                        "num_elements": out["num_elements"],
+                        "converged": True,
+                        "iterations_run": getattr(out, "iterations", None),
+                    },
+                    "vtk_path": vtk_path,
+                    "error": None,
+                }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            with _sim_jobs_lock:
+                _sim_jobs[job_id] = {"status": "failed", "results": None, "error": str(e), "vtk_path": None}
+
+    @app.route('/api/simulate', methods=['POST'])
+    def api_simulate():
+        """SimOps thermal solve. Accepts { filename, config }. Returns { status: 'started', job_id }."""
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        config = data.get("config") or {}
+        if not filename:
+            return jsonify({"error": "filename required"}), 400
+        path = _resolve_vendor_msh_path(filename)
+        if not path:
+            return jsonify({"error": f"file not found: {filename}"}), 404
+        job_id = str(uuid.uuid4())
+        out_base = app.config.get("OUTPUT_FOLDER") or (Path(__file__).parent / "outputs")
+        output_dir = Path(out_base) / "sim"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with _sim_jobs_lock:
+            _sim_jobs[job_id] = {"status": "running", "results": None, "error": None, "vtk_path": None}
+        t = Thread(target=_run_sim_task, args=(job_id, path, config, output_dir))
+        t.daemon = True
+        t.start()
+        return jsonify({"status": "started", "job_id": job_id})
+
+    @app.route('/api/job/<job_id>', methods=['GET'])
+    def api_job_status(job_id: str):
+        """Poll job status. Returns { status: 'running'|'success'|'failed', results?, error? }."""
+        with _sim_jobs_lock:
+            job = _sim_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "job not found"}), 404
+        st = job["status"]
+        out = {"status": st}
+        if st == "success" and job.get("results"):
+            out["results"] = job["results"]
+        if job.get("error"):
+            out["error"] = job["error"]
+        return jsonify(out)
+
+    @app.route('/api/job/<job_id>/vtk', methods=['GET'])
+    def api_job_vtk(job_id: str):
+        """Serve VTK result for SimOps viewer."""
+        with _sim_jobs_lock:
+            job = _sim_jobs.get(job_id)
+        if not job or job["status"] != "success":
+            return jsonify({"error": "job not found or not ready"}), 404
+        vtk_path = job.get("vtk_path")
+        if not vtk_path or not Path(vtk_path).exists():
+            return jsonify({"error": "vtk not found"}), 404
+        return send_file(vtk_path, as_attachment=False, download_name=f"{job_id}.vtk")
+
+    @app.route('/api/cancel', methods=['POST'])
+    def api_cancel():
+        """SimOps cancel. Optional JSON { job_id }. No-op for now (job runs to completion)."""
+        return jsonify({"status": "cancelled"})
 
     @app.route('/api/projects/<project_id>/generate', methods=['POST'])
     @jwt_required()
@@ -2990,12 +3093,13 @@ if __name__ == '__main__':
     print("WebSocket endpoint: ws://localhost:5000")
     print("=" * 70)
 
+    port = int(os.environ.get("PORT", 5000))
     # Use SocketIO's run method if available, otherwise fall back to Flask's run
     if hasattr(app, 'socketio') and app.socketio:
         try:
-            app.socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+            app.socketio.run(app, host='0.0.0.0', port=port, debug=True, allow_unsafe_werkzeug=True)
         except Exception as e:
             print(f"[WARNING] SocketIO run failed: {e}, falling back to Flask run")
-            app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+            app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
     else:
-        app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+        app.run(host='0.0.0.0', port=port, debug=True, threaded=True)

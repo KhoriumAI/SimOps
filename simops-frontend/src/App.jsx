@@ -425,11 +425,6 @@ function App() {
                 }
             }
 
-            // Note about VTK viewer limitation with builtin solver
-            if (!openfoamAvailable && results.vtk_url) {
-                addLog(`   Note: 3D viewer not supported for builtin solver results`, 'info')
-                addLog(`   (Use PDF report for visualization)`, 'info')
-            }
         } catch (e) {
             if (e?.name === 'AbortError') {
                 addLog(stopRequestedRef.current ? 'Simulation stopped by user.' : 'Simulation cancelled.', 'info')
@@ -796,7 +791,7 @@ function App() {
                             filename={file?.name}
                             isLoading={isProcessing}
                             loadingMessage={statusMessage}
-                            meshUrl={simResults?.vtk_url && openfoamAvailable ? `${simResults.vtk_url}` : null}
+                            meshUrl={simResults?.vtk_url ? `${simResults.vtk_url}` : null}
                             previewUrl={previewUrl}
                             consoleHeight={consoleHeight}
                             consoleOpen={consoleOpen}

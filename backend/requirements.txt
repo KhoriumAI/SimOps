@@ -54,6 +54,7 @@ gunicorn>=21.0.0
 # Mesh Processing (shared with main app)
 # ===================
 gmsh>=4.11.0
+meshio>=5.3.4          # .msh -> .vtk preview (headless); no X11/gmsh
 numpy>=1.24.0
 scipy>=1.10.0
 trimesh>=3.20.0
