@@ -21,26 +21,52 @@ Go to your GitHub Repository -> **Actions** tab to see the build progress. Once 
 ## 2. For Users (How to Install)
 
 ### Prerequisites
-- Docker Desktop installed and running.
-- A GitHub account and Personal Access Token (PAT).
+- **Docker Desktop** installed and running.
+- **Python 3.8+** (used by the installer; [python.org](https://www.python.org/downloads/) or `brew install python` on Mac).
+- A **GitHub account** and **Personal Access Token (PAT)** (for pulling images from GHCR).
 
 ### Generating a PAT
-1. Go to GitHub Settings -> Developer settings -> Personal access tokens -> Tokens (classic).
-2. Generate new token.
-3. Select scope: `read:packages`.
+1. Go to GitHub **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
+2. Generate a new token.
+3. Select scope: **`read:packages`**.
 4. Save the token.
 
 ### Installation
+
 1. Download the distribution files (or clone the repo):
    - `docker-compose-online.yml`
-   - `scripts/install_online.bat`
-2. Double-click `scripts/install_online.bat`.
-3. When prompted, enter your GitHub Username and the PAT you generated.
+   - `install_online.py` (required)
+   - **Windows:** `install_online.bat`
+   - **Mac / Linux:** `install_online.sh`
+
+2. Run the installer:
+   - **Windows:** Double‑click `install_online.bat`, or run `install_online.bat` from a terminal.
+   - **Mac / Linux:** In a terminal, from the project directory:
+     ```bash
+     chmod +x install_online.sh
+     ./install_online.sh
+     ```
+   - **Any OS:** Run `python install_online.py` (or `python3 install_online.py`) from the project directory.
+
+3. When prompted:
+   - **Pull/refresh images?** Choose **Y** (default) to get the latest SimOps frontend from the registry, or **n** to use local images.
+   - If you choose to pull, enter your **GitHub username** and **PAT** with `read:packages` scope when prompted.
+
+### OpenFOAM (optional)
+
+The installer checks for **OpenFOAM**. SimOps works without it (built‑in solver only). OpenFOAM enables advanced CFD and hex meshing.
+
+- If OpenFOAM is **not** detected, the installer will ask: **Install OpenFOAM? [y/N]**
+  - **No (default):** Skip; continue with SimOps only.
+  - **Yes:** The installer will attempt to install OpenFOAM:
+    - **Mac:** `brew install openfoam` (requires [Homebrew](https://brew.sh)). You may need to add `source $(brew --prefix openfoam)/etc/bashrc` to your shell profile.
+    - **Linux:** Adds the OpenFOAM repo and installs `openfoam2406-default` via `apt` (Debian/Ubuntu).
+    - **Windows:** Prints step‑by‑step instructions for installing OpenFOAM inside **WSL2** (Ubuntu).
 
 ### Updates
 The system includes **Watchtower**.
 - It checks for updates every hour.
-- If the Developer pushes a new image to `main`, your instance will automatically download it and restart within an hour.
+- If the developer pushes a new image to `main`, your instance will automatically download it and restart within an hour.
 - No manual action required.
 
 ---
@@ -48,5 +74,5 @@ The system includes **Watchtower**.
 ## 3. Testing Locally
 To test the "Online" mode on your dev machine:
 1. Push your latest changes to GitHub.
-2. Wait for Action to complete.
-3. Run `scripts/install_online.bat` in a **new folder** (copy the script and yaml there) to simulate a fresh client install.
+2. Wait for the Action to complete.
+3. Run `install_online.bat` (Windows) or `./install_online.sh` (Mac/Linux) in a **new folder** (copy the script, `install_online.py`, and `docker-compose-online.yml` there) to simulate a fresh client install.

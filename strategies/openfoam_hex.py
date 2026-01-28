@@ -903,15 +903,10 @@ def generate_openfoam_hex_mesh(
         enclosure_config: Optional enclosure configuration from EnclosureGenerator
     """
     if verbose:
-<<<<<<< HEAD
-        print(f"[OpenFOAM] Generating hex mesh for: {stl_path}")
-        print(f"[OpenFOAM] Target cell size: {cell_size} mm")
-        if enclosure_config:
-            print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}")
-=======
         print(f"[OpenFOAM] Generating hex mesh for: {stl_path}", flush=True)
         print(f"[OpenFOAM] Target cell size: {cell_size} mm", flush=True)
->>>>>>> origin/main
+        if enclosure_config:
+            print(f"[OpenFOAM] Using enclosure: {enclosure_config.get('type', 'custom')}", flush=True)
     
     # 0. CHECK CLOUD COMPUTE
     # If configured to use Modal, bypass local WSL entirely

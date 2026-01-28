@@ -1,6 +1,4 @@
 # SimOps Online Installation Stack
-version: '3.8'
-
 services:
   # The API Service
   api:
