@@ -115,6 +115,26 @@ def main(api_url: str | None = None) -> int:
         log(f"Preview URL: {preview_url}")
     else:
         log("No preview_url (optional)")
+    # .msh must have preview (meshio path); otherwise we fall back to gmsh and fail in Docker
+    if mesh_path.suffix.lower() == ".msh" and not preview_url:
+        err = data.get("stl_generation_error") or "unknown"
+        log(f"FAIL: .msh upload must return preview_url (meshio). Got: {err}")
+        return 1
+
+    # 2b. Viewer check: preview URL must serve VTK for .msh
+    if mesh_path.suffix.lower() == ".msh" and preview_url:
+        full_preview = f"{url}{preview_url}" if preview_url.startswith("/") else preview_url
+        try:
+            r = requests.get(full_preview, timeout=15)
+            r.raise_for_status()
+            buf = r.text[:300]
+            if "# vtk DataFile" not in buf and "vertices" not in buf.lower():
+                log(f"FAIL: preview URL did not return VTK/JSON: {buf[:200]}")
+                return 1
+            log("Preview fetch OK (viewer can load)")
+        except Exception as e:
+            log(f"FAIL: preview fetch: {e}")
+            return 1
 
     # 3. Simulate (builtin)
     config = {

@@ -37,16 +37,15 @@ jobs:
       # --- BUILD AND PUSH SERVICES ---
 
 
-      # Backend API Service
+      # Backend API Service (no-cache so vendor .msh->meshio + meshio deps always included)
       - name: Build and push API
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.api
           push: true
+          no-cache: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # Frontend Web Service
       - name: Build and push Frontend

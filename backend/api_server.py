@@ -987,10 +987,11 @@ def register_routes(app):
                         user_email=user.email,
                         file_type='uploads'
                     )
-                    print(f"[VENDOR UPLOAD] MSH -> VTK preview: {preview_path}")
+                    print(f"[VENDOR UPLOAD] .msh -> meshio VTK (no gmsh): {preview_path}")
                 else:
                     stl_error = "meshio not installed; cannot generate .msh preview (install meshio)"
             else:
+                assert file_ext != '.msh', "BUG: .msh must use meshio path (no gmsh)"
                 from compute_backend import get_compute_provider
                 mode = app.config.get('COMPUTE_MODE', 'LOCAL')
                 if app.config.get('USE_MODAL_COMPUTE', False):
