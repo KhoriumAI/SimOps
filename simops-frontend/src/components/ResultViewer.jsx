@@ -58,6 +58,14 @@ class ErrorBoundary extends React.Component {
  * - Gradient Background via CSS
  */
 
+function absoluteMeshUrl(u) {
+    if (!u || typeof u !== 'string') return u
+    if (/^https?:\/\//.test(u)) return u
+    if (typeof window === 'undefined') return u
+    const origin = window.location.origin
+    return u.startsWith('/') ? origin + u : origin + '/' + u.replace(/^\//, '')
+}
+
 function EngineeringMesh({ url, wireframe, opacity, useMatcap }) {
     // Determine loader: .stl vs .vtk (or API paths that serve VTK)
     const isStl = url?.toLowerCase().endsWith('.stl')
@@ -78,10 +86,13 @@ function EngineeringMesh({ url, wireframe, opacity, useMatcap }) {
         return null
     }
 
+    // Use absolute URL so loaders (VTKLoader/STLLoader) fetch reliably (avoid relative-URL issues)
+    const loadUrl = absoluteMeshUrl(url)
+
     // Determine loader: .stl uses STLLoader, .vtk/.vtu uses VTKLoader
     const Loader = isStl ? STLLoader : VTKLoader
 
-    const geometry = useLoader(Loader, url)
+    const geometry = useLoader(Loader, loadUrl)
 
     // Colormap state
     const [stats, setStats] = useState({ min: 0, max: 0, hasTemp: false })

@@ -57,6 +57,7 @@ gmsh>=4.11.0
 meshio>=5.3.4          # .msh -> .vtk preview (headless); no X11/gmsh
 numpy>=1.24.0
 scipy>=1.10.0
+matplotlib>=3.7.0      # Report generation with cross-sections
 trimesh>=3.20.0
 scikit-image>=0.21.0
 coacd>=1.0.0

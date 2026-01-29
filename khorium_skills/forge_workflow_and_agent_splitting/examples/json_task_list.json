@@ -1,0 +1,23 @@
+[
+    {
+        "Task ID": "TASK_00_SHARED",
+        "Objective": "Implement shared logging and configuration utilities.",
+        "Prompt File": "AI_Agent_Projects/Example_Project/prompts/#0_TASK_00_SHARED.md",
+        "File Path": "AI_Agent_Projects/Example_Project/task_00_shared/",
+        "Mocking Requirements": "None"
+    },
+    {
+        "Task ID": "TASK_01_DATA_LOADER",
+        "Objective": "Implement the CAD file parser for STEP and STL formats.",
+        "Prompt File": "AI_Agent_Projects/Example_Project/prompts/#1_TASK_01_DATA_LOADER.md",
+        "File Path": "AI_Agent_Projects/Example_Project/task_01_data_loader/",
+        "Mocking Requirements": "Mock Logger from TASK_00."
+    },
+    {
+        "Task ID": "TASK_02_GEOMETRY_CHECK",
+        "Objective": "Validate geometric integrity of the loaded CAD data.",
+        "Prompt File": "AI_Agent_Projects/Example_Project/prompts/#2_TASK_02_GEOMETRY_CHECK.md",
+        "File Path": "AI_Agent_Projects/Example_Project/task_02_geometry_check/",
+        "Mocking Requirements": "Mock CADData from TASK_01."
+    }
+]

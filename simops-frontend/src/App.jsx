@@ -839,12 +839,13 @@ function App() {
                             {simResults?.report_url && (
                                 <div className="text-blue-400 mt-2">
                                     {'   '} <a
-                                        href={`${simResults.report_url}`}
+                                        href={typeof window !== 'undefined' && simResults.report_url.startsWith('/')
+                                            ? window.location.origin + simResults.report_url
+                                            : simResults.report_url}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="hover:underline underline-offset-4 decoration-blue-400/30"
                                         onClick={(e) => {
-                                            // Ensure it opens in new tab
                                             e.preventDefault()
                                             window.open(e.currentTarget.href, '_blank', 'noopener,noreferrer')
                                         }}

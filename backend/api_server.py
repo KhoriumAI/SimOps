@@ -1115,27 +1115,104 @@ def register_routes(app):
                     return str(path)
         return None
 
-    def _write_sim_report(path: Path, out: dict, mesh_name: str, config: dict) -> None:
-        t_min = out.get("min_temp", 0)
-        t_max = out.get("max_temp", 0)
-        n = out.get("num_elements", 0)
-        hot = config.get("heat_source_temperature", 373.15)
-        amb = config.get("ambient_temperature", 293.15)
+    def _write_sim_report(path: Path, out: dict, mesh_name: str, config: dict, png_path: str = None) -> None:
+        import numpy as np
+
+        t_min = float(out.get("min_temp", 0))
+        t_max = float(out.get("max_temp", 0))
+        n = int(out.get("num_elements", 0))
+        solve_time = float(out.get("solve_time", 0))
+        hot = float(config.get("heat_source_temperature", 373.15))
+        amb = float(config.get("ambient_temperature", 293.15))
+        t_min_c = t_min - 273.15
+        t_max_c = t_max - 273.15
+        hot_c = hot - 273.15
+        amb_c = amb - 273.15
+        delta = t_max - t_min
+
+        # Temperature histogram (SVG)
+        hist_svg = ""
+        temp_arr = out.get("temperature")
+        if temp_arr is not None:
+            try:
+                T = np.asarray(temp_arr, dtype=np.float64).ravel()
+                n_bins = 24
+                counts, edges = np.histogram(T, bins=n_bins, range=(t_min, t_max))
+                cmax = float(np.max(counts)) or 1.0
+                w = 320
+                h = 140
+                bars = []
+                for i in range(n_bins):
+                    x = 40 + (i / n_bins) * (w - 50)
+                    bw = max(2, (w - 50) / n_bins - 2)
+                    bh = max(1, (counts[i] / cmax) * (h - 30))
+                    y = h - 20 - bh
+                    bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="#0d6efd" opacity="0.85"/>')
+                hist_svg = f"""
+<section class="report-section">
+<h2>Temperature distribution</h2>
+<svg width="{w}" height="{h}" class="histogram">
+  <text x="20" y="{h - 5}" class="axis-label">°C</text>
+  <line x1="40" y1="{h - 20}" x2="{w - 10}" y2="{h - 20}" stroke="#ccc" stroke-width="1"/>
+  <line x1="40" y1="20" x2="40" y2="{h - 20}" stroke="#ccc" stroke-width="1"/>
+  {''.join(bars)}
+  <text x="40" y="{h - 2}" class="tick">{t_min_c:.0f}</text>
+  <text x="{w - 24}" y="{h - 2}" class="tick">{t_max_c:.0f}</text>
+</svg>
+</section>"""
+            except Exception:
+                pass
+
+        # Include PNG visualization if available
+        png_img = ""
+        if png_path and Path(png_path).exists():
+            # Convert to base64 for embedding
+            import base64
+            try:
+                with open(png_path, 'rb') as f:
+                    img_data = base64.b64encode(f.read()).decode('utf-8')
+                png_img = f"""
+<section class="report-section">
+<h2>Temperature cross-sections</h2>
+<img src="data:image/png;base64,{img_data}" alt="Temperature Cross-Sections" style="max-width: 100%; height: auto; border: 1px solid #dee2e6; border-radius: 4px;"/>
+</section>"""
+            except Exception:
+                pass
+
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>SimOps Thermal Report</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem}}
-h1{{font-size:1.25rem}} table{{border-collapse:collapse;width:100%}}
-th,td{{text-align:left;padding:0.4rem;border-bottom:1px solid #eee}}
-th{{color:#666}}</style></head><body>
-<h1>SimOps Thermal Report</h1>
-<p><strong>Mesh:</strong> {mesh_name}</p>
+<style>
+  :root {{ --primary: #0d6efd; --secondary: #6c757d; --light: #f8f9fa; }}
+  body {{ font-family: system-ui, sans-serif; max-width: 1200px; margin: 2rem auto; padding: 0 1.5rem; color: #212529; }}
+  h1 {{ font-size: 1.5rem; color: var(--primary); margin-bottom: 0.5rem; }}
+  h2 {{ font-size: 1rem; color: var(--secondary); margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #dee2e6; padding-bottom: 0.25rem; }}
+  .meta {{ color: var(--secondary); font-size: 0.9rem; margin-bottom: 1.25rem; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #dee2e6; }}
+  th {{ color: var(--secondary); font-weight: 600; width: 40%; }}
+  tr:nth-child(even) {{ background: var(--light); }}
+  .report-section {{ margin-top: 1rem; }}
+  .histogram {{ display: block; margin: 0.5rem 0; }}
+  .axis-label, .tick {{ font-size: 10px; fill: var(--secondary); }}
+  .footer {{ margin-top: 2rem; font-size: 0.8rem; color: var(--secondary); }}
+</style></head><body>
+<h1>SimOps Thermal Analysis</h1>
+<p class="meta"><strong>Job:</strong> {mesh_name}</p>
+<section class="report-section">
+<h2>Simulation statistics</h2>
 <table>
-<tr><th>Min temperature</th><td>{t_min - 273.15:.1f} °C</td></tr>
-<tr><th>Max temperature</th><td>{t_max - 273.15:.1f} °C</td></tr>
+<tr><th>Min temperature</th><td>{t_min_c:.1f} °C</td></tr>
+<tr><th>Max temperature</th><td>{t_max_c:.1f} °C</td></tr>
+<tr><th>Range (ΔT)</th><td>{delta:.1f} K</td></tr>
 <tr><th>Elements</th><td>{n:,}</td></tr>
-<tr><th>Heat source</th><td>{hot - 273.15:.1f} °C</td></tr>
-<tr><th>Ambient</th><td>{amb - 273.15:.1f} °C</td></tr>
+<tr><th>Solve time</th><td>{solve_time:.2f} s</td></tr>
+<tr><th>Heat source</th><td>{hot_c:.1f} °C</td></tr>
+<tr><th>Ambient</th><td>{amb_c:.1f} °C</td></tr>
 </table>
+</section>
+{png_img}
+{hist_svg}
+<div class="footer">Generated by SimOps · View 3D result and temperature colormap in the main app.</div>
 </body></html>"""
         path.write_text(html, encoding="utf-8")
 
@@ -1144,24 +1221,79 @@ th{{color:#666}}</style></head><body>
             from headless_solver import run_headless_solve
             out = run_headless_solve(msh_path, str(output_dir), config)
             vtk_path = out.get("vtk_path")
+            
+            # Use existing report generator infrastructure
+            png_path = None
+            pdf_path = None
+            try:
+                # Import the existing report generator
+                from core.report_generator import SimOpsReportGenerator
+                
+                # Prepare results dict in the format expected by SimOpsReportGenerator
+                results_dict = {
+                    'node_coords': out.get("node_coords"),
+                    'temperature': out.get("temperature"),
+                    'elements': out.get("elements", []),
+                    'min_temp': out.get("min_temp", 0),
+                    'max_temp': out.get("max_temp", 0),
+                    'num_elements': out.get("num_elements", 0),
+                    'solve_time': out.get("solve_time", 0),
+                    'strategy_name': 'Headless Solver'
+                }
+                
+                # Initialize report generator
+                job_name = Path(msh_path).stem
+                report_gen = SimOpsReportGenerator(job_name, output_dir, results_dict)
+                
+                # Generate enhanced plots (PNG with cross-sections)
+                png_files = report_gen.generate_enhanced_plots()
+                png_path = png_files.get('summary')
+                
+                # Generate PDF report
+                try:
+                    pdf_path = report_gen.generate_pdf_report()
+                except Exception as pdf_err:
+                    print(f"[WARNING] PDF generation failed: {pdf_err}")
+                    import traceback
+                    traceback.print_exc()
+                    
+            except ImportError as e:
+                print(f"[WARNING] Could not import SimOpsReportGenerator: {e}")
+                print("[INFO] Falling back to basic report generation")
+                png_path = None
+            except Exception as e:
+                import traceback
+                print(f"[WARNING] Failed to generate enhanced reports: {e}")
+                traceback.print_exc()
+                png_path = None
+            
             report_path = Path(output_dir) / f"{job_id}_report.html"
-            _write_sim_report(report_path, out, Path(msh_path).name, config)
+            _write_sim_report(report_path, out, Path(msh_path).name, config, png_path)
+            
+            # Build results dict with optional PDF URL
+            results_dict = {
+                "vtk_url": f"/api/job/{job_id}/vtk",
+                "report_url": f"/api/job/{job_id}/report",
+                "min_temp": out["min_temp"],
+                "max_temp": out["max_temp"],
+                "max_temperature_C": out["max_temp"] - 273.15,
+                "min_temperature_C": out["min_temp"] - 273.15,
+                "num_elements": out["num_elements"],
+                "converged": True,
+                "iterations_run": getattr(out, "iterations", None),
+            }
+            
+            # Add PDF URL if PDF was generated
+            if pdf_path and Path(pdf_path).exists():
+                results_dict["pdf_url"] = f"/api/job/{job_id}/pdf"
+            
             with _sim_jobs_lock:
                 _sim_jobs[job_id] = {
                     "status": "success",
-                    "results": {
-                        "vtk_url": f"/api/job/{job_id}/vtk",
-                        "report_url": f"/api/job/{job_id}/report",
-                        "min_temp": out["min_temp"],
-                        "max_temp": out["max_temp"],
-                        "max_temperature_C": out["max_temp"] - 273.15,
-                        "min_temperature_C": out["min_temp"] - 273.15,
-                        "num_elements": out["num_elements"],
-                        "converged": True,
-                        "iterations_run": getattr(out, "iterations", None),
-                    },
+                    "results": results_dict,
                     "vtk_path": vtk_path,
                     "report_path": str(report_path),
+                    "pdf_path": str(pdf_path) if pdf_path else None,
                     "error": None,
                 }
         except Exception as e:
@@ -1230,6 +1362,18 @@ th{{color:#666}}</style></head><body>
         if not report_path or not Path(report_path).exists():
             return jsonify({"error": "report not found"}), 404
         return send_file(report_path, as_attachment=False, download_name=f"SimOps_Report_{job_id}.html", mimetype="text/html")
+
+    @app.route('/api/job/<job_id>/pdf', methods=['GET'])
+    def api_job_pdf(job_id: str):
+        """Serve PDF report for SimOps (opens in new tab / download)."""
+        with _sim_jobs_lock:
+            job = _sim_jobs.get(job_id)
+        if not job or job["status"] != "success":
+            return jsonify({"error": "job not found or not ready"}), 404
+        pdf_path = job.get("pdf_path")
+        if not pdf_path or not Path(pdf_path).exists():
+            return jsonify({"error": "pdf not found"}), 404
+        return send_file(pdf_path, as_attachment=False, download_name=f"SimOps_Report_{job_id}.pdf", mimetype="application/pdf")
 
     @app.route('/api/cancel', methods=['POST'])
     def api_cancel():
