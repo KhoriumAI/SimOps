@@ -912,8 +912,12 @@ class BaseMeshGenerator(ABC):
         self.log_message("Analyzing mesh quality...")
         start_time = time.time()
 
+<<<<<<< Updated upstream
         metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True)
         
+=======
+        metrics = self.quality_analyzer.analyze_mesh(include_advanced_metrics=True, include_cfd_metrics=True)
+>>>>>>> Stashed changes
         duration = time.time() - start_time
         self.log_message(f"[OK] Quality analysis completed in {duration:.3f}s")
 

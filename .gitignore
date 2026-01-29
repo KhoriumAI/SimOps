@@ -22,10 +22,59 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+.hypothesis/
 
 # Virtual environments
 .venv
 meshing/
+
+# Node.js / npm / yarn
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+.npm
+.eslintcache
+.node_repl_history
+*.tgz
+.yarn-integrity
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build outputs
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+.vite/
+.turbo/
+dist/
+build/
+*.tsbuildinfo
 
 # IDE
 .vscode/
@@ -33,27 +82,65 @@ meshing/
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
 
 # OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
 
 # Generated files
 generated_meshes/
 output/
+outputs/
+simops_output/
+thermal_runs/
+thermal_runs_real/
+output_sweep/
+uploads/
+backend/outputs/
+backend/uploads/
 *.msh
 *.stl
 *.vtk
 *.vtu
 *.quality.json
 *_exhaustive_report.txt
+*.inp
+*.12d
+*.png
+*.pdf
+*.jsonl
 
-# Logs
-*.log
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+backend/instance/mesh_app.db
+backend/instance/*.db
 
 # Temporary files
 temp_*
 *.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Project-specific
+.simops/
+_forge/
+ExampleOF_Cases/
+desktop-app/
+verification_runs/
+verification_lab/
+scripts/
 
 # CAD files (optional - uncomment if you don't want to track them)
 # *.step
@@ -66,3 +153,20 @@ temp_*
 reproduce_*.py
 fix_*.py
 *_working.py
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Logs and diagnostics
+logs/
+*.log
+*.log.*
+backend/logs/

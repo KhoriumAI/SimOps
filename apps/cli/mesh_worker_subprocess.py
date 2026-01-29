@@ -13,6 +13,7 @@ import sys
 import shutil
 import os
 import json
+import copy
 from pathlib import Path
 from typing import Dict
 import time
@@ -1140,9 +1141,22 @@ if __name__ == "__main__":
     result = generate_mesh(cad_file, output_dir, quality_params)
 
     # AIRLOCK: Wrap result in contract type (non-breaking, still outputs same JSON)
+<<<<<<< Updated upstream
+=======
+    # Remove heavy per-element arrays from stdout output before serializing
+    sanitized_result = copy.deepcopy(result)
+    keys_to_remove = ['per_element_quality', 'per_element_gamma', 'per_element_skewness', 'per_element_aspect_ratio', 'per_element_min_angle']
+    for key in keys_to_remove:
+        if key in sanitized_result:
+            del sanitized_result[key]
+>>>>>>> Stashed changes
     try:
-        response = MeshJobResponse.from_dict(result)
-        print(response.to_json())
+        response = MeshJobResponse.from_dict(sanitized_result)
+        print(response.to_json(), flush=True)
     except Exception:
+<<<<<<< Updated upstream
         # Fallback to raw dict if contract parsing fails
         print(json.dumps(result))
+=======
+        print(json.dumps(sanitized_result), flush=True)
+>>>>>>> Stashed changes

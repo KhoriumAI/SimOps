@@ -3993,12 +3993,126 @@ except Exception as e:
             # Store filepath for update_info_label method
             self.current_mesh_file = filepath
             
+<<<<<<< Updated upstream
             if filepath.lower().endswith('.vtu'):
                 print(f"[DEBUG] Detected VTU file, using standard VTK reader...", flush=True)
                 reader = vtk.vtkXMLUnstructuredGridReader()
                 reader.SetFileName(filepath)
                 reader.Update()
                 self.current_poly_data = reader.GetOutput()
+=======
+            # Detect file type
+            file_ext = Path(filepath).suffix.lower()
+            
+            # Handle STL/VTU files differently - they are surface meshes, not volumetric
+            if file_ext in ['.stl', '.vtu', '.vtk', '.ply', '.obj']:
+                return self._load_surface_mesh_file(filepath, file_ext)
+            
+            print(f"[DEBUG] Parsing .msh file...")
+            nodes, elements, physical_groups = self._parse_msh_file(filepath)
+            self.current_physical_groups = physical_groups  # Store for zone selection
+            print(f"[DEBUG] Parsed {len(nodes)} nodes, {len(elements)} elements, {len(physical_groups)} physical groups")
+            # Load boxed parts metadata if available
+            boxed_json_path = filepath.replace(".msh", "_boxed.json")
+            self.boxed_physical_tags = []
+            if Path(boxed_json_path).exists():
+                try:
+                    import json
+                    with open(boxed_json_path, 'r') as f:
+                        boxed_data = json.load(f)
+                    self.boxed_physical_tags = boxed_data.get("boxed_physical_tags", [])
+                    print(f"[DEBUG] Loaded {len(self.boxed_physical_tags)} boxed physical tags")
+                    if self.boxed_physical_tags:
+                        self.boxed_highlight_checkbox.setVisible(True)
+                except Exception as e:
+                    print(f"[DEBUG] Could not load boxed parts data: {e}")
+            else:
+                self.boxed_highlight_checkbox.setVisible(False)
+
+            # Try to load surface quality data if not provided
+            if not (result and result.get('per_element_quality')):
+                quality_file = Path(filepath).with_suffix('.quality.json')
+                print(f"[DEBUG] Checking for quality file: {quality_file}")
+                if quality_file.exists():
+                    print(f"[DEBUG] Loading surface quality data from {quality_file}")
+                    try:
+                        import json
+                        with open(quality_file, 'r') as f:
+                            surface_quality = json.load(f)
+
+                        if not result:
+                            result = {}
+                        result['per_element_quality'] = surface_quality.get('per_element_quality', {})
+                        
+                        # Store full quality data for visualization switching
+                        self.current_quality_data = surface_quality
+                        
+                        result['quality_metrics'] = {
+                            'sicn_10_percentile': surface_quality.get('quality_threshold_10', 0.3),
+                            'sicn_min': surface_quality.get('statistics', {}).get('min_quality', 0.0),
+                            'sicn_avg': surface_quality.get('statistics', {}).get('avg_quality', 0.5),
+                            'sicn_max': surface_quality.get('statistics', {}).get('max_quality', 1.0)
+                        }
+                        print(f"[DEBUG] [OK][OK]Loaded quality data for {len(result['per_element_quality'])} elements")
+                    except Exception as e:
+                        print(f"[DEBUG] [X][X]Could not load quality data: {e}")
+                else:
+                    # Compute quality from mesh file using Gmsh
+                    if len(elements) > 1000000:
+                        print(f"[DEBUG] Very large mesh ({len(elements)} elements) - skipping auto-quality to avoid long hang")
+                        self.log_requested.emit(f"Notice: Mesh too large ({len(elements)} elements) for automatic quality preview.")
+                    else:
+                        print(f"[DEBUG] Computing quality from mesh ({len(elements)} elements)...")
+                        quality_result = self._calculate_mesh_quality(filepath)
+                        if quality_result:
+                            if not result: result = {}
+                            result.update(quality_result)
+                            self.current_quality_data = quality_result
+            else:
+                print(f"[DEBUG] Quality data already in result dict")
+                self.current_quality_data = result
+
+            print(f"[DEBUG] Creating VTK data structures...")
+            points = vtk.vtkPoints()
+            cells = vtk.vtkCellArray()
+
+            node_map = {}
+            for idx, (node_id, coords) in enumerate(nodes.items()):
+                points.InsertNextPoint(coords)
+                node_map[node_id] = idx
+
+            print(f"[DEBUG] Added {points.GetNumberOfPoints()} points to VTK")
+
+            # Count elements for display
+            tet_count = sum(1 for e in elements if e['type'] == 'tetrahedron')
+            hex_count = sum(1 for e in elements if e['type'] == 'hexahedron')
+            tri_count = sum(1 for e in elements if e['type'] == 'triangle')
+            quad_count = sum(1 for e in elements if e['type'] == 'quadrilateral')
+
+            print(f"[DEBUG] Element counts: {tet_count} tets, {hex_count} hexes, {tri_count} triangles, {quad_count} quads")
+
+            # CRITICAL: Only visualize SURFACE TRIANGLES, not volume tetrahedra!
+            # Include quadrilateral surfaces for hex meshes.
+            
+            # Check if we have surface elements
+            has_surface_elements = (tri_count > 0 or quad_count > 0)
+            
+            if has_surface_elements:
+                print(f"[DEBUG] Found explicit surface elements ({tri_count} tris, {quad_count} quads)")
+                for element in elements:
+                    if element['type'] == 'triangle':
+                        tri = vtk.vtkTriangle()
+                        for i, node_id in enumerate(element['nodes']):
+                            tri.GetPointIds().SetId(i, node_map[node_id])
+                        cells.InsertNextCell(tri)
+                    elif element['type'] == 'quadrilateral':
+                        quad = vtk.vtkQuad()
+                        for i, node_id in enumerate(element['nodes']):
+                            quad.GetPointIds().SetId(i, node_map[node_id])
+                        cells.InsertNextCell(quad)
+            else:
+                print(f"[DEBUG] No explicit surface elements found. Extracting surface from volume...")
+>>>>>>> Stashed changes
                 
                 # Extract surface for rendering
                 surf_filter = vtk.vtkDataSetSurfaceFilter()
@@ -4343,7 +4457,7 @@ except Exception as e:
             lines = [l.strip() for l in f.readlines()]
 
         # Detect version
-        version = 4.1 
+        version = 4.1
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -4354,11 +4468,11 @@ except Exception as e:
                     if len(parts) >= 1:
                         try:
                             version = float(parts[0])
-                        except:
+                        except Exception:
                             pass
                 break
             i += 1
-            
+
         print(f"[MESH_LOADER DEBUG] Detected Gmsh version: {version}")
 
         i = 0
@@ -4368,17 +4482,18 @@ except Exception as e:
             # Parse $PhysicalNames section
             if line == "$PhysicalNames":
                 i += 1
-                if i >= len(lines): break
+                if i >= len(lines):
+                    break
                 try:
                     num_physical = int(lines[i])
                     i += 1
                     for _ in range(num_physical):
-                        if i >= len(lines): break
+                        if i >= len(lines):
+                            break
                         parts = lines[i].split()
                         if len(parts) >= 3:
                             dim = int(parts[0])
                             tag = int(parts[1])
-                            # Name is in quotes, extract it
                             name = parts[2].strip('"')
                             physical_groups[tag] = {'dim': dim, 'name': name}
                         i += 1
@@ -4392,6 +4507,7 @@ except Exception as e:
 
             if line == "$Nodes":
                 i += 1
+<<<<<<< Updated upstream
                 if i >= len(lines): break
                 
                 if version < 3.0:
@@ -4482,38 +4598,101 @@ except Exception as e:
                             entity_tag = int(parts[1])  # Entity tag (maps to CAD surface)
                             element_type = int(parts[2])
                             num_elements_in_block = int(parts[3])
+=======
+                if i >= len(lines):
+                    break
+                # Gmsh 4.x: numEntityBlocks, then per block: entityDim entityTag parametric numNodes, then numNodes lines of nodeId x y z
+                try:
+                    num_blocks = int(lines[i])
+                    i += 1
+                    for _ in range(num_blocks):
+                        if i >= len(lines):
+                            break
+                        block_parts = lines[i].split()
+                        if len(block_parts) >= 4:
+                            num_nodes_in_block = int(block_parts[3])
+>>>>>>> Stashed changes
                             i += 1
-                            
-                            type_str = None
-                            expected_nodes = 0
-                            if element_type == 2: type_str = "triangle"; expected_nodes = 3
-                            elif element_type == 3: type_str = "quadrilateral"; expected_nodes = 4
-                            elif element_type == 4: type_str = "tetrahedron"; expected_nodes = 4
-                            elif element_type == 5: type_str = "hexahedron"; expected_nodes = 8
-                            elif element_type == 11: type_str = "tetrahedron"; expected_nodes = 4
-                                
-                            if type_str:
-                                for _ in range(num_elements_in_block):
-                                    data = lines[i].split()
-                                    if len(data) >= 1 + expected_nodes:
-                                        eid = int(data[0])
-                                        enodes = [int(x) for x in data[1:1+expected_nodes]]
-                                        elem_dict = {"id": eid, "type": type_str, "nodes": enodes}
-                                        # Store entity_tag for CAD-level zone selection
-                                        if entity_dim == 2:  # Surface elements only
-                                            elem_dict['entity_tag'] = entity_tag
-                                        elements.append(elem_dict)
-                                    i += 1
-                            else:
-                                i += num_elements_in_block
+                            for _ in range(num_nodes_in_block):
+                                if i >= len(lines):
+                                    break
+                                parts = lines[i].split()
+                                if len(parts) >= 4:
+                                    node_id = int(parts[0])
+                                    nodes[node_id] = [float(parts[1]), float(parts[2]), float(parts[3])]
+                                i += 1
                         else:
                             i += 1
-                    if i < len(lines) and lines[i] == "$EndElements":
+                except (ValueError, IndexError):
+                    # Fallback: advance to $EndNodes
+                    while i < len(lines) and lines[i] != "$EndNodes":
+                        parts = lines[i].split()
+                        if len(parts) >= 4:
+                            try:
+                                node_id = int(parts[0])
+                                nodes[node_id] = [float(parts[1]), float(parts[2]), float(parts[3])]
+                            except (ValueError, IndexError):
+                                pass
                         i += 1
-                    continue
+                while i < len(lines) and lines[i] != "$EndNodes":
+                    i += 1
+                if i < len(lines):
+                    i += 1
+                continue
 
-            else:
+            if line == "$Elements":
                 i += 1
+                if i >= len(lines):
+                    break
+                while i < len(lines) and lines[i] != "$EndElements":
+                    parts = lines[i].split()
+                    if len(parts) == 4:
+                        entity_dim = int(parts[0])
+                        entity_tag = int(parts[1])
+                        element_type = int(parts[2])
+                        num_elements_in_block = int(parts[3])
+                        i += 1
+
+                        type_str = None
+                        expected_nodes = 0
+                        if element_type == 2:
+                            type_str = "triangle"
+                            expected_nodes = 3
+                        elif element_type == 3:
+                            type_str = "quadrilateral"
+                            expected_nodes = 4
+                        elif element_type == 4:
+                            type_str = "tetrahedron"
+                            expected_nodes = 4
+                        elif element_type == 5:
+                            type_str = "hexahedron"
+                            expected_nodes = 8
+                        elif element_type == 11:
+                            type_str = "tetrahedron"
+                            expected_nodes = 4
+
+                        if type_str:
+                            for _ in range(num_elements_in_block):
+                                if i >= len(lines):
+                                    break
+                                data = lines[i].split()
+                                if len(data) >= 1 + expected_nodes:
+                                    eid = int(data[0])
+                                    enodes = [int(x) for x in data[1:1+expected_nodes]]
+                                    elem_dict = {"id": eid, "type": type_str, "nodes": enodes}
+                                    if entity_dim == 2:
+                                        elem_dict['entity_tag'] = entity_tag
+                                    elements.append(elem_dict)
+                                i += 1
+                        else:
+                            i += num_elements_in_block
+                    else:
+                        i += 1
+                if i < len(lines) and lines[i] == "$EndElements":
+                    i += 1
+                continue
+
+            i += 1
 
         return nodes, elements, physical_groups
     def load_component_visualization(self, result: Dict):
