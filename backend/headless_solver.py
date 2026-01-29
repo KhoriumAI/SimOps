@@ -11,24 +11,63 @@ import numpy as np
 
 
 def _write_vtk_geometry(path: str, points: np.ndarray, cells: np.ndarray, is_triangle: bool) -> None:
-    """Write legacy VTK unstructured grid (geometry only). No meshio."""
-    npts, nc = len(points), len(cells)
-    nv = 3 if is_triangle else 4
-    vtk_type = 5 if is_triangle else 10  # 5=triangle, 10=tetra
+    """
+    Write legacy VTK POLYDATA (surface mesh) for frontend preview.
+    Converts tets to surface triangles if needed.
+    """
+    npts = len(points)
+    
+    # If we have triangles, use them directly
+    if is_triangle:
+        nc = len(cells)
+        with open(path, "w") as f:
+            f.write("# vtk DataFile Version 3.0\nSimOps Preview\nASCII\n")
+            f.write("DATASET POLYDATA\n")
+            f.write(f"POINTS {npts} float\n")
+            for i in range(npts):
+                p = points[i]
+                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+            f.write(f"\nPOLYGONS {nc} {nc * 4}\n")  # 3 vertices + 1 count per triangle
+            for i in range(nc):
+                c = cells[i]
+                f.write(f"3 {' '.join(str(int(x)) for x in c[:3])}\n")
+        return
+    
+    # For tets, extract surface triangles
+    # Simple approach: collect all faces and keep only unique ones
+    faces = {}
+    for tet in cells:
+        # Each tet has 4 faces: (0,1,2), (0,1,3), (0,2,3), (1,2,3)
+        face_indices = [
+            (tet[0], tet[1], tet[2]),
+            (tet[0], tet[1], tet[3]),
+            (tet[0], tet[2], tet[3]),
+            (tet[1], tet[2], tet[3]),
+        ]
+        for face in face_indices:
+            # Normalize face order (smallest index first, then sort remaining)
+            sorted_face = tuple(sorted(face))
+            # Track both orientations to detect interior faces
+            if sorted_face in faces:
+                # This face appears twice (interior), remove it
+                del faces[sorted_face]
+            else:
+                # Store original orientation for exterior face
+                faces[sorted_face] = face
+    
+    # Write POLYDATA with surface triangles
+    surface_tris = list(faces.values())
+    nc = len(surface_tris)
     with open(path, "w") as f:
         f.write("# vtk DataFile Version 3.0\nSimOps Preview\nASCII\n")
-        f.write("DATASET UNSTRUCTURED_GRID\n")
+        f.write("DATASET POLYDATA\n")
         f.write(f"POINTS {npts} float\n")
         for i in range(npts):
             p = points[i]
             f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
-        f.write(f"\nCELLS {nc} {nc * (nv + 1)}\n")
-        for i in range(nc):
-            c = cells[i]
-            f.write(f"{nv} {' '.join(str(int(x)) for x in c[:nv])}\n")
-        f.write(f"\nCELL_TYPES {nc}\n")
-        for _ in range(nc):
-            f.write(f"{vtk_type}\n")
+        f.write(f"\nPOLYGONS {nc} {nc * 4}\n")
+        for tri in surface_tris:
+            f.write(f"3 {tri[0]} {tri[1]} {tri[2]}\n")
 
 
 def _parse_msh_ascii_fallback(msh_path: str) -> tuple:
